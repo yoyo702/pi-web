@@ -1,7 +1,7 @@
 import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
-import { existsSync, writeFileSync } from "fs";
+import { existsSync, statSync, writeFileSync } from "fs";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
@@ -122,6 +122,12 @@ export class AgentSessionWrapper {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
   private _alive = true;
+  // Last session-file mtime this wrapper is known to be in sync with. Used to
+  // detect edits made by another process (e.g. the terminal `pi`) to the same
+  // session file, so we can reload before appending and avoid branching off a
+  // stale in-memory tip. Captured after our own writes so they don't count as
+  // external edits.
+  private lastKnownMtimeMs = 0;
 
   constructor(public readonly inner: AgentSessionLike) {}
 
@@ -145,7 +151,9 @@ export class AgentSessionWrapper {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.resetIdleTimer();
       if (event.type === "agent_end") {
+        this.promptRunning = false;
         invalidateSessionListCache();
+        this.captureFileMtime();
       }
       this.emit(event);
       // Streaming / compaction / tool events flow through here; re-broadcast
@@ -153,7 +161,56 @@ export class AgentSessionWrapper {
       notifyRunningChange();
     });
     this.resetIdleTimer();
+    this.captureFileMtime();
     notifyRunningChange();
+  }
+
+  // Record the current on-disk mtime as "ours", so subsequent external edits
+  // stand out. Best-effort: a missing/unreadable file simply leaves it at 0.
+  private captureFileMtime(): void {
+    try {
+      const f = this.inner.sessionFile;
+      if (f) this.lastKnownMtimeMs = statSync(f).mtimeMs;
+    } catch {
+      // ignore — treated as "unknown", never blocks a prompt.
+    }
+  }
+
+  // If the session file was modified by another process since our last write,
+  // reload from disk so a new prompt appends to the real tip instead of
+  // forking off a stale in-memory branch (which makes external messages look
+  // "lost" in the linear view). Only meaningful when idle.
+  private async reloadIfChangedExternally(): Promise<void> {
+    const f = this.inner.sessionFile;
+    if (!f) return;
+    let onDiskMtimeMs = 0;
+    try {
+      onDiskMtimeMs = statSync(f).mtimeMs;
+    } catch {
+      return;
+    }
+    if (this.lastKnownMtimeMs === 0) {
+      this.lastKnownMtimeMs = onDiskMtimeMs;
+      return;
+    }
+    // Our own trailing writes can nudge mtime by a few ms; require a clear gap
+    // so we only reload for genuine external edits. Missing a reload branches
+    // the tree, so bias toward reloading with a small threshold.
+    if (onDiskMtimeMs - this.lastKnownMtimeMs > 500) {
+      await this.performReload();
+    }
+  }
+
+  private async performReload(): Promise<void> {
+    await this.waitForExtensionsBound();
+    this.extensionStatuses.clear();
+    this.extensionWidgets.clear();
+    await this.inner.reload();
+    if (typeof this.inner.bindExtensions !== "function") {
+      this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
+    }
+    this.applyForcedEmptySystemPrompt();
+    this.captureFileMtime();
   }
 
   setForceEmptySystemPrompt(force: boolean): void {
@@ -317,6 +374,10 @@ export class AgentSessionWrapper {
         if (this.inner.isBashRunning) {
           throw new Error("Cannot send a prompt while a shell command is running");
         }
+        // Another process (e.g. terminal `pi`) may have appended to this same
+        // session file while it sat idle here. Reload first so the new prompt
+        // attaches to the real tip instead of forking off a stale branch.
+        await this.reloadIfChangedExternally();
         // Fire and forget — events come via subscribe
         const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
@@ -327,25 +388,37 @@ export class AgentSessionWrapper {
           ...(streamingBehavior ? { streamingBehavior } : {}),
           source: "rpc",
         }).then(() => {
+          const wasPromptRunning = this.promptRunning;
           this.promptRunning = false;
-          if (!streamingBehavior) this.emit({ type: "prompt_done" });
+          if (!streamingBehavior && wasPromptRunning) this.emit({ type: "prompt_done" });
           notifyRunningChange();
         }).catch((error) => {
+          const wasPromptRunning = this.promptRunning;
           this.promptRunning = false;
           invalidateSessionListCache();
-          this.emit({
-            type: "prompt_error",
-            errorMessage: error instanceof Error ? error.message : String(error),
-          });
-          if (!streamingBehavior) this.emit({ type: "prompt_done" });
+          if (wasPromptRunning) {
+            this.emit({
+              type: "prompt_error",
+              errorMessage: error instanceof Error ? error.message : String(error),
+            });
+          }
+          if (!streamingBehavior && wasPromptRunning) this.emit({ type: "prompt_done" });
           notifyRunningChange();
         });
         return null;
       }
 
-      case "abort":
-        await this.withFinalRunningNotification(() => this.inner.abort());
+      case "abort": {
+        const wasPromptRunning = this.promptRunning;
+        try {
+          await this.withFinalRunningNotification(() => this.inner.abort());
+        } finally {
+          this.promptRunning = false;
+          if (wasPromptRunning) this.emit({ type: "prompt_done" });
+          notifyRunningChange();
+        }
         return null;
+      }
 
       case "get_state": {
         const model = this.inner.model;
@@ -548,14 +621,7 @@ export class AgentSessionWrapper {
       }
 
       case "reload": {
-        await this.waitForExtensionsBound();
-        this.extensionStatuses.clear();
-        this.extensionWidgets.clear();
-        await this.inner.reload();
-        if (typeof this.inner.bindExtensions !== "function") {
-          this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
-        }
-        this.applyForcedEmptySystemPrompt();
+        await this.performReload();
         return { success: true };
       }
 

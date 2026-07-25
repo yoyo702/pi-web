@@ -29,6 +29,8 @@ interface Props {
   onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
+  onOpenGitReview?: () => void;
+  gitReviewOpen?: boolean;
 }
 
 interface WorktreeEntry {
@@ -322,7 +324,7 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onOpenGitReview, gitReviewOpen }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1444,6 +1446,32 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               </svg>
               Explorer
             </button>
+            {worktreeState?.isGit && onOpenGitReview && (
+              <button
+                onClick={onOpenGitReview}
+                title={gitReviewOpen ? "Close Git Review" : "Open Git Review"}
+                aria-label={gitReviewOpen ? "Close Git Review" : "Open Git Review"}
+                aria-pressed={gitReviewOpen}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 26, height: 26, padding: 0,
+                  background: gitReviewOpen ? "var(--bg-selected)" : "none",
+                  border: "none",
+                  color: gitReviewOpen ? "var(--accent)" : "var(--text-dim)",
+                  cursor: "pointer",
+                  borderRadius: 5,
+                  flexShrink: 0,
+                  transition: "color 0.3s, background 0.3s",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = gitReviewOpen ? "var(--accent)" : "var(--text-muted)"; e.currentTarget.style.background = "var(--bg-hover)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = gitReviewOpen ? "var(--accent)" : "var(--text-dim)"; e.currentTarget.style.background = gitReviewOpen ? "var(--bg-selected)" : "none"; }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="12" cy="18" r="2" />
+                  <path d="M8 6h8M6 8v4a6 6 0 0 0 6 6M18 8v4a6 6 0 0 1-6 6" />
+                </svg>
+              </button>
+            )}
             {explorerOpen && (
               <button
                 onClick={() => fileExplorerRef.current?.openUploadPicker()}

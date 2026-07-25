@@ -56,6 +56,10 @@ const CHAT_INPUT_RIGHT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;
 
 function hasFinalAssistantAnswer(message: AgentMessage): boolean {
   if (message.role !== "assistant") return false;
+  // A failed turn carries its error on `errorMessage` (usually with empty
+  // content). Treat it as the final answer so the error surfaces instead of
+  // being folded away into an empty/collapsed group.
+  if ((message as AssistantMessage).errorMessage) return true;
   return splitFinalAssistantBlocks(message as AssistantMessage).answerBlocks.some((block) => (
     block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
   ));
@@ -627,7 +631,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 const finalProcessMessage = finalSplit.processBlocks.length > 0
                   ? withAssistantBlocks(finalAssistant, finalSplit.processBlocks, { omitUsage: true })
                   : null;
-                const finalAnswerMessage = finalSplit.answerBlocks.length > 0
+                const finalAnswerMessage = finalSplit.answerBlocks.length > 0 || finalAssistant.errorMessage
                   ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
                   : null;
 

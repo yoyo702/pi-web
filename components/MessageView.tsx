@@ -83,6 +83,29 @@ function formatTime(ts?: number): string | null {
   return `${date} ${time}`;
 }
 
+// Provider/API failures are stored on the assistant message as `errorMessage`
+// (with stopReason === "error" and usually empty content). Try to surface a
+// readable message, falling back to the raw string.
+function formatErrorMessage(raw: string): string {
+  if (!raw) return "Unknown error";
+  // Provider errors often look like: `400 {"type":"error","error":{...}}`
+  const braceIdx = raw.indexOf("{");
+  if (braceIdx !== -1) {
+    const prefix = raw.slice(0, braceIdx).trim();
+    try {
+      const parsed = JSON.parse(raw.slice(braceIdx)) as {
+        error?: { message?: string; type?: string };
+        message?: string;
+      };
+      const inner = parsed.error?.message ?? parsed.message;
+      if (inner) return prefix ? `${prefix} ${inner}` : inner;
+    } catch {
+      // fall through to raw
+    }
+  }
+  return raw;
+}
+
 function haveSameRelevantToolResults(
   message: AgentMessage,
   previous: Map<string, ToolResultMessage> | undefined,
@@ -467,7 +490,7 @@ function AssistantMessageView({
     return () => clearInterval(id);
   }, [isStreaming]);
 
-  if (blocks.length === 0 && !isStreaming) return null;
+  if (blocks.length === 0 && !isStreaming && !message.errorMessage) return null;
 
   return (
     <div
@@ -528,6 +551,28 @@ function AssistantMessageView({
           <BlockView key={`${entryId ?? "stream"}-${originalIndex}`} block={block} toolResults={toolResults} isStreaming={isStreaming} streamingDuration={streamingDurations.get(originalIndex) ?? (block.type === "thinking" ? thinkingDurationFromFile : undefined)} toolCallDurations={toolCallDurations} cwd={cwd} onOpenFile={onOpenFile} sessionId={sessionId} entryId={entryId} blockIndex={originalIndex} />
         ))}
       </div>
+
+      {message.errorMessage && (
+        <div
+          role="alert"
+          style={{
+            marginTop: blockItems.length ? 8 : 0,
+            padding: "8px 12px",
+            borderRadius: 6,
+            border: "1px solid #e01a4f",
+            background: "rgba(224, 26, 79, 0.08)",
+            color: "#e01a4f",
+            fontSize: 12.5,
+            lineHeight: 1.5,
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-word",
+            fontFamily: "var(--font-mono)",
+          }}
+        >
+          <div style={{ fontWeight: 600, marginBottom: 2 }}>Request failed</div>
+          {formatErrorMessage(message.errorMessage)}
+        </div>
+      )}
 
       <div style={{
         display: "flex", alignItems: "center", gap: 8, marginTop: 4,

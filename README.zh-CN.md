@@ -77,6 +77,7 @@ npx @agegr/pi-web@latest
 - **文件访问**：文件浏览和预览面向当前选择的项目目录，以及会话中已出现过的工作目录。
 - **Git worktree**：什么时候显示切换器、新建目录在哪里、删除会影响什么，见 [Pi Web 里的 Worktree](./docs/worktrees.zh-CN.md)。
 - **Fork 与会话内分支不同**：Fork 会创建新的 `.jsonl` 文件；“Edit from here” 是同一会话文件里的分支。
+- **消息同步**：Pi Web 和终端 `pi` 共用同一批会话文件。哪些内容会自动刷新、以及唯一需要避免的场景，见 [Pi Web 里的消息同步](./docs/sync.zh-CN.md)。
 
 ## 开发
 

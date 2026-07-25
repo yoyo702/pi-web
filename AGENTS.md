@@ -42,6 +42,7 @@ app/api/
   sessions/route.ts               GET  list all sessions
   sessions/[id]/route.ts          GET/PATCH/DELETE session
   sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
+  sessions/[id]/meta/route.ts     GET cheap stat() probe { modified, size }
   sessions/[id]/export/route.ts   GET exported HTML for a session
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any command
@@ -141,6 +142,16 @@ On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming ==
 ### Compaction SSE events
 Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `auto_compaction_start` / `auto_compaction_end`. `handleAgentEvent` accepts both sets to keep `isCompacting` in sync. Manual compact is a blocking POST — the button stays disabled until the response returns.
 
+### Cross-process session sync (terminal `pi` ↔ Pi Web)
+The same `.jsonl` can be edited by the terminal `pi` while it sits idle in the browser. There is no shared live channel, so:
+- **Read**: when the tab regains focus/visibility *and* on a low-frequency poll (`IDLE_SESSION_POLL_MS`, visible + idle only), `useAgentSession` hits `GET /api/sessions/[id]/meta` (a single `stat()`, no parse). Only if `modified` differs from the last-loaded value does it do a full `loadSession` to the current tip. This keeps refreshes flicker-free when nothing changed. `lastLoadedModifiedRef` tracks the loaded mtime; `loadSession` sets it from the `modified` field the detail route already returns.
+- **AppShell external refresh**: git panel + file tree + open-file diffs (`explorerRefreshKey`) and the session list (`refreshKey`) are bumped on tab focus and on a 20s visible-only poll, throttled to 1.5s. The file-content viewer already live-syncs via its own `fs.watch` SSE, so it is excluded.
+- **Write**: `AgentSessionWrapper` caches `lastKnownMtimeMs` (captured on `start`/`agent_end`/`reload`). Before a `prompt`, `reloadIfChangedExternally()` reloads the in-process session if the on-disk mtime jumped >500ms past our last write — otherwise a stale in-memory tip would fork the tree and make external messages look "lost" in the linear view.
+- **Hard limit**: pi session files are single-writer. Simultaneous prompts from both sides can still fork; the guards only cover "edit one side, then switch".
+
+### Failure turns surface as assistant `errorMessage`, not a rejected prompt
+Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's `handleRunFailure` emits a normal assistant message with empty content, `stopReason: "error"`, and `errorMessage`, then resolves — so `rpc-manager` emits `prompt_done`, never `prompt_error`. The error lives on the message. `MessageView` renders a red "Request failed" banner (via `formatErrorMessage()`), and both the `blocks.length === 0` null-guard and `ChatWindow`'s group/final-answer split are relaxed so an empty-content error message is never folded away.
+
 ### Running state SSE + reconciliation
 - The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
 - `useAgentSession` still treats per-session SSE as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
@@ -202,3 +213,10 @@ Location: `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`
 --accent --user-bg --tool-bg
 --font-mono
 ```
+
+### Resizable panels
+- `AppShell` makes the sidebar and right panel drag-resizable. Widths live in React state and are pushed to the layout root as `--sidebar-w` / `--right-panel-w`; `app/globals.css` reads them via `width: var(--sidebar-w, 260px)` / `var(--right-panel-w, 42vw)` so an unset value keeps the original default.
+- Drag handles are `.resize-handle` flex siblings between panels (desktop only). While dragging, the root gets `.layout-resizing` to disable the width transition so it tracks the cursor; final widths persist to `localStorage` (`pi-sidebar-w`, `pi-right-panel-w`).
+- The collapsed states still use the `.sidebar-closed` / `.right-panel-closed` classes (explicit `width: 0`), which override the variable, so open/close animations are unaffected.
+- The center chat column can also be collapsed (a "focus the panel" mode) with the chevron button in the right-panel header. `chatHidden = chatCollapsed && rightPanelOpen && !isMobile` hides the center (`display:none`) and adds `.right-panel-full` so the panel fills the row; a sidebar-toggle button appears in the panel header while collapsed since the center top bar is hidden. Closing the right panel resets `chatCollapsed`.
+- Inside `GitReviewPanel`, the Changes and History views (file list ↔ diff / commit list ↔ detail) and the commit-detail file-list height are also drag-resizable via the `useSplit(storageKey, default, min, max, axis)` hook. It stores each pane size in `localStorage` and reuses the same `.resize-handle` (vertical, `col-resize`) / `.resize-handle--h` (horizontal, `row-resize`) grips.

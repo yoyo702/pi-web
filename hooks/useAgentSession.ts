@@ -19,6 +19,7 @@ export interface SessionData {
   filePath: string;
   tree: SessionTreeNode[];
   leafId: string | null;
+  modified?: string;
   context: {
     messages: AgentMessage[];
     entryIds: string[];
@@ -86,6 +87,27 @@ export interface QueuedMessages {
 
 function normalizeQueuedMessages(q?: { steering?: string[]; followUp?: string[] } | null): QueuedMessages {
   return { steering: q?.steering ?? [], followUp: q?.followUp ?? [] };
+}
+const ACTIVE_LEAF_STORAGE_PREFIX = "pi-web:active-leaf:";
+
+function getStoredActiveLeafId(sessionId: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(`${ACTIVE_LEAF_STORAGE_PREFIX}${sessionId}`);
+  } catch {
+    return null;
+  }
+}
+
+function rememberActiveLeafId(sessionId: string, leafId: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    const key = `${ACTIVE_LEAF_STORAGE_PREFIX}${sessionId}`;
+    if (leafId) window.localStorage.setItem(key, leafId);
+    else window.localStorage.removeItem(key);
+  } catch {
+    // Ignore storage quota / privacy-mode errors.
+  }
 }
 
 type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
@@ -160,6 +182,10 @@ const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
 const PROMPT_SETTLE_POLL_MS = 600;
 const PROMPT_SETTLE_MAX_MS = 20_000;
 const AGENT_STATE_RECONCILE_MS = 15_000;
+// Low-frequency poll to catch external (terminal `pi`) edits while a session
+// sits idle and visible. Backed by the cheap /meta stat probe, so it only
+// triggers a full reload when the file actually changed.
+const IDLE_SESSION_POLL_MS = 15_000;
 const BASH_STATE_RECONCILE_MS = 1_000;
 const EVENT_STREAM_CONNECT_TIMEOUT_MS = 5_000;
 const MAX_NOTICES = 5;
@@ -372,6 +398,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const agentRunningRef = useRef(false);
   const bashRunningRef = useRef(false);
+  // On-disk mtime of the last-loaded session context; lets the focus probe
+  // skip a full reload when the file is unchanged.
+  const lastLoadedModifiedRef = useRef<string | null>(null);
   const bashRecoveryIdRef = useRef(0);
   const handleAgentEventRef = useRef<((event: AgentEvent) => void) | null>(null);
   const initialScrollDoneRef = useRef(false);
@@ -432,11 +461,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, contextUsage, data?.filePath, session?.id, session?.name]);
 
-  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false) => {
+  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, options?: { preferStoredLeaf?: boolean }) => {
     let messagesLoaded = false;
     try {
       if (showLoading) setLoading(true);
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+      if (options?.preferStoredLeaf !== false) {
+        const storedLeafId = getStoredActiveLeafId(sid);
+        if (storedLeafId) params.set("leafId", storedLeafId);
+      }
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}?${params}`);
       if (res.status === 404) {
         if (showLoading) {
@@ -450,8 +483,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as SessionData;
       if (sessionIdRef.current !== sid) return null;
+      // Remember the on-disk signature we just loaded so the focus probe can
+      // skip redundant full reloads when nothing changed.
+      if (d.modified) lastLoadedModifiedRef.current = d.modified;
       setData(d);
       setActiveLeafId(d.leafId);
+      rememberActiveLeafId(sid, d.leafId);
       setMessages(d.context.messages);
       setEntryIds(d.context.entryIds ?? []);
       setCurrentModelOverride(null);
@@ -747,7 +784,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // must not overwrite the messages of the run currently streaming.
     if (runId !== undefined && promptRunIdRef.current !== runId) return;
     try {
-      if (sid) await loadSession(sid);
+      if (sid) await loadSession(sid, false, false, { preferStoredLeaf: false });
     } finally {
       if (runId !== undefined && promptRunIdRef.current !== runId) return;
       optimisticUserMessageKeyRef.current = null;
@@ -873,6 +910,58 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [agentRunning, reconcileAgentState]);
 
+  // The same session can be edited from the terminal `pi` while it sits idle in
+  // the browser. There is no cross-process live channel, so when the tab
+  // regains focus we reload the session from disk (its current tip) to pick up
+  // any entries appended externally. Guarded to idle only: never clobber an
+  // active run's optimistic/streaming state. Skipped while a run is active
+  // because the reconcile loop above already keeps that case fresh.
+  useEffect(() => {
+    if (agentRunning) return;
+    let inFlight = false;
+    const refreshFromDisk = async () => {
+      if (inFlight || agentRunningRef.current || bashRunningRef.current) return;
+      const sid = sessionIdRef.current;
+      if (!sid) return;
+      inFlight = true;
+      try {
+        // Cheap freshness probe first: a single stat(), no parse. Only pay for
+        // a full context reload (+ full message re-render) when the file
+        // actually changed on disk since we last loaded it.
+        const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/meta`);
+        if (!res.ok) return;
+        const meta = await res.json() as { modified?: string };
+        if (sessionIdRef.current !== sid) return;
+        if (agentRunningRef.current || bashRunningRef.current) return;
+        if (meta.modified && meta.modified === lastLoadedModifiedRef.current) return;
+        await loadSession(sid, false, false, { preferStoredLeaf: false });
+      } catch {
+        // Offline / transient — the next focus retries.
+      } finally {
+        inFlight = false;
+      }
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refreshFromDisk();
+    };
+    const onFocus = () => void refreshFromDisk();
+    // Low-frequency safety net: even without a focus change, poll the cheap
+    // meta probe while the tab is visible so an idle session still catches up
+    // to external edits. The probe only triggers a full reload when the file
+    // actually changed, so this stays cheap.
+    const poll = () => {
+      if (document.visibilityState === "visible") void refreshFromDisk();
+    };
+    const interval = setInterval(poll, IDLE_SESSION_POLL_MS);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [agentRunning, loadSession]);
+
   useEffect(() => {
     agentRunningRef.current = agentRunning;
   }, [agentRunning]);
@@ -895,7 +984,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setRetryInfo(null);
         dispatch({ type: "end" });
         if (sessionIdRef.current) {
-          loadSession(sessionIdRef.current);
+          loadSession(sessionIdRef.current, false, false, { preferStoredLeaf: false });
           fetch(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`)
             .then((r) => r.json())
             .then((d: { state?: AgentStateResponse }) => {
@@ -1198,6 +1287,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!sid) return;
     sendAgentCommand(sid, { type: "navigate_tree", targetId: entryId }).catch(() => {});
     setActiveLeafId(entryId);
+    rememberActiveLeafId(sid, entryId);
     await loadContext(sid, entryId);
   }, [loadContext]);
 
@@ -1206,6 +1296,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setActiveLeafId(leafId);
     const sid = sessionIdRef.current;
     if (!sid) return;
+    rememberActiveLeafId(sid, leafId);
     await loadContext(sid, leafId);
     if (leafId) {
       sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId }).catch(() => {});
@@ -1213,6 +1304,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [loadContext]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
+    const modelLabel = `${provider}/${modelId}`;
     if (isNew) {
       setNewSessionModel({ provider, modelId });
       setPendingModel({ provider, modelId });
@@ -1221,7 +1313,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       try {
         await sendAgentCommand(sid, { type: "set_model", provider, modelId });
       } catch (e) {
+        setPendingModel(null);
+        const detail = e instanceof Error ? e.message : String(e);
         console.error("Failed to set model:", e);
+        addNotice({
+          type: "error",
+          message: `Could not switch to ${modelLabel}: ${detail}`,
+        });
       }
       return;
     }
@@ -1231,9 +1329,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
       setCurrentModelOverride({ provider, modelId });
     } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
       console.error("Failed to set model:", e);
+      addNotice({
+        type: "error",
+        message: `Could not switch to ${modelLabel}: ${detail}`,
+      });
     }
-  }, [isNew, setNewSessionModel]);
+  }, [addNotice, isNew, setNewSessionModel]);
 
   const handleCompact = useCallback(async () => {
     const sid = sessionIdRef.current;

@@ -125,10 +125,14 @@ export async function GET(
     }
 
     const sm = SessionManager.open(filePath);
-    const entries = sm.getEntries() as never;
-    const leafId = sm.getLeafId();
-    const tree = projectTreeForResponse(sm.getTree());
+    const entries = sm.getEntries() as Array<{ id: string }> as never;
+    const latestLeafId = sm.getLeafId();
     const searchParams = new URL(req.url).searchParams;
+    const requestedLeafId = searchParams.get("leafId");
+    const leafId = requestedLeafId && (entries as Array<{ id: string }>).some((entry) => entry.id === requestedLeafId)
+      ? requestedLeafId
+      : latestLeafId;
+    const tree = projectTreeForResponse(sm.getTree());
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
     const context = buildSessionContext(entries, leafId, { deferThinking, deferToolResultImages });

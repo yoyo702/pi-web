@@ -81,6 +81,7 @@ npx @agegr/pi-web@latest
 - **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions.
 - **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for when the switcher appears, how new worktrees are created, and what removal does.
 - **Forks vs in-session branches**: Fork creates a new `.jsonl` file. "Edit from here" creates another branch inside the same session file.
+- **Staying in sync**: Pi Web and the terminal `pi` share the same session files. See [Staying in Sync](./docs/sync.md) for what refreshes automatically and the one case to avoid.
 
 ## Development
 
