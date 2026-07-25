@@ -852,8 +852,8 @@ span.linenumber {
     transition: width 0.2s ease, min-width 0.2s ease;
   }
   .sidebar-container.sidebar-open {
-    width: 260px;
-    min-width: 260px;
+    width: var(--sidebar-w, 260px);
+    min-width: var(--sidebar-w, 260px);
   }
   .sidebar-container.sidebar-closed {
     width: 0;
@@ -862,8 +862,101 @@ span.linenumber {
   }
   /* keep inner content at fixed width so it doesn't reflow during animation */
   .sidebar-container > * {
-    width: 260px;
-    min-width: 260px;
+    width: var(--sidebar-w, 260px);
+    min-width: var(--sidebar-w, 260px);
+  }
+}
+
+/* Draggable split handles (panel edges + in-panel column/row splits) */
+.resize-handle {
+  position: relative;
+  flex: 0 0 6px;
+  align-self: stretch;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 201;
+  transition: background 0.15s ease;
+}
+
+/* Outer sidebar/right-panel rails must be obvious and easy to grab. */
+.resize-handle--panel {
+  flex-basis: 10px;
+  z-index: 202;
+  background: rgba(127, 127, 127, 0.18);
+  box-shadow: inset 1px 0 rgba(255, 255, 255, 0.10), inset -1px 0 rgba(0, 0, 0, 0.18);
+}
+.resize-handle--panel::before {
+  left: -6px;
+  right: -6px;
+}
+.resize-handle--panel::after {
+  width: 3px;
+  height: 72px;
+  background: var(--text-muted);
+  box-shadow: 0 0 0 1px var(--bg);
+}
+.resize-handle--panel:hover,
+.layout-resizing .resize-handle--panel {
+  background: color-mix(in srgb, var(--accent) 28%, rgba(127, 127, 127, 0.18));
+}
+/* Widen the invisible grab zone beyond the 6px visual strip. */
+.resize-handle::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+}
+/* Always-visible grip pill so the handle is discoverable. */
+.resize-handle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 4px;
+  height: 36px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--text-dim) 55%, transparent);
+  transition: background 0.15s ease, height 0.15s ease, width 0.15s ease;
+}
+.resize-handle:hover {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.resize-handle:hover::after,
+.layout-resizing .resize-handle::after,
+.resize-handle:active::after {
+  background: var(--accent);
+  height: 52px;
+}
+/* Horizontal (row) divider variant for vertical splits. */
+.resize-handle--h {
+  cursor: row-resize;
+}
+.resize-handle--h::before {
+  top: -4px;
+  bottom: -4px;
+  left: 0;
+  right: 0;
+}
+.resize-handle--h::after {
+  width: 36px;
+  height: 4px;
+}
+.resize-handle--h:hover::after,
+.resize-handle--h:active::after {
+  width: 52px;
+  height: 4px;
+}
+
+@media (min-width: 641px) {
+  /* No width animation while actively dragging, so it tracks the cursor. */
+  .layout-resizing .sidebar-container,
+  .layout-resizing .sidebar-container > *,
+  .layout-resizing .right-panel-container,
+  .layout-resizing .right-panel-container > * {
+    transition: none !important;
   }
 }
 
@@ -876,7 +969,7 @@ span.linenumber {
     flex-shrink: 0;
   }
   .right-panel-container.right-panel-open {
-    width: 42%;
+    width: var(--right-panel-w, 42vw);
     min-width: 300px;
   }
   .right-panel-container.right-panel-closed {
@@ -886,8 +979,18 @@ span.linenumber {
   }
   /* keep inner content at fixed width so it doesn't reflow during animation */
   .right-panel-container > * {
-    width: 42vw;
+    width: var(--right-panel-w, 42vw);
     min-width: 300px;
+  }
+  /* While chat is hidden, the right panel consumes its former flex slot. */
+  .right-panel-container.right-panel-full {
+    flex: 1 1 0%;
+    width: auto !important;
+    min-width: 0 !important;
+  }
+  .right-panel-container.right-panel-full > * {
+    width: auto !important;
+    min-width: 0 !important;
   }
 }
 

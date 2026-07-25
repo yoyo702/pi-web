@@ -6,6 +6,7 @@ import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
+import { GitReviewPanel } from "./GitReviewPanel";
 import { TabBar, type Tab } from "./TabBar";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
@@ -146,11 +147,105 @@ export function AppShell() {
     return () => ro.disconnect();
   }, [activeTopPanel]);
 
-  // Right panel — file tabs only
+  // Right panel tabs: file viewers and the Git Review panel.
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  // Collapse the center chat column to give the right panel the full width
+  // (a "focus the file/git view" mode). Only meaningful while the right panel
+  // is open, so reopening later never leaves both main columns hidden.
+  const [chatCollapsed, setChatCollapsed] = useState(false);
+  useEffect(() => { if (!rightPanelOpen) setChatCollapsed(false); }, [rightPanelOpen]);
 
+  // Resizable panels. null means "use the CSS default" (260px / 42vw) so the
+  // first paint matches the old layout; localStorage rehydrates saved widths.
+  const [sidebarWidth, setSidebarWidth] = useState<number | null>(null);
+  const [rightPanelWidth, setRightPanelWidth] = useState<number | null>(null);
+  const [isResizing, setIsResizing] = useState(false);
+  useEffect(() => {
+    const s = Number(localStorage.getItem("pi-sidebar-w"));
+    if (Number.isFinite(s) && s >= 180 && s <= 640) setSidebarWidth(s);
+    const r = Number(localStorage.getItem("pi-right-panel-w"));
+    if (Number.isFinite(r) && r >= 320) setRightPanelWidth(Math.min(r, window.innerWidth - 200));
+  }, []);
+
+  // Generic edge-drag: `dir` is +1 when dragging the element's right edge
+  // (sidebar) and -1 when dragging its left edge (right panel).
+  const beginResize = useCallback((
+    dir: 1 | -1,
+    getStart: () => number,
+    setWidth: (w: number) => void,
+    storageKey: string,
+    clampMax: () => number,
+  ) => (event: React.MouseEvent) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startW = getStart();
+    setIsResizing(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    let latest = startW;
+    const onMove = (ev: MouseEvent) => {
+      latest = Math.min(clampMax(), Math.max(180, startW + dir * (ev.clientX - startX)));
+      setWidth(latest);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setIsResizing(false);
+      try { localStorage.setItem(storageKey, String(Math.round(latest))); } catch {}
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, []);
+
+  const beginSidebarResize = beginResize(
+    1,
+    () => sidebarWidth ?? 260,
+    setSidebarWidth,
+    "pi-sidebar-w",
+    () => 640,
+  );
+  const beginRightPanelResize = beginResize(
+    -1,
+    () => rightPanelWidth ?? Math.round(window.innerWidth * 0.42),
+    setRightPanelWidth,
+    "pi-right-panel-w",
+    () => window.innerWidth - 200,
+  );
+  // In focus mode the right panel fills the chat's old slot, so it no longer
+  // has an edge to resize. Dragging its visible left divider restores chat and
+  // continues as a normal right-panel resize in one gesture.
+  const restoreChatFromResize = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    const max = () => window.innerWidth - 200;
+    const startX = event.clientX;
+    const startW = Math.min(max(), Math.max(300, window.innerWidth - startX));
+    let latest = startW;
+    setChatCollapsed(false);
+    setRightPanelWidth(startW);
+    setIsResizing(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (moveEvent: MouseEvent) => {
+      latest = Math.min(max(), Math.max(300, startW - (moveEvent.clientX - startX)));
+      setRightPanelWidth(latest);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setIsResizing(false);
+      try { localStorage.setItem("pi-right-panel-w", String(Math.round(latest))); } catch {}
+    };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, []);
+
+  const chatHidden = chatCollapsed && rightPanelOpen && !isMobile;
   // Same @mention format as the chat input's @ autocomplete, so the agent's
   // read tool resolves it the same way (it strips the @ prefix).
   const handleAtMention = useCallback((relativePath: string, isDir: boolean) => {
@@ -345,6 +440,39 @@ export function AppShell() {
     setExplorerRefreshKey((k) => k + 1);
   }, []);
 
+  // Git status, the file tree, and open-file diffs are only bumped on our own
+  // agent_end and on manual actions. Work done outside Pi Web (terminal `pi`,
+  // a git commit/checkout, or editing files in another app) leaves them stale.
+  // Refresh those views (and the session list, so sessions created in the
+  // terminal appear) both when the tab regains focus and on a low-frequency
+  // poll while the tab is visible — a cheap safety net so idle tabs still catch
+  // up. Throttled so focus + poll don't double-fire or hammer `git status`.
+  const lastFocusRefreshRef = useRef(0);
+  useEffect(() => {
+    const EXTERNAL_POLL_MS = 20000;
+    const refreshExternal = () => {
+      const now = Date.now();
+      if (now - lastFocusRefreshRef.current < 1500) return;
+      lastFocusRefreshRef.current = now;
+      setExplorerRefreshKey((k) => k + 1);
+      setRefreshKey((k) => k + 1);
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refreshExternal();
+    };
+    const poll = () => {
+      if (document.visibilityState === "visible") refreshExternal();
+    };
+    const interval = setInterval(poll, EXTERNAL_POLL_MS);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", refreshExternal);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", refreshExternal);
+    };
+  }, []);
+
   const handleSessionForked = useCallback((newSessionId: string) => {
     setRefreshKey((k) => k + 1);
     setSessionKey((k) => k + 1);
@@ -380,7 +508,7 @@ export function AppShell() {
     const tabId = `file:${filePath}`;
     setFileTabs((prev) => {
       const existing = prev.find((t) => t.id === tabId);
-      if (!existing) return [...prev, { id: tabId, label: fileName, filePath, sourceSessionId }];
+      if (!existing) return [...prev, { id: tabId, label: fileName, kind: "file", filePath, sourceSessionId }];
       if (!sourceSessionId || existing.sourceSessionId === sourceSessionId) return prev;
       return prev.map((t) => t.id === tabId ? { ...t, sourceSessionId } : t);
     });
@@ -390,13 +518,10 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
 
-  const handleOpenLinkedFile = useCallback((filePath: string) => {
-    handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
-  }, [handleOpenFile, selectedSession?.id]);
-
   const handleCloseFileTab = useCallback((tabId: string) => {
     setFileTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
+      // No tabs left means nothing to show — collapse the right panel.
       if (next.length === 0) setRightPanelOpen(false);
       return next;
     });
@@ -406,6 +531,27 @@ export function AppShell() {
       return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
     });
   }, [fileTabs]);
+
+  const handleOpenGitReview = useCallback(() => {
+    if (!activeCwd) return;
+    const tabId = "git-review";
+    // Toggle: if Git Review is already the visible tab, clicking closes it
+    // (and the panel too, when it was the only tab). Otherwise open/focus it.
+    if (rightPanelOpen && activeFileTabId === tabId) {
+      handleCloseFileTab(tabId);
+      return;
+    }
+    setFileTabs((prev) => prev.some((tab) => tab.id === tabId)
+      ? prev
+      : [...prev, { id: tabId, label: "Git Review", kind: "git" }]);
+    setActiveFileTabId(tabId);
+    setRightPanelOpen(true);
+    if (isMobile) setSidebarOpen(false);
+  }, [activeCwd, isMobile, rightPanelOpen, activeFileTabId, handleCloseFileTab]);
+
+  const handleOpenLinkedFile = useCallback((filePath: string) => {
+    handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
+  }, [handleOpenFile, selectedSession?.id]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -455,6 +601,8 @@ export function AppShell() {
         onExplorerRefresh={handleExplorerRefresh}
         onAtMention={handleAtMention}
         onAtMentions={handleAtMentions}
+        onOpenGitReview={handleOpenGitReview}
+        gitReviewOpen={rightPanelOpen && activeFileTabId === "git-review"}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([
@@ -594,7 +742,17 @@ export function AppShell() {
         }
       }
     `}</style>
-    <div style={{ display: "flex", height: "100dvh", overflow: "hidden", background: "var(--bg)" }}>
+    <div
+      className={isResizing ? "layout-resizing" : undefined}
+      style={{
+        display: "flex",
+        height: "100dvh",
+        overflow: "hidden",
+        background: "var(--bg)",
+        ...(sidebarWidth != null ? { ["--sidebar-w"]: `${sidebarWidth}px` } : {}),
+        ...(rightPanelWidth != null ? { ["--right-panel-w"]: `${rightPanelWidth}px` } : {}),
+      } as React.CSSProperties}
+    >
       {/* Mobile overlay backdrop */}
       <div
         className={`sidebar-overlay-backdrop${mobileSidebarReady ? "" : " sidebar-mobile-pending"}`}
@@ -625,8 +783,19 @@ export function AppShell() {
         {sidebarContent}
       </div>
 
+      {/* Sidebar resize handle */}
+      {!isMobile && sidebarOpen && (
+        <div
+          className="resize-handle resize-handle--panel"
+          onMouseDown={beginSidebarResize}
+          role="separator"
+          aria-orientation="vertical"
+          title="Drag to resize"
+        />
+      )}
+
       {/* Center: chat */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+      <div style={{ flex: chatHidden ? "0 0 0" : 1, display: chatHidden ? "none" : "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Top bar with sidebar toggle */}
         <div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
           <button
@@ -1212,18 +1381,46 @@ export function AppShell() {
         </div>
       </div>
 
+      {/* Right panel resize handle */}
+      {!isMobile && rightPanelOpen && (
+        <div
+          className="resize-handle resize-handle--panel"
+          onMouseDown={chatHidden ? restoreChatFromResize : beginRightPanelResize}
+          role="separator"
+          aria-orientation="vertical"
+          title={chatHidden ? "Drag to restore chat and resize the right panel" : "Drag to resize the right panel"}
+        />
+      )}
+
       {/* Right panel: file viewer — always mounted, width animated via CSS */}
       <div
-        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}`}
+        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${chatHidden ? " right-panel-full" : ""}`}
         style={{
           display: "flex",
           flexDirection: "column",
           borderLeft: "1px solid var(--border)",
           background: "var(--bg)",
+          // The chat's former flex slot becomes the right panel, including its
+          // header, so there is no blank area between this panel and the fixed
+          // right-edge toggle.
+          ...(chatHidden ? { flex: "1 1 0%", width: "auto", minWidth: 0, alignSelf: "stretch", height: "100%" } : {}),
         }}
       >
         {/* Right panel tab bar */}
-        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36 }}>
+        <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36, ...(chatHidden ? { width: "auto", minWidth: 0 } : {}) }}>
+          {chatHidden && (
+            <button
+              type="button"
+              onClick={handleSidebarToggle}
+              title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+              aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+              style={{ width: 36, height: 36, padding: 0, border: "none", borderRight: "1px solid var(--border)", background: "transparent", color: "var(--text-muted)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" />
+              </svg>
+            </button>
+          )}
           <div style={{ flex: 1, overflow: "hidden" }}>
             <TabBar
               tabs={fileTabs}
@@ -1232,12 +1429,45 @@ export function AppShell() {
               onCloseTab={handleCloseFileTab}
             />
           </div>
-
+          {!isMobile && rightPanelOpen && (
+            <button
+              type="button"
+              onClick={() => setChatCollapsed((v) => !v)}
+              title={chatHidden ? "Show chat" : "Hide chat (expand panel)"}
+              aria-label={chatHidden ? "Show chat" : "Hide chat"}
+              aria-pressed={chatHidden}
+              style={{ width: 36, height: 36, padding: 0, border: "none", borderLeft: "1px solid var(--border)", background: "transparent", color: "var(--text-muted)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+            >
+              {chatHidden ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polyline points="13 17 18 12 13 7" /><polyline points="6 17 11 12 6 7" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polyline points="11 17 6 12 11 7" /><polyline points="18 17 13 12 18 7" />
+                </svg>
+              )}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={handleOpenGitReview}
+            disabled={!activeCwd}
+            title={!activeCwd ? "Select a workspace to review Git changes" : (rightPanelOpen && activeFileTabId === "git-review" ? "Close Git Review" : "Open Git Review")}
+            aria-label={rightPanelOpen && activeFileTabId === "git-review" ? "Close Git Review" : "Open Git Review"}
+            aria-pressed={rightPanelOpen && activeFileTabId === "git-review"}
+            style={{ width: 36, height: 36, padding: 0, border: "none", borderLeft: "1px solid var(--border)", background: "transparent", color: activeCwd ? "var(--text-muted)" : "var(--text-dim)", cursor: activeCwd ? "pointer" : "not-allowed", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <circle cx="6" cy="6" r="2" /><circle cx="18" cy="6" r="2" /><circle cx="12" cy="18" r="2" />
+              <path d="M8 6h8M6 8v4a6 6 0 0 0 6 6M18 8v4a6 6 0 0 1-6 6" />
+            </svg>
+          </button>
         </div>
 
         {/* File content */}
-        <div style={{ flex: 1, overflow: "hidden" }}>
-          {activeFileTab?.filePath ? (
+        <div style={{ flex: 1, overflow: "hidden", ...(chatHidden ? { width: "auto", minWidth: 0 } : {}) }}>
+          {activeFileTab?.kind === "file" && activeFileTab.filePath ? (
             <FileViewer
               filePath={activeFileTab.filePath}
               cwd={activeCwd ?? undefined}
@@ -1250,6 +1480,8 @@ export function AppShell() {
                 activeFileTab.sourceSessionId,
               )}
             />
+          ) : activeFileTab?.kind === "git" ? (
+            <GitReviewPanel cwd={activeCwd} refreshKey={explorerRefreshKey} onRepoChanged={handleExplorerRefresh} />
           ) : (
             <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 12 }}>
               No file open
@@ -1258,7 +1490,6 @@ export function AppShell() {
         </div>
       </div>
     </div>
-    {/* File panel toggle — always visible at top-right */}
     <button
       onClick={() => setRightPanelOpen((v) => !v)}
       title={rightPanelOpen ? "Hide file panel" : "Show file panel"}
