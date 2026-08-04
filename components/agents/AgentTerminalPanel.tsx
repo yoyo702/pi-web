@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, ChevronUp, History, Search, Star, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, ChevronUp, History, Maximize2, Search, Star, X } from "lucide-react";
 import type { TerminalSession } from "@/lib/agents/terminal";
 import { applyTerminalModifier, asBracketedPaste, getTerminalVisibleHeight, type TerminalModifier } from "@/lib/terminal-input";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -24,7 +24,7 @@ function terminalStatus(terminal: TerminalSession, connection: TerminalConnectio
   return { label: "Disconnected", color: "#f87171" };
 }
 
-export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], splitActive = false, onSplit, onUnsplit, onSwapSplit, onRestart, onTerminalChange, onTerminalStarted, onOpenCodexChat }: { terminal: TerminalSession; splitCandidates?: TerminalSession[]; splitActive?: boolean; onSplit?: (terminalId: string, direction: "horizontal" | "vertical") => void; onUnsplit?: () => void; onSwapSplit?: () => void; onRestart?: () => void; onTerminalChange?: (terminal: TerminalSession) => void; onTerminalStarted?: (terminal: TerminalSession) => void; onOpenCodexChat?: (terminal: TerminalSession) => void }) {
+export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], splitActive = false, activePane = false, onActivatePane, onConnectionChange, onSplit, onUnsplit, onSwapSplit, onMaximizePane, onClosePane, onRestart, onTerminalChange, onTerminalStarted, onOpenCodexChat }: { terminal: TerminalSession; splitCandidates?: TerminalSession[]; splitActive?: boolean; activePane?: boolean; onActivatePane?: () => void; onConnectionChange?: (connection: TerminalConnectionState) => void; onSplit?: (terminalId: string, direction: "horizontal" | "vertical") => void; onUnsplit?: () => void; onSwapSplit?: () => void; onMaximizePane?: () => void; onClosePane?: () => void; onRestart?: () => void; onTerminalChange?: (terminal: TerminalSession) => void; onTerminalStarted?: (terminal: TerminalSession) => void; onOpenCodexChat?: (terminal: TerminalSession) => void }) {
   const { isDark } = useTheme();
   const isDarkRef = useRef(isDark);
   isDarkRef.current = isDark;
@@ -33,6 +33,8 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
+  const onConnectionChangeRef = useRef(onConnectionChange);
+  onConnectionChangeRef.current = onConnectionChange;
   const [terminal, setTerminal] = useState(initial);
   const [error, setError] = useState<string | null>(null);
   const [confirmStop, setConfirmStop] = useState(false);
@@ -125,6 +127,7 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
   }, [initial.id]);
   const { socketRef, connection, connectionError, connect } = useTerminalSocket({ terminalId: initial.id, terminalRef, syncSize, onTerminalChange: updateTerminal });
   const status = terminalStatus(terminal, connection);
+  useEffect(() => { onConnectionChangeRef.current?.(connection); }, [connection]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -326,13 +329,14 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
   };
 
   return (
-    <section ref={panelRef} className="agent-terminal">
-      <header style={{ minHeight: 36, display: "flex", alignItems: "center", gap: 10, padding: "0 10px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>
+    <section ref={panelRef} className={`agent-terminal${activePane ? " agent-terminal--active" : ""}`} onPointerDown={onActivatePane} onFocusCapture={onActivatePane}>
+      <header className="agent-terminal-header" style={{ minHeight: 36, display: "flex", alignItems: "center", gap: 10, padding: "0 10px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>
         {renaming ? <form onSubmit={(event) => { event.preventDefault(); void rename(); }} style={{ display: "flex", gap: 4 }}><input autoFocus value={titleDraft} maxLength={80} onChange={(event) => setTitleDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") { setTitleDraft(terminal.title || "Terminal"); setRenaming(false); } }} style={{ width: 150, border: "1px solid var(--border)", borderRadius: 4, background: "var(--bg)", color: "var(--text)", font: "12px inherit" }} /><button type="submit" style={buttonStyle}>Save</button></form> : <strong style={{ color: "var(--text)" }}>{terminal.title || terminal.provider}</strong>}
-        <span title={terminal.cwd} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{terminal.cwd}</span>
-        {terminal.provider !== "shell" && <span title={terminal.permissionMode === "bypass" ? "CLI approval and, for Codex, sandbox are bypassed" : "The agent CLI keeps its configured approval policy"} style={{ color: terminal.permissionMode === "bypass" ? "#f87171" : "#4ade80" }}>{terminal.permissionMode.toUpperCase()}</span>}
+        <span className="agent-terminal-cwd" title={terminal.cwd} style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{terminal.cwd}</span>
+        {terminal.provider !== "shell" && <span className="agent-terminal-permission" title={terminal.permissionMode === "bypass" ? "CLI approval and, for Codex, sandbox are bypassed" : "The agent CLI keeps its configured approval policy"} style={{ color: terminal.permissionMode === "bypass" ? "#f87171" : "#4ade80" }}>{terminal.permissionMode.toUpperCase()}</span>}
         {terminal.chatInputOwned && <span style={{ color: "#fbbf24" }}>CHAT OWNS INPUT</span>}
-        <span role="status" title={connectionError || status.label} style={{ color: status.color }}>{status.label}</span>
+        <span className="agent-terminal-status" role="status" title={connectionError || status.label} style={{ color: status.color }}>{status.label}</span>
+        {splitActive && <div role="group" aria-label="Pane actions" style={{ display: "flex", alignItems: "center", gap: 1 }}><button type="button" onClick={onMaximizePane} title="Maximize this pane" aria-label="Maximize this pane" style={paneButtonStyle}><Maximize2 size={14} /></button><button type="button" onClick={onClosePane} title="Remove this pane from split" aria-label="Remove this pane from split" style={paneButtonStyle}><X size={15} /></button></div>}
         <div ref={moreRef} style={{ position: "relative" }}><button type="button" onClick={() => setMoreOpen((open) => !open)} style={buttonStyle}>More ▾</button>{moreOpen && <div className="agent-terminal-more"><button type="button" onClick={() => { setRenaming(true); setMoreOpen(false); }}>Rename</button><button type="button" onClick={() => { setSearchOpen(true); setMoreOpen(false); }}>Find output</button><button type="button" onClick={() => { void copyOutput(); setMoreOpen(false); }}>Copy output</button><button type="button" onClick={() => { setError(null); connect(); setMoreOpen(false); }}>Reconnect</button>{splitActive && <><button type="button" onClick={() => { onSwapSplit?.(); setMoreOpen(false); }}>Swap panes</button><button type="button" onClick={() => { onUnsplit?.(); setMoreOpen(false); }}>Exit split</button></>}{!splitActive && splitCandidates.map((candidate) => <div key={candidate.id} className="agent-terminal-split-option"><span>Split with {candidate.title || candidate.provider}</span><button type="button" onClick={() => { onSplit?.(candidate.id, "horizontal"); setMoreOpen(false); }}>Right</button><button type="button" onClick={() => { onSplit?.(candidate.id, "vertical"); setMoreOpen(false); }}>Down</button></div>)}{terminal.provider === "codex" && terminal.state === "running" && terminal.sourceSessionId && <button type="button" onClick={() => { onOpenCodexChat?.(terminal); setMoreOpen(false); }}>Open Web Chat</button>}</div>}</div>
         {terminal.state === "running" && <button type="button" onClick={() => setConfirmStop(true)} style={{ ...buttonStyle, color: "#fca5a5" }}>Stop</button>}
         {terminal.state !== "running" && <button type="button" onClick={() => onRestart ? onRestart() : void restartCodex()} style={{ ...buttonStyle, color: "#86efac" }}>Restart</button>}
@@ -353,6 +357,7 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
 }
 
 const buttonStyle: React.CSSProperties = { border: 0, background: "transparent", color: "var(--text-muted)", cursor: "pointer", fontSize: 12, padding: "4px 5px", whiteSpace: "nowrap" };
+const paneButtonStyle: React.CSSProperties = { display: "grid", width: 25, height: 25, padding: 0, placeItems: "center", border: 0, borderRadius: 5, background: "transparent", color: "var(--text-dim)", cursor: "pointer" };
 const overlayStyle: React.CSSProperties = { position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 20, background: "rgb(0 0 0 / 55%)" };
 const dialogStyle: React.CSSProperties = { width: "min(100%, 400px)", padding: 18, border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 20px 60px rgb(0 0 0 / 45%)", fontSize: 14 };
 const dialogButtonStyle: React.CSSProperties = { padding: "6px 9px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text)", cursor: "pointer", font: "11.5px/1.3 inherit" };

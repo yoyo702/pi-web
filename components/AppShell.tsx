@@ -26,6 +26,8 @@ import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
+import type { TerminalConnectionState } from "@/hooks/useTerminalSocket";
+import { Activity, ArrowLeft, Bot, Files, GitBranch, PanelsTopLeft } from "lucide-react";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -59,6 +61,8 @@ export function AppShell() {
   const [pluginsConfigOpen, setPluginsConfigOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
+  const [mobileSidebarModule, setMobileSidebarModule] = useState<"sessions" | "agents" | "explorer">("sessions");
+  const [mobileExplorerRevealKey, setMobileExplorerRevealKey] = useState(0);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
   useEffect(() => {
@@ -126,6 +130,8 @@ export function AppShell() {
 
   // Single active panel — only one dropdown open at a time
   const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | null>(null);
+  const [activityPanelOpen, setActivityPanelOpen] = useState(false);
+  const activityPanelRef = useRef<HTMLDivElement>(null);
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   const toggleTopPanel = useCallback((panel: "branches" | "system" | "session") => {
@@ -155,6 +161,15 @@ export function AppShell() {
     return () => ro.disconnect();
   }, [activeTopPanel]);
 
+  useEffect(() => {
+    if (!activityPanelOpen) return;
+    const close = (event: PointerEvent) => { if (!activityPanelRef.current?.contains(event.target as Node)) setActivityPanelOpen(false); };
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setActivityPanelOpen(false); };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", closeOnEscape); };
+  }, [activityPanelOpen]);
+
   // The center is the primary workspace: Pi is permanent, external agents open
   // as sibling tabs. The right panel remains auxiliary (files and Git only).
   const [workspaceTabs, setWorkspaceTabs] = useState<Tab[]>([{ id: "pi", label: "Pi", kind: "pi", closable: false }]);
@@ -162,6 +177,7 @@ export function AppShell() {
   const [mountedWorkspaceTabIds, setMountedWorkspaceTabIds] = useState<Set<string>>(() => new Set(["pi"]));
   const [workspaceTabsHydratedCwd, setWorkspaceTabsHydratedCwd] = useState<string | null>(null);
   const [terminalSplit, setTerminalSplit] = useState<{ primaryTabId: string; secondaryTerminalId: string; direction: "horizontal" | "vertical"; ratio: number; reversed: boolean } | null>(null);
+  const [activeTerminalPaneId, setActiveTerminalPaneId] = useState<string | null>(null);
   const splitRestoreAttemptRef = useRef<string | null>(null);
   useEffect(() => {
     splitRestoreAttemptRef.current = null;
@@ -216,6 +232,46 @@ export function AppShell() {
   const terminalRestoreInFlightRef = useRef(new Set<string>());
   const [terminalRestoreErrors, setTerminalRestoreErrors] = useState<Record<string, string>>({});
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const mobileOverlayHistoryRef = useRef(false);
+  const mobileOverlayHistoryReadyRef = useRef(false);
+  useEffect(() => {
+    if (!isMobile) {
+      mobileOverlayHistoryRef.current = false;
+      mobileOverlayHistoryReadyRef.current = false;
+      return;
+    }
+    const handlePopState = () => {
+      if (!mobileOverlayHistoryRef.current) return;
+      mobileOverlayHistoryRef.current = false;
+      setSidebarOpen(false);
+      setRightPanelOpen(false);
+      setActiveTopPanel(null);
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, [isMobile]);
+  useEffect(() => {
+    if (!isMobile || !mobileSidebarReady) return;
+    const overlayOpen = sidebarOpen || rightPanelOpen;
+    // Hydration starts with the desktop sidebar open and then closes it for
+    // mobile. Do not create a disposable history entry during that transition.
+    if (!mobileOverlayHistoryReadyRef.current) {
+      if (!overlayOpen) mobileOverlayHistoryReadyRef.current = true;
+      return;
+    }
+    if (overlayOpen && !mobileOverlayHistoryRef.current) {
+      window.history.pushState({ ...window.history.state, piWebMobileOverlay: true }, "");
+      mobileOverlayHistoryRef.current = true;
+    } else if (!overlayOpen && mobileOverlayHistoryRef.current) {
+      mobileOverlayHistoryRef.current = false;
+      if (window.history.state?.piWebMobileOverlay) window.history.back();
+    }
+  }, [isMobile, mobileSidebarReady, rightPanelOpen, sidebarOpen]);
+  const prepareMobileOverlayHistory = useCallback(() => {
+    if (!isMobile || mobileOverlayHistoryRef.current) return;
+    window.history.pushState({ ...window.history.state, piWebMobileOverlay: true }, "");
+    mobileOverlayHistoryRef.current = true;
+  }, [isMobile]);
   useEffect(() => {
     const misplaced = fileTabs.filter((tab) => tab.kind === "terminal" || tab.kind === "codex-chat");
     if (misplaced.length === 0) return;
@@ -768,6 +824,10 @@ export function AppShell() {
     setTerminals((current) => ({ ...current, [terminal.id]: terminal }));
     setWorkspaceTabs((current) => current.map((tab) => tab.terminalId === terminal.id && tab.kind === "terminal" ? { ...tab, label: terminal.title || tab.label, terminalPermissionMode: terminal.permissionMode, terminalLaunchMode: terminal.launchMode, terminalNoAltScreen: terminal.noAltScreen, terminalModel: terminal.model, terminalWebSearch: terminal.webSearch, terminalChatMode: terminal.chatMode, sourceSessionId: terminal.sourceSessionId, status: terminal.state === "running" ? "running" : "ended" } : tab));
   }, []);
+  const handleTerminalConnection = useCallback((terminalId: string, connection: TerminalConnectionState) => {
+    const status: Tab["status"] = connection === "connected" ? "running" : connection === "offline" ? "offline" : connection === "disconnected" ? "failed" : "connecting";
+    setWorkspaceTabs((current) => current.map((tab) => tab.kind === "terminal" && tab.terminalId === terminalId && tab.status !== status ? { ...tab, status } : tab));
+  }, []);
 
   const handleCodexTabStatus = useCallback((tabId: string, status: "idle" | "running" | "approval") => {
     setWorkspaceTabs((current) => current.map((tab) => tab.id === tabId && tab.status !== status ? { ...tab, status } : tab));
@@ -780,7 +840,7 @@ export function AppShell() {
   useEffect(() => {
     if (!activeCwd || workspaceTabsHydratedCwd !== activeCwd) return;
     let cancelled = false;
-    void fetch(`/api/terminals?${new URLSearchParams({ cwd: activeCwd })}`, { cache: "no-store" })
+    const syncTerminals = () => { void fetch(`/api/terminals?${new URLSearchParams({ cwd: activeCwd })}`, { cache: "no-store" })
       .then(async (response) => {
         if (!response.ok) return;
         const data = await response.json() as { terminals?: TerminalSession[] };
@@ -805,8 +865,10 @@ export function AppShell() {
           }
         }
       })
-      .catch(() => { /* terminal support must not disrupt the existing shell */ });
-    return () => { cancelled = true; };
+      .catch(() => { /* terminal support must not disrupt the existing shell */ }); };
+    syncTerminals();
+    const timer = window.setInterval(() => { if (!document.hidden) syncTerminals(); }, 5000);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [activeCwd, restartUnavailableTerminal, terminalSplit, workspaceTabs, workspaceTabsHydratedCwd]);
 
   const handleOpenLinkedFile = useCallback((filePath: string) => {
@@ -829,6 +891,25 @@ export function AppShell() {
   const showPlaceholder = initialSessionRestored && !showChat;
 
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
+  const runningTerminals = Object.values(terminals).filter((terminal) => terminal.state === "running");
+  const runningTasks = runningTerminals.filter((terminal) => terminal.provider === "shell" && terminal.title?.startsWith("Task: "));
+  const runningAgents = runningTerminals.filter((terminal) => terminal.provider !== "shell");
+  const runningShells = runningTerminals.filter((terminal) => terminal.provider === "shell" && !terminal.title?.startsWith("Task: "));
+  const activeCodexChats = workspaceTabs.filter((tab) => tab.kind === "codex-chat" && (tab.status === "running" || tab.status === "approval"));
+  const approvalCount = activeCodexChats.filter((tab) => tab.status === "approval").length;
+  const activityCount = runningTerminals.length + activeCodexChats.length;
+  const showWorkspaceTabBar = workspaceTabs.length > 1;
+  const activityControl = <div ref={activityPanelRef} style={{ position: "relative", alignSelf: "stretch", flexShrink: 0, marginLeft: "auto" }}>
+    <button type="button" aria-label="Workspace activity" title="Workspace activity" aria-expanded={activityPanelOpen} onClick={() => setActivityPanelOpen((open) => !open)} style={{ display: "flex", alignItems: "center", gap: 5, height: "100%", padding: "0 10px", border: 0, borderLeft: "1px solid var(--border)", background: activityPanelOpen ? "var(--bg-selected)" : "transparent", color: approvalCount > 0 ? "#f59e0b" : activityCount > 0 ? "var(--accent)" : "var(--text-dim)", cursor: "pointer", font: "10.5px/1 inherit" }}>
+      <Activity size={15} /><span>{activityCount}</span>{approvalCount > 0 && <span title={`${approvalCount} approval pending`} style={{ width: 6, height: 6, borderRadius: "50%", background: "#f59e0b" }} />}
+    </button>
+    {activityPanelOpen && <div role="dialog" aria-label="Workspace activity" style={{ position: "absolute", zIndex: 500, top: 40, right: 4, width: "min(330px, calc(100vw - 16px))", maxHeight: "min(480px, calc(100dvh - 100px))", overflowY: "auto", padding: 7, border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", boxShadow: "0 16px 44px rgb(0 0 0 / 38%)" }}>
+      <div style={{ padding: "5px 7px 7px", color: "var(--text-dim)", fontSize: 10 }}>Workspace activity · {activityCount} active</div>
+      {activityCount === 0 && <div style={{ padding: "14px 10px", color: "var(--text-dim)", fontSize: 11, textAlign: "center" }}>No tasks or agents are running</div>}
+      {[...runningTasks, ...runningAgents, ...runningShells].map((terminal) => <button key={terminal.id} type="button" onClick={() => { handleTerminalCreated(terminal, terminal.title); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#22c55e", flexShrink: 0 }} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{terminal.title || `${terminal.provider} terminal`}</span><small style={{ color: "var(--text-dim)" }}>{terminal.provider}</small></button>)}
+      {activeCodexChats.map((tab) => <button key={tab.id} type="button" onClick={() => { setActiveWorkspaceTabId(tab.id); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: tab.status === "approval" ? "#f59e0b" : "var(--accent)", flexShrink: 0 }} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tab.label}</span><small style={{ color: tab.status === "approval" ? "#f59e0b" : "var(--text-dim)" }}>{tab.status}</small></button>)}
+    </div>}
+  </div>;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
   const windowTitle = activeCwdName ? `${activeCwdName} - Pi Web` : "Pi Web";
 
@@ -868,6 +949,8 @@ export function AppShell() {
         onOpenAgentTerminal={handleTerminalCreated}
         onAgentTerminalRemoved={handleAgentTerminalRemoved}
         onCodexSessionChanged={handleCodexSessionChanged}
+        requestedModule={isMobile ? mobileSidebarModule : undefined}
+        explorerRevealKey={isMobile ? mobileExplorerRevealKey : undefined}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([
@@ -1060,8 +1143,8 @@ export function AppShell() {
       )}
 
       {/* Center workspace: Pi plus external-agent tabs. */}
-      <div style={{ flex: chatHidden ? "0 0 0" : 1, display: chatHidden ? "none" : "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", height: 36, flexShrink: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
+      <div className="center-workspace" style={{ flex: chatHidden ? "0 0 0" : 1, display: chatHidden ? "none" : "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+        <div style={{ position: "relative", display: showWorkspaceTabBar ? "flex" : "none", alignItems: "center", height: 36, flexShrink: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
           <button
             onClick={handleSidebarToggle}
             title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
@@ -1088,9 +1171,24 @@ export function AppShell() {
           <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
             <TabBar tabs={workspaceTabs} activeTabId={activeWorkspaceTabId} onSelectTab={handleSelectWorkspaceTab} onCloseTab={handleCloseWorkspaceTab} />
           </div>
+          {showWorkspaceTabBar && activityControl}
         </div>
         {/* Pi-specific controls are only relevant while the Pi workspace is active. */}
         <div ref={topBarRef} style={{ display: activeWorkspaceTabId === "pi" ? "flex" : "none", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
+          {!showWorkspaceTabBar && <button
+            onClick={handleSidebarToggle}
+            title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+            aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, padding: 0, background: "none", border: "none", borderRight: "1px solid var(--border)", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s" }}
+            onMouseEnter={(event) => { event.currentTarget.style.color = "var(--text)"; }}
+            onMouseLeave={(event) => { event.currentTarget.style.color = "var(--text-muted)"; }}
+          >
+            {sidebarOpen ? (
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="3" x2="9" y2="21" /></svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
+            )}
+          </button>}
           <button
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
@@ -1585,6 +1683,7 @@ export function AppShell() {
               )}
             </div>
           )}
+          {!showWorkspaceTabBar && activityControl}
 
         </div>
 
@@ -1656,9 +1755,9 @@ export function AppShell() {
             const secondaryTerminal = split ? terminals[split.secondaryTerminalId] ?? null : null;
             const splitDirection = isMobile ? "vertical" : split?.direction;
             const splitCandidates = terminal ? Object.values(terminals).filter((candidate) => candidate.id !== terminal.id && candidate.state === "running") : [];
-            const primaryPanel = terminal ? <AgentTerminalPanel terminal={terminal} splitCandidates={splitCandidates} splitActive={Boolean(split && secondaryTerminal)} onSplit={(secondaryTerminalId, direction) => setTerminalSplit({ primaryTabId: tab.id, secondaryTerminalId, direction, ratio: 50, reversed: false })} onUnsplit={() => setTerminalSplit(null)} onSwapSplit={() => setTerminalSplit((current) => current ? { ...current, reversed: !current.reversed, ratio: 100 - current.ratio } : null)} onRestart={() => void restartUnavailableTerminal(tab)} onTerminalChange={handleTerminalChanged} onTerminalStarted={handleTerminalCreated} onOpenCodexChat={handleOpenCodexChat} /> : null;
+            const primaryPanel = terminal ? <AgentTerminalPanel terminal={terminal} splitCandidates={splitCandidates} splitActive={Boolean(split)} activePane={!split || activeTerminalPaneId !== split.secondaryTerminalId} onActivatePane={() => setActiveTerminalPaneId(terminal.id)} onConnectionChange={(connection) => handleTerminalConnection(terminal.id, connection)} onSplit={(secondaryTerminalId, direction) => { setActiveTerminalPaneId(terminal.id); setTerminalSplit({ primaryTabId: tab.id, secondaryTerminalId, direction, ratio: 50, reversed: false }); }} onUnsplit={() => setTerminalSplit(null)} onSwapSplit={() => setTerminalSplit((current) => current ? { ...current, reversed: !current.reversed, ratio: 100 - current.ratio } : null)} onMaximizePane={() => setTerminalSplit(null)} onClosePane={() => { if (secondaryTab) setActiveWorkspaceTabId(secondaryTab.id); setTerminalSplit(null); }} onRestart={() => void restartUnavailableTerminal(tab)} onTerminalChange={handleTerminalChanged} onTerminalStarted={handleTerminalCreated} onOpenCodexChat={handleOpenCodexChat} /> : null;
             const secondaryTab = split ? workspaceTabs.find((item) => item.kind === "terminal" && item.terminalId === split.secondaryTerminalId) ?? null : null;
-            const secondaryPanel = secondaryTerminal ? <AgentTerminalPanel terminal={secondaryTerminal} splitActive onUnsplit={() => setTerminalSplit(null)} onSwapSplit={() => setTerminalSplit((current) => current ? { ...current, reversed: !current.reversed, ratio: 100 - current.ratio } : null)} onRestart={() => secondaryTab && void restartUnavailableTerminal(secondaryTab)} onTerminalChange={handleTerminalChanged} onTerminalStarted={handleTerminalCreated} onOpenCodexChat={handleOpenCodexChat} /> : secondaryTab ? <div style={{ height: "100%", display: "grid", placeItems: "center", padding: 18, background: "var(--bg)", color: "var(--text-dim)", fontSize: 12 }}><div style={{ display: "grid", justifyItems: "center", gap: 8, textAlign: "center" }}><strong style={{ color: "var(--text)" }}>Split terminal unavailable</strong><span>{terminalRestoreErrors[secondaryTab.id] || "Restoring this pane after the server restart…"}</span><div style={{ display: "flex", gap: 7 }}><button type="button" disabled={terminalRestartingId === secondaryTab.id} onClick={() => void restartUnavailableTerminal(secondaryTab)} style={terminalRecoveryButtonStyle}>{terminalRestartingId === secondaryTab.id ? "Restoring…" : "Retry"}</button><button type="button" onClick={() => setTerminalSplit(null)} style={terminalRecoveryButtonStyle}>Remove pane</button></div></div></div> : null;
+            const secondaryPanel = secondaryTerminal ? <AgentTerminalPanel terminal={secondaryTerminal} splitActive activePane={activeTerminalPaneId === secondaryTerminal.id} onActivatePane={() => setActiveTerminalPaneId(secondaryTerminal.id)} onConnectionChange={(connection) => handleTerminalConnection(secondaryTerminal.id, connection)} onUnsplit={() => setTerminalSplit(null)} onSwapSplit={() => setTerminalSplit((current) => current ? { ...current, reversed: !current.reversed, ratio: 100 - current.ratio } : null)} onMaximizePane={() => { if (secondaryTab) setActiveWorkspaceTabId(secondaryTab.id); setTerminalSplit(null); }} onClosePane={() => setTerminalSplit(null)} onRestart={() => secondaryTab && void restartUnavailableTerminal(secondaryTab)} onTerminalChange={handleTerminalChanged} onTerminalStarted={handleTerminalCreated} onOpenCodexChat={handleOpenCodexChat} /> : secondaryTab ? <div style={{ height: "100%", display: "grid", placeItems: "center", padding: 18, background: "var(--bg)", color: "var(--text-dim)", fontSize: 12 }}><div style={{ display: "grid", justifyItems: "center", gap: 8, textAlign: "center" }}><strong style={{ color: "var(--text)" }}>Split terminal unavailable</strong><span>{terminalRestoreErrors[secondaryTab.id] || "Restoring this pane after the server restart…"}</span><div style={{ display: "flex", gap: 7 }}><button type="button" disabled={terminalRestartingId === secondaryTab.id} onClick={() => void restartUnavailableTerminal(secondaryTab)} style={terminalRecoveryButtonStyle}>{terminalRestartingId === secondaryTab.id ? "Restoring…" : "Retry"}</button><button type="button" onClick={() => setTerminalSplit(null)} style={terminalRecoveryButtonStyle}>Remove pane</button></div></div></div> : null;
             return <div key={tab.id} style={{ position: "absolute", inset: 0, display: activeWorkspaceTabId === tab.id ? "block" : "none" }}>
               {tab.kind === "codex-chat" && (terminal || tab.sourceSessionId) ? (
                 <CodexChatPanel terminal={terminal ? { ...terminal, model: tab.model ?? terminal.model, reasoningEffort: tab.reasoningEffort, serviceTier: tab.serviceTier, approvalPolicy: tab.approvalPolicy, sessionName: tab.sessionName } : { cwd: tab.cwd ?? activeCwd ?? "", model: tab.model, sourceSessionId: tab.sourceSessionId, reasoningEffort: tab.reasoningEffort, serviceTier: tab.serviceTier, approvalPolicy: tab.approvalPolicy, sessionName: tab.sessionName }} workspaceTabId={tab.id} onStatusChange={handleCodexTabStatus} onConfigurationChange={handleCodexTabConfiguration} onOpenFile={(filePath) => { const absolutePath = filePath.startsWith("/") ? filePath : joinFilePath(tab.cwd ?? activeCwd ?? "", filePath); handleOpenFile(absolutePath, getFileName(absolutePath), tab.sourceSessionId); }} />
@@ -1698,6 +1797,17 @@ export function AppShell() {
       >
         {/* Right panel tab bar */}
         <div style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", height: 36, ...(chatHidden ? { width: "auto", minWidth: 0 } : {}) }}>
+          {isMobile && (
+            <button
+              type="button"
+              onClick={() => setRightPanelOpen(false)}
+              title="Back to workspace"
+              aria-label="Back to workspace"
+              style={{ width: 40, height: 36, padding: 0, border: "none", borderRight: "1px solid var(--border)", background: "transparent", color: "var(--text-muted)", cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}
+            >
+              <ArrowLeft size={17} />
+            </button>
+          )}
           {chatHidden && (
             <button
               type="button"
@@ -1780,6 +1890,12 @@ export function AppShell() {
         </div>
       </div>
     </div>
+    {isMobile && <nav className="mobile-main-nav" aria-label="Mobile navigation">
+      <button type="button" aria-pressed={!sidebarOpen && !rightPanelOpen} onClick={() => { setSidebarOpen(false); setRightPanelOpen(false); }}><PanelsTopLeft size={18} /><small>Workspace</small></button>
+      <button type="button" aria-pressed={sidebarOpen && mobileSidebarModule === "agents"} onClick={() => { prepareMobileOverlayHistory(); setMobileSidebarModule("agents"); setRightPanelOpen(false); setSidebarOpen(true); }}><Bot size={18} /><small>Agents</small></button>
+      <button type="button" aria-pressed={sidebarOpen && mobileSidebarModule === "explorer"} onClick={() => { prepareMobileOverlayHistory(); setMobileSidebarModule("explorer"); setMobileExplorerRevealKey((key) => key + 1); setRightPanelOpen(false); setSidebarOpen(true); }}><Files size={18} /><small>Files</small></button>
+      <button type="button" disabled={!activeCwd} aria-pressed={rightPanelOpen && activeFileTabId === "git-review"} onClick={() => { setSidebarOpen(false); if (!(rightPanelOpen && activeFileTabId === "git-review")) { prepareMobileOverlayHistory(); handleOpenGitReview(); } else setRightPanelOpen(false); }}><GitBranch size={18} /><small>Git</small></button>
+    </nav>}
     <button
       onClick={() => setRightPanelOpen((v) => !v)}
       title={rightPanelOpen ? "Hide file panel" : "Show file panel"}

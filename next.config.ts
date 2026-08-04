@@ -11,6 +11,7 @@ try {
 
 const nextConfig: NextConfig = {
   ...(process.env.PI_WEB_NEXT_DIST_DIR ? { distDir: process.env.PI_WEB_NEXT_DIST_DIR } : {}),
+  ...(process.env.PI_WEB_E2E === "1" ? { devIndicators: false } : {}),
   serverExternalPackages: [
     "undici",
     "@earendil-works/pi-coding-agent",

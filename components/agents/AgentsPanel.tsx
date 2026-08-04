@@ -25,6 +25,8 @@ interface CodexSession {
   runtime?: { state: "idle" | "running" | "approval" } | null;
 }
 interface CatalogModel { id: string; label: string; description: string; isDefault: boolean; defaultReasoningEffort: string; reasoningEfforts: { id: string; description: string }[]; defaultServiceTier: string; serviceTiers: { id: string; name: string; description: string }[] }
+interface ProjectScript { name: string; command: string }
+interface TaskNotice { terminal: TerminalSession; title: string; summary: string }
 type PendingAction =
   | { kind: "session"; action: "rename" | "archive" | "unarchive" | "delete"; session: CodexSession }
   | { kind: "terminal"; action: "stop" | "remove"; terminal: TerminalSession }
@@ -32,6 +34,7 @@ type PendingAction =
 
 interface Props {
   cwd: string;
+  refreshKey?: number;
   style?: CSSProperties;
   onExpandedChange?: (expanded: boolean) => void;
   onNewAgent?: (provider: TerminalProvider) => void;
@@ -41,16 +44,24 @@ interface Props {
   onCodexSessionChanged?: (change: { id: string; action: "rename" | "archive" | "unarchive" | "delete"; name?: string }) => void;
 }
 
-export function AgentsPanel({ cwd, style, onExpandedChange, onNewAgent, onOpenCodexSession, onOpenTerminal, onTerminalRemoved, onCodexSessionChanged }: Props) {
+export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAgent, onOpenCodexSession, onOpenTerminal, onTerminalRemoved, onCodexSessionChanged }: Props) {
   const [open, setOpen] = useState(true);
-  const [shellOpen, setShellOpen] = useState(true);
-  const [codexOpen, setCodexOpen] = useState(true);
+  const [shellOpen, setShellOpen] = useState(false);
+  const [codexOpen, setCodexOpen] = useState(false);
   const [claudeOpen, setClaudeOpen] = useState(false);
+  const [treesHydratedCwd, setTreesHydratedCwd] = useState<string | null>(null);
   const [sessions, setSessions] = useState<CodexSession[]>([]);
   const [sessionQuery, setSessionQuery] = useState("");
   const [debouncedSessionQuery, setDebouncedSessionQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [terminals, setTerminals] = useState<TerminalSession[]>([]);
+  const [projectScripts, setProjectScripts] = useState<ProjectScript[]>([]);
+  const [projectScriptQuery, setProjectScriptQuery] = useState("");
+  const [showAllProjectScripts, setShowAllProjectScripts] = useState(false);
+  const [projectScriptRunner, setProjectScriptRunner] = useState("npm");
+  const [projectScriptBusy, setProjectScriptBusy] = useState<string | null>(null);
+  const [projectScriptError, setProjectScriptError] = useState<string | null>(null);
+  const [taskNotices, setTaskNotices] = useState<TaskNotice[]>([]);
   const [terminalStats, setTerminalStats] = useState<TerminalStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -68,6 +79,52 @@ export function AgentsPanel({ cwd, style, onExpandedChange, onNewAgent, onOpenCo
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const sessionRequestRef = useRef(0);
+  const taskStatesRef = useRef(new Map<string, TerminalSession["state"]>());
+  const taskStatesReadyRef = useRef(false);
+  const taskNoticeTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+
+  useEffect(() => {
+    try {
+      const stored = JSON.parse(window.localStorage.getItem(`pi-web:agent-trees:${encodeURIComponent(cwd)}`) || "null") as { shell?: unknown; codex?: unknown; claude?: unknown } | null;
+      setShellOpen(stored?.shell === true);
+      setCodexOpen(stored?.codex === true);
+      setClaudeOpen(stored?.claude === true);
+    } catch {
+      setShellOpen(false);
+      setCodexOpen(false);
+      setClaudeOpen(false);
+    }
+    setTreesHydratedCwd(cwd);
+  }, [cwd]);
+
+  useEffect(() => {
+    if (treesHydratedCwd !== cwd) return;
+    try { window.localStorage.setItem(`pi-web:agent-trees:${encodeURIComponent(cwd)}`, JSON.stringify({ shell: shellOpen, codex: codexOpen, claude: claudeOpen })); } catch { /* storage may be disabled */ }
+  }, [claudeOpen, codexOpen, cwd, shellOpen, treesHydratedCwd]);
+
+  const showTaskCompletion = useCallback(async (terminal: TerminalSession) => {
+    const taskName = terminal.title?.slice("Task: ".length) || "Project task";
+    let summary = terminal.exitCode === 0 ? "Completed successfully" : terminal.exitCode === null ? "Task ended" : `Failed with exit code ${terminal.exitCode}`;
+    try {
+      const response = await fetch(`/api/terminals/${encodeURIComponent(terminal.id)}/buffer`, { cache: "no-store" });
+      if (response.ok) {
+        const escape = String.fromCharCode(27);
+        const ansi = new RegExp(`${escape}\\[[0-?]*[ -/]*[@-~]`, "g");
+        const lines = (await response.text()).replace(ansi, "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        if (lines.length > 0) summary = lines.slice(-2).join(" · ").slice(0, 240);
+      }
+    } catch { /* Exit status remains useful if retained output is unavailable. */ }
+    const outcome = terminal.state === "stopped" ? "stopped" : terminal.exitCode === 0 ? "completed" : "failed";
+    setTaskNotices((current) => [...current.filter((notice) => notice.terminal.id !== terminal.id), { terminal, title: `${taskName} ${outcome}`, summary }]);
+    const existingTimer = taskNoticeTimersRef.current.get(terminal.id);
+    if (existingTimer) clearTimeout(existingTimer);
+    taskNoticeTimersRef.current.set(terminal.id, setTimeout(() => {
+      setTaskNotices((current) => current.filter((notice) => notice.terminal.id !== terminal.id));
+      taskNoticeTimersRef.current.delete(terminal.id);
+    }, 8000));
+  }, []);
+
+  useEffect(() => () => { taskNoticeTimersRef.current.forEach((timer) => clearTimeout(timer)); taskNoticeTimersRef.current.clear(); }, []);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSessionQuery(sessionQuery.trim()), 180);
@@ -119,7 +176,7 @@ export function AgentsPanel({ cwd, style, onExpandedChange, onNewAgent, onOpenCo
       if (!document.hidden) void loadSessions(true);
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [loadSessions]);
+  }, [loadSessions, refreshKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -128,19 +185,58 @@ export function AgentsPanel({ cwd, style, onExpandedChange, onNewAgent, onOpenCo
         const response = await fetch(`/api/terminals?${new URLSearchParams({ cwd })}`, { cache: "no-store" });
         if (!response.ok) return;
         const data = await response.json() as { terminals?: TerminalSession[]; stats?: TerminalStats };
-        if (!cancelled) { setTerminals(data.terminals ?? []); setTerminalStats(data.stats ?? null); }
+        if (!cancelled) {
+          const next = data.terminals ?? [];
+          if (taskStatesReadyRef.current) {
+            for (const terminal of next) {
+              if (terminal.title?.startsWith("Task: ") && taskStatesRef.current.get(terminal.id) === "running" && terminal.state !== "running") void showTaskCompletion(terminal);
+            }
+          }
+          taskStatesRef.current = new Map(next.map((terminal) => [terminal.id, terminal.state]));
+          taskStatesReadyRef.current = true;
+          setTerminals(next);
+          setTerminalStats(data.stats ?? null);
+        }
       } catch { /* Agent history remains usable when the optional terminal service is unavailable. */ }
     };
     void loadTerminals();
     const timer = window.setInterval(() => { if (!document.hidden) void loadTerminals(); }, 5000);
     return () => { cancelled = true; window.clearInterval(timer); };
-  }, [cwd]);
+  }, [cwd, refreshKey, showTaskCompletion]);
+
+  useEffect(() => {
+    taskStatesRef.current.clear();
+    taskStatesReadyRef.current = false;
+  }, [cwd, refreshKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setProjectScripts([]);
+    setProjectScriptRunner("npm");
+    setProjectScriptError(null);
+    void fetch(`/api/project-scripts?${new URLSearchParams({ cwd })}`, { cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json() as { scripts?: ProjectScript[]; runner?: string; error?: string };
+        if (!response.ok) throw new Error(data.error || "Unable to load project scripts");
+        if (!cancelled) {
+          setProjectScripts(data.scripts ?? []);
+          setProjectScriptRunner(data.runner || "npm");
+        }
+      })
+      .catch((cause) => { if (!cancelled) setProjectScriptError(cause instanceof Error ? cause.message : "Unable to load project scripts"); });
+    return () => { cancelled = true; };
+  }, [cwd, refreshKey]);
 
   const shellTerminals = terminals.filter((terminal) => terminal.provider === "shell");
+  const knownTaskTitles = new Set(projectScripts.map((script) => `Task: ${script.name}`));
+  const orphanedTaskTerminals = shellTerminals.filter((terminal) => terminal.title?.startsWith("Task: ") && !knownTaskTitles.has(terminal.title));
+  const manualShellTerminals = shellTerminals.filter((terminal) => !terminal.title?.startsWith("Task: "));
   const codexTerminals = terminals.filter((terminal) => terminal.provider === "codex");
   const claudeTerminals = terminals.filter((terminal) => terminal.provider === "claude");
   const liveCodexSessionIds = new Set(codexTerminals.filter((terminal) => terminal.state === "running").map((terminal) => terminal.sourceSessionId).filter(Boolean));
   const codexHistory = showArchived ? sessions : sessions.filter((session) => !liveCodexSessionIds.has(session.id));
+  const matchingProjectScripts = projectScripts.filter((script) => `${script.name} ${script.command}`.toLowerCase().includes(projectScriptQuery.trim().toLowerCase()));
+  const visibleProjectScripts = showAllProjectScripts || projectScriptQuery ? matchingProjectScripts : matchingProjectScripts.slice(0, 8);
 
   const manageSession = useCallback(async (session: CodexSession, action: "rename" | "archive" | "unarchive" | "delete", requestedName?: string) => {
     let body: Record<string, string> = { cwd };
@@ -241,6 +337,53 @@ export function AgentsPanel({ cwd, style, onExpandedChange, onNewAgent, onOpenCo
     }
   }, [onTerminalRemoved]);
 
+  const runProjectScript = useCallback(async (script: ProjectScript) => {
+    const taskTitle = `Task: ${script.name}`;
+    const existing = terminals.find((terminal) => terminal.provider === "shell" && terminal.title === taskTitle && terminal.state === "running");
+    if (existing) {
+      onOpenTerminal?.(existing, taskTitle);
+      return;
+    }
+    setProjectScriptBusy(script.name);
+    setProjectScriptError(null);
+    try {
+      const response = await fetch("/api/terminals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "shell", cwd }),
+      });
+      const data = await response.json() as { terminal?: TerminalSession; error?: string };
+      if (!response.ok || !data.terminal) throw new Error(data.error || "Unable to start terminal");
+      let terminal = data.terminal;
+      const renameResponse = await fetch(`/api/terminals/${encodeURIComponent(terminal.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: taskTitle }),
+      });
+      if (renameResponse.ok) {
+        const renamed = await renameResponse.json() as { terminal?: TerminalSession };
+        if (renamed.terminal) terminal = renamed.terminal;
+      } else {
+        terminal = { ...terminal, title: taskTitle };
+      }
+      setTerminals((current) => current.some((item) => item.id === terminal.id) ? current : [...current, terminal]);
+      onOpenTerminal?.(terminal, taskTitle);
+      const inputResponse = await fetch(`/api/terminals/${encodeURIComponent(terminal.id)}/input`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ data: `${projectScriptRunner} run ${quoteShellArgument(script.name)}\r` }),
+      });
+      if (!inputResponse.ok) {
+        const inputData = await inputResponse.json().catch(() => ({})) as { error?: string };
+        throw new Error(inputData.error || "Terminal started, but the script could not be sent");
+      }
+    } catch (cause) {
+      setProjectScriptError(cause instanceof Error ? cause.message : "Unable to run project script");
+    } finally {
+      setProjectScriptBusy(null);
+    }
+  }, [cwd, onOpenTerminal, projectScriptRunner, terminals]);
+
   const clearEndedTerminalRecords = useCallback(async (provider?: TerminalProvider) => {
     const ended = terminals.filter((terminal) => (!provider || terminal.provider === provider) && terminal.state !== "running");
     if (ended.length === 0) return;
@@ -285,24 +428,50 @@ export function AgentsPanel({ cwd, style, onExpandedChange, onNewAgent, onOpenCo
       <Chevron open={open} />
       Agents
     </button>
-    {open && <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, overflowY: "auto", padding: "0 7px 7px" }}>
-      <div style={resourceSummaryStyle}><span>Workspace {workspaceStats.running} running</span><span>Global {globalStats.running}/{limits.running}</span><span>History {globalStats.records}/{limits.records}</span><span>{formatBytes(globalStats.bufferBytes)}</span>{endedTerminalCount > 0 && <button type="button" onClick={() => setPendingAction({ kind: "clear", count: endedTerminalCount })} style={resourceClearStyle}>Clear ended</button>}</div>
+    {open && <div style={agentsBodyStyle}>
+      <div style={resourceSummaryStyle}>
+        <span style={overviewStatusStyle}><span style={{ ...overviewDotStyle, background: workspaceStats.running > 0 ? "#22c55e" : "var(--text-dim)" }} />{workspaceStats.running > 0 ? `${workspaceStats.running} running` : "Workspace idle"}</span>
+        <span title={`Global: ${globalStats.running}/${limits.running} running · ${globalStats.records}/${limits.records} records · ${formatBytes(globalStats.bufferBytes)}`} style={overviewMetaStyle}>{globalStats.records} sessions · {formatBytes(globalStats.bufferBytes)}</span>
+        {endedTerminalCount > 0 && <button type="button" onClick={() => setPendingAction({ kind: "clear", count: endedTerminalCount })} style={resourceClearStyle}>Clear {endedTerminalCount}</button>}
+      </div>
       <ProviderRow provider="shell" label="Terminal" badge=">_" badgeColor="#16a34a" open={shellOpen} onToggle={() => setShellOpen((value) => !value)} onNewAgent={onNewAgent} />
       {shellOpen && <div style={sessionListStyle}>
-        {shellTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "shell", count: shellTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
-        {shellTerminals.length === 0 ? <InlineMessage>No workspace terminals</InlineMessage> : shellTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
+        {projectScripts.length > 0 && <div style={projectScriptsStyle}>
+          <div style={projectScriptsHeaderStyle}><span style={projectScriptsLabelStyle}>Project scripts</span><span>{projectScripts.length}</span></div>
+          {projectScripts.length > 8 && <input value={projectScriptQuery} onChange={(event) => setProjectScriptQuery(event.target.value)} placeholder="Filter scripts" aria-label="Filter project scripts" style={projectScriptSearchStyle} />}
+          <div style={projectScriptButtonsStyle}>{visibleProjectScripts.map((script) => {
+            const matchingTasks = shellTerminals.filter((terminal) => terminal.title === `Task: ${script.name}`);
+            const task = matchingTasks.find((terminal) => terminal.state === "running") ?? matchingTasks.at(-1);
+            const running = task?.state === "running";
+            return <div key={script.name} style={projectScriptRowStyle} title={script.command}>
+              <button type="button" disabled={projectScriptBusy !== null} onClick={() => void runProjectScript(script)} style={projectScriptMainStyle}><StatusDot state={running ? "running" : "idle"} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{script.name}</span><small style={{ color: "var(--text-dim)", flexShrink: 0 }}>{projectScriptBusy === script.name ? "starting" : running ? "running" : task?.exitCode === 0 ? "passed" : task ? `failed${task.exitCode === null ? "" : ` ${task.exitCode}`}` : "run"}</small></button>
+              {running && <button type="button" aria-label={`Stop ${script.name}`} title="Stop task" onClick={() => void stopTerminal(task)} style={projectScriptStopStyle}>■</button>}
+            </div>;
+          })}</div>
+          {!projectScriptQuery && matchingProjectScripts.length > 8 && <button type="button" onClick={() => setShowAllProjectScripts((value) => !value)} style={projectScriptMoreStyle}>{showAllProjectScripts ? "Show less" : `Show ${matchingProjectScripts.length - 8} more`}</button>}
+          {projectScriptQuery && visibleProjectScripts.length === 0 && <InlineMessage>No matching scripts</InlineMessage>}
+        </div>}
+        {orphanedTaskTerminals.length > 0 && <div style={previousTasksStyle}>
+          <span style={projectScriptsLabelStyle}>Previous tasks</span>
+          {orphanedTaskTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
+        </div>}
+        {projectScriptError && <div role="alert" style={errorStyle}>{projectScriptError}</div>}
+        {manualShellTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "shell", count: shellTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
+        {manualShellTerminals.length === 0 && projectScripts.length === 0 ? <InlineMessage>No workspace terminals</InlineMessage> : manualShellTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
       </div>}
       <ProviderRow provider="codex" label="Codex" badge="C" badgeColor="var(--accent)" open={codexOpen} onToggle={() => setCodexOpen((value) => !value)} onNewAgent={onNewAgent} />
       {codexOpen && <div style={sessionListStyle}>
-        <div style={sessionFilterStyle}>
-          <button type="button" onClick={() => setShowArchived(false)} aria-pressed={!showArchived} style={{ ...filterButtonStyle, ...(!showArchived ? filterButtonActiveStyle : {}) }}>Active</button>
-          <button type="button" onClick={() => setShowArchived(true)} aria-pressed={showArchived} style={{ ...filterButtonStyle, ...(showArchived ? filterButtonActiveStyle : {}) }}>Archived</button>
+        <div style={sessionToolsStyle}>
+          <label style={searchStyle}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>
+            <input value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="Search sessions" aria-label="Search Codex sessions" style={searchInputStyle} />
+            {sessionQuery && <button type="button" onClick={() => setSessionQuery("")} aria-label="Clear session search" title="Clear" style={searchClearStyle}>×</button>}
+          </label>
+          <div style={sessionFilterStyle}>
+            <button type="button" onClick={() => setShowArchived(false)} aria-pressed={!showArchived} style={{ ...filterButtonStyle, ...(!showArchived ? filterButtonActiveStyle : {}) }}>Active</button>
+            <button type="button" onClick={() => setShowArchived(true)} aria-pressed={showArchived} style={{ ...filterButtonStyle, ...(showArchived ? filterButtonActiveStyle : {}) }}>Archived</button>
+          </div>
         </div>
-        <label style={searchStyle}>
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>
-          <input value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder="Search Codex sessions" aria-label="Search Codex sessions" style={searchInputStyle} />
-          {sessionQuery && <button type="button" onClick={() => setSessionQuery("")} aria-label="Clear session search" title="Clear" style={searchClearStyle}>×</button>}
-        </label>
         {actionError && <div role="alert" style={errorStyle}>{actionError}</div>}
         {!showArchived && codexTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "codex", count: codexTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
         {!showArchived && codexTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} preferredLabel={sessions.find((session) => session.id === terminal.sourceSessionId)?.name} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
@@ -367,6 +536,10 @@ export function AgentsPanel({ cwd, style, onExpandedChange, onNewAgent, onOpenCo
       onStart={() => void startSession()}
     />}
     {pendingAction && <AgentActionDialog action={pendingAction} renameValue={renameValue} busy={Boolean(busyId)} onRenameChange={setRenameValue} onCancel={() => setPendingAction(null)} onConfirm={confirmPendingAction} />}
+    {taskNotices.length > 0 && createPortal(<div aria-live="polite" style={taskNoticesStackStyle}>{taskNotices.map((notice) => <div key={notice.terminal.id} role="status" style={taskNoticeStyle}>
+      <button type="button" onClick={() => { onOpenTerminal?.(notice.terminal, notice.terminal.title); setTaskNotices((current) => current.filter((item) => item.terminal.id !== notice.terminal.id)); }} style={taskNoticeMainStyle}><strong>{notice.title}</strong><span>{notice.summary}</span></button>
+      <button type="button" aria-label="Dismiss task notification" onClick={() => setTaskNotices((current) => current.filter((item) => item.terminal.id !== notice.terminal.id))} style={taskNoticeCloseStyle}>×</button>
+    </div>)}</div>, document.body)}
   </>;
 }
 
@@ -588,19 +761,42 @@ function formatBytes(value: number): string {
   return `${(value / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-const headerStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 6, width: "100%", padding: "7px 10px", border: 0, background: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase", textAlign: "left" };
-const resourceSummaryStyle: CSSProperties = { display: "flex", alignItems: "center", flexWrap: "wrap", gap: "3px 8px", margin: "1px 4px 5px", padding: "6px 8px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--text-dim)", fontSize: 9.5, lineHeight: 1.3 };
-const resourceClearStyle: CSSProperties = { marginLeft: "auto", padding: 0, border: 0, background: "transparent", color: "var(--text-muted)", cursor: "pointer", font: "inherit" };
-const providerStyle: CSSProperties = { display: "flex", alignItems: "center", minHeight: 34, borderRadius: 7, background: "var(--bg-panel)" };
+function quoteShellArgument(value: string): string {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+const headerStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 7, width: "100%", minHeight: 36, padding: "8px 12px", border: 0, background: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, fontWeight: 650, letterSpacing: "0.045em", textTransform: "uppercase", textAlign: "left" };
+const agentsBodyStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 5, flex: 1, minHeight: 0, overflowY: "auto", padding: "0 8px 10px" };
+const resourceSummaryStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 8, minHeight: 32, margin: "0 1px 3px", padding: "0 9px", border: "1px solid var(--border)", borderRadius: 8, background: "color-mix(in srgb, var(--bg) 76%, transparent)", color: "var(--text-dim)", fontSize: 10, lineHeight: 1.3 };
+const overviewStatusStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 6, color: "var(--text-muted)", whiteSpace: "nowrap" };
+const overviewDotStyle: CSSProperties = { width: 7, height: 7, borderRadius: "50%", flexShrink: 0 };
+const overviewMetaStyle: CSSProperties = { minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right" };
+const resourceClearStyle: CSSProperties = { flexShrink: 0, padding: "3px 6px", border: 0, borderRadius: 4, background: "var(--bg-hover)", color: "var(--text-muted)", cursor: "pointer", font: "9.5px/1.2 inherit" };
+const providerStyle: CSSProperties = { display: "flex", alignItems: "center", minHeight: 36, marginTop: 1, border: "1px solid transparent", borderRadius: 8, background: "transparent" };
 const providerToggleStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 4, alignSelf: "stretch", minWidth: 0, flex: 1, padding: "0 4px 0 7px", border: 0, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", font: "inherit" };
-const sessionListStyle: CSSProperties = { display: "flex", flexDirection: "column", margin: "1px 0 4px 12px" };
-const sessionFilterStyle: CSSProperties = { display: "flex", gap: 2, margin: "3px 4px 1px 20px", padding: 2, borderRadius: 6, background: "var(--bg)" };
-const filterButtonStyle: CSSProperties = { flex: 1, minHeight: 24, padding: "3px 6px", border: 0, borderRadius: 4, background: "transparent", color: "var(--text-dim)", cursor: "pointer", font: "10.5px/1.2 inherit" };
+const sessionListStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 2, margin: "0 0 5px", padding: "1px 3px 4px 17px", borderLeft: "1px solid color-mix(in srgb, var(--border) 72%, transparent)" };
+const projectScriptsStyle: CSSProperties = { display: "grid", gap: 6, margin: "3px 0 5px", padding: "8px", border: "1px solid var(--border)", borderRadius: 8, background: "color-mix(in srgb, var(--bg) 76%, transparent)" };
+const projectScriptsHeaderStyle: CSSProperties = { display: "flex", justifyContent: "space-between", color: "var(--text-dim)", fontSize: 9.5 };
+const projectScriptsLabelStyle: CSSProperties = { color: "var(--text-dim)", fontSize: 9.5, fontWeight: 600, letterSpacing: ".04em", textTransform: "uppercase" };
+const projectScriptSearchStyle: CSSProperties = { width: "100%", boxSizing: "border-box", minHeight: 30, padding: "5px 8px", border: "1px solid var(--border)", borderRadius: 6, outline: 0, background: "var(--bg-panel)", color: "var(--text)", font: "11px/1.3 inherit" };
+const projectScriptButtonsStyle: CSSProperties = { display: "grid", gap: 3 };
+const projectScriptRowStyle: CSSProperties = { display: "flex", minWidth: 0, minHeight: 32, border: "1px solid transparent", borderRadius: 6, overflow: "hidden", background: "var(--bg-panel)" };
+const projectScriptMainStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 7, minWidth: 0, flex: 1, padding: "6px 8px", border: 0, background: "transparent", color: "var(--text-muted)", cursor: "pointer", font: "10.5px/1.25 var(--font-mono)", textAlign: "left" };
+const projectScriptStopStyle: CSSProperties = { width: 30, padding: 0, border: 0, borderLeft: "1px solid var(--border)", background: "transparent", color: "#f87171", cursor: "pointer", fontSize: 9 };
+const projectScriptMoreStyle: CSSProperties = { justifySelf: "start", padding: "2px 0", border: 0, background: "transparent", color: "var(--text-dim)", cursor: "pointer", font: "10px/1.2 inherit" };
+const previousTasksStyle: CSSProperties = { display: "grid", gap: 2, margin: "2px 0 5px", padding: "7px 8px", border: "1px dashed var(--border)", borderRadius: 8 };
+const taskNoticesStackStyle: CSSProperties = { position: "fixed", right: 14, bottom: "max(14px, calc(env(safe-area-inset-bottom) + 60px))", zIndex: 1300, display: "grid", gap: 8, width: "min(360px, calc(100vw - 28px))" };
+const taskNoticeStyle: CSSProperties = { display: "flex", overflow: "hidden", border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", boxShadow: "0 14px 40px rgb(0 0 0 / 35%)", color: "var(--text)" };
+const taskNoticeMainStyle: CSSProperties = { display: "grid", gap: 3, minWidth: 0, flex: 1, padding: "10px 12px", border: 0, background: "transparent", color: "inherit", cursor: "pointer", textAlign: "left", font: "11px/1.35 inherit" };
+const taskNoticeCloseStyle: CSSProperties = { width: 34, padding: 0, border: 0, borderLeft: "1px solid var(--border)", background: "transparent", color: "var(--text-dim)", cursor: "pointer", fontSize: 16 };
+const sessionToolsStyle: CSSProperties = { display: "grid", gap: 6, margin: "3px 0 6px", padding: "8px", border: "1px solid var(--border)", borderRadius: 8, background: "color-mix(in srgb, var(--bg) 76%, transparent)" };
+const sessionFilterStyle: CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2, padding: 2, borderRadius: 6, background: "var(--bg-panel)" };
+const filterButtonStyle: CSSProperties = { minHeight: 27, padding: "4px 7px", border: 0, borderRadius: 5, background: "transparent", color: "var(--text-dim)", cursor: "pointer", font: "10.5px/1.2 inherit" };
 const filterButtonActiveStyle: CSSProperties = { background: "var(--bg-selected)", color: "var(--text)" };
-const searchStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 6, minHeight: 28, margin: "3px 4px 4px 20px", padding: "0 7px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--text-dim)" };
-const searchInputStyle: CSSProperties = { minWidth: 0, flex: 1, padding: 0, border: 0, outline: 0, background: "transparent", color: "var(--text)", font: "11px/1.3 inherit" };
+const searchStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 7, minHeight: 32, padding: "0 9px", border: "1px solid var(--border)", borderRadius: 7, background: "var(--bg-panel)", color: "var(--text-dim)" };
+const searchInputStyle: CSSProperties = { minWidth: 0, flex: 1, padding: 0, border: 0, outline: 0, background: "transparent", color: "var(--text)", font: "11.5px/1.3 inherit" };
 const searchClearStyle: CSSProperties = { width: 18, height: 18, padding: 0, border: 0, borderRadius: 4, background: "transparent", color: "var(--text-dim)", cursor: "pointer", font: "15px/1 inherit" };
-const sessionRowStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 42, padding: "5px 7px 5px 10px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "inherit" };
+const sessionRowStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 44, padding: "6px 7px 6px 9px", border: 0, borderRadius: 7, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "inherit" };
 const sessionContainerStyle: CSSProperties = { position: "relative", display: "flex", alignItems: "stretch", minWidth: 0, borderRadius: 6 };
 const sessionMainStyle: CSSProperties = { ...sessionRowStyle, minWidth: 0, paddingRight: 2, flex: 1 };
 const sessionNameStyle: CSSProperties = { display: "block", overflow: "hidden", color: "var(--text)", fontSize: 11.5, lineHeight: "16px", textOverflow: "ellipsis", whiteSpace: "nowrap" };

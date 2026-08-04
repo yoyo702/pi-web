@@ -9,7 +9,7 @@ export interface Tab {
   label: string;
   kind: "pi" | "file" | "git" | "terminal" | "codex-chat";
   closable?: boolean;
-  status?: "idle" | "running" | "approval" | "ended";
+  status?: "idle" | "running" | "approval" | "connecting" | "offline" | "failed" | "ended";
   filePath?: string;
   sourceSessionId?: string | null;
   terminalId?: string;
@@ -109,7 +109,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab }: Props) {
             >
               {tab.label}
             </span>
-            {tab.status && <span title={tab.status} aria-label={tab.status} style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: tab.status === "approval" ? "#f59e0b" : tab.status === "running" ? "#22c55e" : tab.status === "ended" ? "var(--text-dim)" : "#3b82f6" }} />}
+            {tab.status && <span title={tab.status} aria-label={tab.status} style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: tab.status === "approval" ? "#f59e0b" : tab.status === "running" ? "#22c55e" : tab.status === "connecting" ? "#3b82f6" : tab.status === "offline" ? "#f59e0b" : tab.status === "failed" ? "#ef4444" : tab.status === "ended" ? "var(--text-dim)" : "#3b82f6" }} />}
             {tab.closable !== false && <button
               onClick={(e) => { e.stopPropagation(); onCloseTab(tab.id); }}
               onMouseEnter={() => setHoveredClose(tab.id)}
