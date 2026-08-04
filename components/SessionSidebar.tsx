@@ -27,6 +27,8 @@ interface Props {
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
   onOpenFile?: (filePath: string, fileName: string) => void;
+  onExplorerPathRenamed?: (oldPath: string, newPath: string, isDir: boolean) => void;
+  onExplorerPathDeleted?: (path: string, isDir: boolean) => void;
   explorerRefreshKey?: number;
   onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
@@ -371,7 +373,7 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onOpenGitReview, gitReviewOpen, onNewAgent, onOpenCodexSession, onOpenAgentTerminal, onAgentTerminalRemoved, onCodexSessionChanged, requestedModule, explorerRevealKey }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onExplorerPathRenamed, onExplorerPathDeleted, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onOpenGitReview, gitReviewOpen, onNewAgent, onOpenCodexSession, onOpenAgentTerminal, onAgentTerminalRemoved, onCodexSessionChanged, requestedModule, explorerRevealKey }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const sessionPane = useVerticalPaneSize("pi-sidebar-sessions-h", 280, 100, 640);
   const [sessionsExpanded, setSessionsExpanded] = useState(true);
@@ -1559,6 +1561,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               </button>
             )}
             {explorerOpen && (
+              <button onClick={() => fileExplorerRef.current?.openFolderUploadPicker()} disabled={explorerUploadBusy} title="Upload folder to project root" aria-label="Upload folder" style={{ display: "grid", placeItems: "center", width: 26, height: 26, padding: 0, border: 0, borderRadius: 5, background: "none", color: "var(--text-dim)", cursor: explorerUploadBusy ? "default" : "pointer" }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h6l2 2h10v11H3z"/><path d="M12 16v-5m-2 2 2-2 2 2"/></svg>
+              </button>
+            )}
+            {explorerOpen && (
               <button
                 onClick={() => fileExplorerRef.current?.openUploadPicker()}
                 disabled={explorerUploadBusy}
@@ -1631,6 +1638,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 onAtMention={onAtMention}
                 onAtMentions={onAtMentions}
                 onUploadBusyChange={setExplorerUploadBusy}
+                onPathRenamed={onExplorerPathRenamed}
+                onPathDeleted={onExplorerPathDeleted}
               />
             </div>
           )}

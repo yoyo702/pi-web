@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
@@ -27,7 +27,8 @@ import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
 import type { TerminalConnectionState } from "@/hooks/useTerminalSocket";
-import { Activity, ArrowLeft, Bot, Files, GitBranch, PanelsTopLeft } from "lucide-react";
+import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
+import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelsTopLeft, Plus, TerminalSquare } from "lucide-react";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -35,6 +36,9 @@ type AutoNameStatus =
   | { kind: "naming" }
   | { kind: "success" }
   | { kind: "error"; message: string };
+const rightPanelHeaderButtonStyle: React.CSSProperties = { width: 36, height: 36, display: "grid", placeItems: "center", padding: 0, border: 0, borderLeft: "1px solid var(--border)", background: "transparent", color: "var(--text-muted)", cursor: "pointer" };
+const rightPanelToolMenuStyle: React.CSSProperties = { position: "absolute", zIndex: 500, top: 38, right: 2, width: 190, display: "grid", gap: 2, padding: 5, border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", boxShadow: "0 14px 36px rgba(0,0,0,.26)" };
+const rightPanelToolItemStyle: React.CSSProperties = { minHeight: 32, display: "flex", alignItems: "center", gap: 8, padding: "0 9px", border: 0, borderRadius: 5, background: "transparent", color: "var(--text)", cursor: "pointer", font: "12px/1.2 inherit", textAlign: "left" };
 const WORKSPACE_TABS_STORAGE_KEY = "pi-web:workspace-tabs";
 const workspaceTabsStorageKey = (cwd: string) => `${WORKSPACE_TABS_STORAGE_KEY}:${encodeURIComponent(cwd)}`;
 
@@ -222,7 +226,8 @@ export function AppShell() {
   // Right panel tabs: file viewers and Git Review.
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
-  const [terminals, setTerminals] = useState<Record<string, TerminalSession>>({});
+  const { terminals: terminalList, loaded: terminalsLoaded, update: updateTerminals } = useWorkspaceTerminals(activeCwd ?? "");
+  const terminals = useMemo(() => Object.fromEntries(terminalList.map((terminal) => [terminal.id, terminal])), [terminalList]);
   const [newTerminalProvider, setNewTerminalProvider] = useState<TerminalProvider | null>(null);
   const [pendingTerminalClose, setPendingTerminalClose] = useState<{ tabId: string; terminal: TerminalSession } | null>(null);
   const [terminalCloseBusy, setTerminalCloseBusy] = useState(false);
@@ -291,6 +296,17 @@ export function AppShell() {
   // (a "focus the file/git view" mode). Only meaningful while the right panel
   // is open, so reopening later never leaves both main columns hidden.
   const [chatCollapsed, setChatCollapsed] = useState(false);
+  const [rightPanelFullscreen, setRightPanelFullscreen] = useState(false);
+  const [rightPanelMenuOpen, setRightPanelMenuOpen] = useState(false);
+  const rightPanelMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!rightPanelMenuOpen && !rightPanelFullscreen) return;
+    const onPointerDown = (event: PointerEvent) => { if (rightPanelMenuOpen && !rightPanelMenuRef.current?.contains(event.target as Node)) setRightPanelMenuOpen(false); };
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") { setRightPanelMenuOpen(false); setRightPanelFullscreen(false); } };
+    document.addEventListener("pointerdown", onPointerDown); document.addEventListener("keydown", onKeyDown);
+    return () => { document.removeEventListener("pointerdown", onPointerDown); document.removeEventListener("keydown", onKeyDown); };
+  }, [rightPanelFullscreen, rightPanelMenuOpen]);
+  useEffect(() => { if (!rightPanelOpen) { setRightPanelFullscreen(false); setRightPanelMenuOpen(false); } }, [rightPanelOpen]);
   useEffect(() => { if (!rightPanelOpen) setChatCollapsed(false); }, [rightPanelOpen]);
 
   // Resizable panels. null means "use the CSS default" (260px / 42vw) so the
@@ -655,6 +671,27 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
 
+  const handleExplorerPathRenamed = useCallback((oldPath: string, newPath: string, isDir: boolean) => {
+    const matches = (value?: string) => Boolean(value && (value === oldPath || (isDir && value.startsWith(`${oldPath}/`))));
+    const renamedPath = (value: string) => `${newPath}${value.slice(oldPath.length)}`;
+    setFileTabs((current) => current.map((tab) => {
+      if (tab.kind !== "file" || !matches(tab.filePath)) return tab;
+      const filePath = renamedPath(tab.filePath!);
+      return { ...tab, id: `file:${filePath}`, filePath, label: tab.filePath === oldPath ? getFileName(filePath) : tab.label };
+    }));
+    setActiveFileTabId((current) => current?.startsWith("file:") && matches(current.slice(5)) ? `file:${renamedPath(current.slice(5))}` : current);
+  }, []);
+
+  const handleExplorerPathDeleted = useCallback((deletedPath: string, isDir: boolean) => {
+    const matches = (tab: Tab) => tab.kind === "file" && Boolean(tab.filePath && (tab.filePath === deletedPath || (isDir && tab.filePath.startsWith(`${deletedPath}/`))));
+    const removedIds = new Set(fileTabs.filter(matches).map((tab) => tab.id));
+    if (removedIds.size === 0) return;
+    const remaining = fileTabs.filter((tab) => !removedIds.has(tab.id));
+    setFileTabs(remaining);
+    setActiveFileTabId((current) => current && removedIds.has(current) ? remaining.at(-1)?.id ?? null : current);
+    if (remaining.length === 0) setRightPanelOpen(false);
+  }, [fileTabs]);
+
   const handleCloseFileTab = useCallback((tabId: string) => {
     setFileTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
@@ -702,12 +739,12 @@ export function AppShell() {
       const response = await fetch(`/api/terminals/${encodeURIComponent(target.terminal.id)}/stop`, { method: "POST" });
       const data = await response.json() as { terminal?: TerminalSession; error?: string };
       if (!response.ok) throw new Error(data.error || "Unable to stop terminal");
-      if (data.terminal) setTerminals((current) => ({ ...current, [data.terminal!.id]: data.terminal! }));
+      if (data.terminal) updateTerminals((current) => [...current.filter((item) => item.id !== data.terminal!.id), data.terminal!]);
       setPendingTerminalClose(null);
       removeWorkspaceTab(target.tabId);
     } catch (cause) { setTerminalCloseError(cause instanceof Error ? cause.message : "Unable to stop terminal"); }
     finally { setTerminalCloseBusy(false); }
-  }, [pendingTerminalClose, removeWorkspaceTab]);
+  }, [pendingTerminalClose, removeWorkspaceTab, updateTerminals]);
 
   const handleSelectWorkspaceTab = useCallback((tabId: string) => {
     if (terminalSplit && tabId === `terminal:${terminalSplit.secondaryTerminalId}`) setTerminalSplit(null);
@@ -745,38 +782,40 @@ export function AppShell() {
   }, [workspaceTabs]);
 
   const handleAgentTerminalRemoved = useCallback((terminalId: string) => {
-    setTerminals((current) => { const next = { ...current }; delete next[terminalId]; return next; });
+    updateTerminals((current) => current.filter((terminal) => terminal.id !== terminalId));
     setWorkspaceTabs((current) => current.filter((tab) => tab.terminalId !== terminalId));
     setActiveWorkspaceTabId((current) => current === `terminal:${terminalId}` || current === `codex-chat:${terminalId}` ? "pi" : current);
-  }, []);
+  }, [updateTerminals]);
 
-  const handleOpenGitReview = useCallback(() => {
+  const openGitReview = useCallback(() => {
     if (!activeCwd) return;
     const tabId = "git-review";
-    // Toggle: if Git Review is already the visible tab, clicking closes it
-    // (and the panel too, when it was the only tab). Otherwise open/focus it.
-    if (rightPanelOpen && activeFileTabId === tabId) {
-      handleCloseFileTab(tabId);
-      return;
-    }
     setFileTabs((prev) => prev.some((tab) => tab.id === tabId)
       ? prev
       : [...prev, { id: tabId, label: "Git Review", kind: "git" }]);
     setActiveFileTabId(tabId);
     setRightPanelOpen(true);
     if (isMobile) setSidebarOpen(false);
-  }, [activeCwd, isMobile, rightPanelOpen, activeFileTabId, handleCloseFileTab]);
+  }, [activeCwd, isMobile]);
+
+  const handleOpenGitReview = useCallback(() => {
+    if (rightPanelOpen && activeFileTabId === "git-review") {
+      handleCloseFileTab("git-review");
+      return;
+    }
+    openGitReview();
+  }, [rightPanelOpen, activeFileTabId, handleCloseFileTab, openGitReview]);
 
   const handleTerminalCreated = useCallback((terminal: TerminalSession, preferredLabel?: string) => {
     const tabId = `terminal:${terminal.id}`;
-    setTerminals((current) => ({ ...current, [terminal.id]: terminal }));
+    updateTerminals((current) => [...current.filter((item) => item.id !== terminal.id), terminal]);
     setWorkspaceTabs((current) => current.some((tab) => tab.id === tabId)
       ? current
       : [...current, { id: tabId, label: preferredLabel || terminal.title || (terminal.provider === "shell" ? "Terminal" : `${terminal.provider} terminal`), kind: "terminal", terminalId: terminal.id, terminalProvider: terminal.provider, terminalPermissionMode: terminal.permissionMode, terminalLaunchMode: terminal.launchMode, terminalNoAltScreen: terminal.noAltScreen, terminalModel: terminal.model, terminalWebSearch: terminal.webSearch, terminalChatMode: terminal.chatMode, cwd: terminal.cwd, sourceSessionId: terminal.sourceSessionId, status: terminal.state === "running" ? "running" : "ended" }]);
     setActiveWorkspaceTabId(tabId);
     setNewTerminalProvider(null);
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile]);
+  }, [isMobile, updateTerminals]);
 
   const restartUnavailableTerminal = useCallback(async (tab: Tab): Promise<TerminalSession | null> => {
     if (!tab.terminalProvider || !tab.cwd) return null;
@@ -794,7 +833,7 @@ export function AppShell() {
       const renamedResponse = await fetch(`/api/terminals/${encodeURIComponent(data.terminal.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: tab.label }) });
       const renamedData = await renamedResponse.json() as { terminal?: TerminalSession };
       const restarted = renamedResponse.ok && renamedData.terminal ? renamedData.terminal : { ...data.terminal, title: tab.label };
-      setTerminals((current) => { const next = { ...current, [restarted.id]: restarted }; if (tab.terminalId) delete next[tab.terminalId]; return next; });
+      updateTerminals((current) => [...current.filter((item) => item.id !== restarted.id && item.id !== tab.terminalId), restarted]);
       setWorkspaceTabs((current) => current.map((item) => item.id === tab.id ? { ...item, terminalId: restarted.id, terminalProvider: restarted.provider, terminalPermissionMode: restarted.permissionMode, terminalLaunchMode: restarted.launchMode, terminalNoAltScreen: restarted.noAltScreen, terminalModel: restarted.model, terminalWebSearch: restarted.webSearch, terminalChatMode: restarted.chatMode, sourceSessionId: restarted.sourceSessionId, status: "running" } : item));
       setTerminalSplit((current) => current && tab.terminalId && current.secondaryTerminalId === tab.terminalId ? { ...current, secondaryTerminalId: restarted.id } : current);
       return restarted;
@@ -804,7 +843,7 @@ export function AppShell() {
       setTerminalRestoreErrors((current) => ({ ...current, [tab.id]: message }));
       return null;
     } finally { terminalRestoreInFlightRef.current.delete(tab.id); setTerminalRestartingId((current) => current === tab.id ? null : current); }
-  }, []);
+  }, [updateTerminals]);
 
   const handleOpenCodexChat = useCallback((terminal: TerminalSession) => {
     const tabId = `codex-chat:${terminal.id}`;
@@ -821,9 +860,9 @@ export function AppShell() {
   }, []);
 
   const handleTerminalChanged = useCallback((terminal: TerminalSession) => {
-    setTerminals((current) => ({ ...current, [terminal.id]: terminal }));
+    updateTerminals((current) => [...current.filter((item) => item.id !== terminal.id), terminal]);
     setWorkspaceTabs((current) => current.map((tab) => tab.terminalId === terminal.id && tab.kind === "terminal" ? { ...tab, label: terminal.title || tab.label, terminalPermissionMode: terminal.permissionMode, terminalLaunchMode: terminal.launchMode, terminalNoAltScreen: terminal.noAltScreen, terminalModel: terminal.model, terminalWebSearch: terminal.webSearch, terminalChatMode: terminal.chatMode, sourceSessionId: terminal.sourceSessionId, status: terminal.state === "running" ? "running" : "ended" } : tab));
-  }, []);
+  }, [updateTerminals]);
   const handleTerminalConnection = useCallback((terminalId: string, connection: TerminalConnectionState) => {
     const status: Tab["status"] = connection === "connected" ? "running" : connection === "offline" ? "offline" : connection === "disconnected" ? "failed" : "connecting";
     setWorkspaceTabs((current) => current.map((tab) => tab.kind === "terminal" && tab.terminalId === terminalId && tab.status !== status ? { ...tab, status } : tab));
@@ -838,38 +877,26 @@ export function AppShell() {
   }, []);
 
   useEffect(() => {
-    if (!activeCwd || workspaceTabsHydratedCwd !== activeCwd) return;
-    let cancelled = false;
-    const syncTerminals = () => { void fetch(`/api/terminals?${new URLSearchParams({ cwd: activeCwd })}`, { cache: "no-store" })
-      .then(async (response) => {
-        if (!response.ok) return;
-        const data = await response.json() as { terminals?: TerminalSession[] };
-        if (cancelled || !data.terminals) return;
-        setTerminals(Object.fromEntries(data.terminals.map((terminal) => [terminal.id, terminal])));
-        const available = new Set(data.terminals.map((terminal) => terminal.id));
-        setWorkspaceTabs((current) => {
-          let changed = false;
-          const next = current.map((tab) => {
-            if (tab.kind !== "terminal" || !tab.terminalId || available.has(tab.terminalId) || tab.status === "ended") return tab;
-            changed = true;
-            return { ...tab, status: "ended" as const };
-          });
-          return changed ? next : current;
-        });
-        if (terminalSplit) {
-          const restoreTabs = getMissingSplitTerminalTabs(workspaceTabs, terminalSplit, available);
-          const restoreKey = `${activeCwd}:${terminalSplit.primaryTabId}:${terminalSplit.secondaryTerminalId}`;
-          if (restoreTabs.length > 0 && splitRestoreAttemptRef.current !== restoreKey) {
-            splitRestoreAttemptRef.current = restoreKey;
-            void Promise.all(restoreTabs.map((tab) => restartUnavailableTerminal(tab)));
-          }
-        }
-      })
-      .catch(() => { /* terminal support must not disrupt the existing shell */ }); };
-    syncTerminals();
-    const timer = window.setInterval(() => { if (!document.hidden) syncTerminals(); }, 5000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [activeCwd, restartUnavailableTerminal, terminalSplit, workspaceTabs, workspaceTabsHydratedCwd]);
+    if (!activeCwd || workspaceTabsHydratedCwd !== activeCwd || !terminalsLoaded) return;
+    const available = new Set(terminalList.map((terminal) => terminal.id));
+    setWorkspaceTabs((current) => {
+      let changed = false;
+      const next = current.map((tab) => {
+        if (tab.kind !== "terminal" || !tab.terminalId || available.has(tab.terminalId) || tab.status === "ended") return tab;
+        changed = true;
+        return { ...tab, status: "ended" as const };
+      });
+      return changed ? next : current;
+    });
+    if (terminalSplit) {
+      const restoreTabs = getMissingSplitTerminalTabs(workspaceTabs, terminalSplit, available);
+      const restoreKey = `${activeCwd}:${terminalSplit.primaryTabId}:${terminalSplit.secondaryTerminalId}`;
+      if (restoreTabs.length > 0 && splitRestoreAttemptRef.current !== restoreKey) {
+        splitRestoreAttemptRef.current = restoreKey;
+        void Promise.all(restoreTabs.map((tab) => restartUnavailableTerminal(tab)));
+      }
+    }
+  }, [activeCwd, restartUnavailableTerminal, terminalList, terminalSplit, terminalsLoaded, workspaceTabs, workspaceTabsHydratedCwd]);
 
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
@@ -938,6 +965,8 @@ export function AppShell() {
         selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
         onCwdChange={handleCwdChange}
         onOpenFile={handleOpenFile}
+        onExplorerPathRenamed={handleExplorerPathRenamed}
+        onExplorerPathDeleted={handleExplorerPathDeleted}
         explorerRefreshKey={explorerRefreshKey}
         onExplorerRefresh={handleExplorerRefresh}
         onAtMention={handleAtMention}
@@ -1771,7 +1800,7 @@ export function AppShell() {
       </div>
 
       {/* Right panel resize handle */}
-      {!isMobile && rightPanelOpen && (
+      {!isMobile && rightPanelOpen && !rightPanelFullscreen && (
         <div
           className="resize-handle resize-handle--panel"
           onMouseDown={chatHidden ? restoreChatFromResize : beginRightPanelResize}
@@ -1783,7 +1812,7 @@ export function AppShell() {
 
       {/* Right panel: file viewer — always mounted, width animated via CSS */}
       <div
-        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${chatHidden ? " right-panel-full" : ""}`}
+        className={`right-panel-container${rightPanelOpen ? " right-panel-open" : " right-panel-closed"}${chatHidden ? " right-panel-full" : ""}${rightPanelFullscreen ? " right-panel-fullscreen" : ""}`}
         style={{
           display: "flex",
           flexDirection: "column",
@@ -1828,6 +1857,15 @@ export function AppShell() {
               onSelectTab={setActiveFileTabId}
               onCloseTab={handleCloseFileTab}
             />
+          </div>
+          <div ref={rightPanelMenuRef} style={{ position: "relative", display: "flex", flexShrink: 0 }}>
+            <button type="button" onClick={() => setRightPanelFullscreen((value) => !value)} title={rightPanelFullscreen ? "Exit fullscreen" : "Fullscreen"} aria-label={rightPanelFullscreen ? "Exit fullscreen" : "Fullscreen"} aria-pressed={rightPanelFullscreen} style={rightPanelHeaderButtonStyle}>{rightPanelFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button>
+            <button type="button" onClick={() => setRightPanelMenuOpen((value) => !value)} title="Open workspace tool" aria-label="Open workspace tool" aria-expanded={rightPanelMenuOpen} style={rightPanelHeaderButtonStyle}><Plus size={17} /></button>
+            {rightPanelMenuOpen && <div role="menu" aria-label="Workspace tools" style={rightPanelToolMenuStyle}>
+              <button type="button" role="menuitem" disabled={!activeCwd} onClick={() => { setRightPanelMenuOpen(false); openGitReview(); }} style={rightPanelToolItemStyle}><GitBranch size={15} />Git Review</button>
+              <button type="button" role="menuitem" disabled={!activeCwd} onClick={() => { setRightPanelMenuOpen(false); setRightPanelOpen(false); setSidebarOpen(true); if (isMobile) setMobileSidebarModule("explorer"); }} style={rightPanelToolItemStyle}><Files size={15} />Workspace Files</button>
+              {(["shell", "codex", "claude"] as TerminalProvider[]).map((provider) => <button key={provider} type="button" role="menuitem" disabled={!activeCwd} onClick={() => { setRightPanelMenuOpen(false); setNewTerminalProvider(provider); }} style={rightPanelToolItemStyle}><TerminalSquare size={15} />{provider === "shell" ? "Terminal" : provider === "codex" ? "Codex" : "Claude"}</button>)}
+            </div>}
           </div>
           {!isMobile && rightPanelOpen && (
             <button
@@ -1890,7 +1928,7 @@ export function AppShell() {
         </div>
       </div>
     </div>
-    {isMobile && <nav className="mobile-main-nav" aria-label="Mobile navigation">
+    {isMobile && !rightPanelFullscreen && <nav className="mobile-main-nav" aria-label="Mobile navigation">
       <button type="button" aria-pressed={!sidebarOpen && !rightPanelOpen} onClick={() => { setSidebarOpen(false); setRightPanelOpen(false); }}><PanelsTopLeft size={18} /><small>Workspace</small></button>
       <button type="button" aria-pressed={sidebarOpen && mobileSidebarModule === "agents"} onClick={() => { prepareMobileOverlayHistory(); setMobileSidebarModule("agents"); setRightPanelOpen(false); setSidebarOpen(true); }}><Bot size={18} /><small>Agents</small></button>
       <button type="button" aria-pressed={sidebarOpen && mobileSidebarModule === "explorer"} onClick={() => { prepareMobileOverlayHistory(); setMobileSidebarModule("explorer"); setMobileExplorerRevealKey((key) => key + 1); setRightPanelOpen(false); setSidebarOpen(true); }}><Files size={18} /><small>Files</small></button>

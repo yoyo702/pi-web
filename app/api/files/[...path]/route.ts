@@ -164,6 +164,7 @@ export async function POST(
       throw error;
     }
     const files = formData.getAll("files").filter((entry): entry is File => typeof entry !== "string");
+    const folderPaths = formData.getAll("paths").filter((entry): entry is string => typeof entry === "string");
     if (files.some((file) => file.size > MAX_UPLOAD_FILE_BYTES)) {
       return NextResponse.json({ error: "Each upload must be 25MB or smaller" }, { status: 413 });
     }
@@ -171,6 +172,31 @@ export async function POST(
       return NextResponse.json({ error: "Uploads must total 100MB or less" }, { status: 413 });
     }
     const fileNames = files.map((file) => file.name);
+    if (folderPaths.length > 0) {
+      if (folderPaths.length !== files.length) return NextResponse.json({ error: "Folder upload manifest is invalid" }, { status: 400 });
+      const uploaded: string[] = []; const skipped: string[] = []; const errors: Array<{ name: string; error: string }> = [];
+      for (let index = 0; index < files.length; index++) {
+        const relative = folderPaths[index].replace(/\\/g, "/").replace(/^\/+/, "");
+        const parts = relative.split("/");
+        if (!relative || relative.length > 1024 || parts.length > 64 || parts.some((part) => !part || part === "." || part === ".." || part === ".git")) { errors.push({ name: relative, error: "Invalid folder path" }); continue; }
+        const destination = path.resolve(directory, relative);
+        if (!isFilePathAllowed(destination, new Set([directory]))) { errors.push({ name: relative, error: "Access denied" }); continue; }
+        let unsafeLink = false;
+        let cursor = directory;
+        for (const segment of parts.slice(0, -1)) { cursor = path.join(cursor, segment); if (fs.existsSync(cursor) && fs.lstatSync(cursor).isSymbolicLink()) { unsafeLink = true; break; } }
+        if (unsafeLink) { errors.push({ name: relative, error: "Folder path contains a symbolic link" }); continue; }
+        if (fs.existsSync(destination)) { if (strategy === "skip") { skipped.push(relative); continue; } if (strategy === "error") { errors.push({ name: relative, error: "File already exists" }); continue; } if (!fs.lstatSync(destination).isFile() || fs.lstatSync(destination).isSymbolicLink()) { errors.push({ name: relative, error: "Cannot replace this item" }); continue; } }
+        try {
+          const bytes = Buffer.from(await files[index].arrayBuffer());
+          fs.mkdirSync(path.dirname(destination), { recursive: true });
+          if (!isFilePathAllowed(fs.realpathSync(path.dirname(destination)), new Set([directory]))) throw new Error("Folder escapes the upload directory");
+          if (fs.existsSync(destination)) fs.unlinkSync(destination);
+          fs.writeFileSync(destination, bytes, { flag: "wx" }); uploaded.push(relative);
+        }
+        catch (error) { errors.push({ name: relative, error: error instanceof Error ? error.message : String(error) }); }
+      }
+      return NextResponse.json({ uploaded, skipped, errors }, { status: errors.length ? 207 : 200 });
+    }
     const validationError = validateUploadFileNames(fileNames);
     if (validationError) {
       return NextResponse.json({ error: validationError }, { status: 400 });
@@ -584,9 +610,10 @@ export async function GET(
 
     // Avoid per-entry stat calls for normal files and directories. Symlinks and
     // filesystems without directory type information use the stat fallback.
+    const hideHidden = request.nextUrl.searchParams.get("hideHidden") === "1";
     const dirents = fs.readdirSync(filePath, { withFileTypes: true });
     const entries = dirents
-      .filter((d) => !IGNORED_NAMES.has(d.name) && !IGNORED_SUFFIXES.some((s) => d.name.endsWith(s)))
+      .filter((d) => (!hideHidden || !d.name.startsWith(".")) && !IGNORED_NAMES.has(d.name) && !IGNORED_SUFFIXES.some((s) => d.name.endsWith(s)))
       .flatMap((d) => {
         const isDir = resolveDirentIsDirectory(d, path.join(filePath, d.name));
         return isDir === null

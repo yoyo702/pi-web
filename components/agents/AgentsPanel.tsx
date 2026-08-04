@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { TerminalPermissionMode, TerminalProvider, TerminalSession, TerminalStats } from "@/lib/agents/terminal";
+import type { TerminalPermissionMode, TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
+import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
 
 export interface CodexSessionTarget {
   sessionId: string;
@@ -54,7 +55,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [sessionQuery, setSessionQuery] = useState("");
   const [debouncedSessionQuery, setDebouncedSessionQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
-  const [terminals, setTerminals] = useState<TerminalSession[]>([]);
+  const { terminals, stats: terminalStats, update: setTerminals } = useWorkspaceTerminals(cwd, refreshKey);
   const [projectScripts, setProjectScripts] = useState<ProjectScript[]>([]);
   const [projectScriptQuery, setProjectScriptQuery] = useState("");
   const [showAllProjectScripts, setShowAllProjectScripts] = useState(false);
@@ -62,7 +63,6 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [projectScriptBusy, setProjectScriptBusy] = useState<string | null>(null);
   const [projectScriptError, setProjectScriptError] = useState<string | null>(null);
   const [taskNotices, setTaskNotices] = useState<TaskNotice[]>([]);
-  const [terminalStats, setTerminalStats] = useState<TerminalStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -179,30 +179,14 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   }, [loadSessions, refreshKey]);
 
   useEffect(() => {
-    let cancelled = false;
-    const loadTerminals = async () => {
-      try {
-        const response = await fetch(`/api/terminals?${new URLSearchParams({ cwd })}`, { cache: "no-store" });
-        if (!response.ok) return;
-        const data = await response.json() as { terminals?: TerminalSession[]; stats?: TerminalStats };
-        if (!cancelled) {
-          const next = data.terminals ?? [];
-          if (taskStatesReadyRef.current) {
-            for (const terminal of next) {
-              if (terminal.title?.startsWith("Task: ") && taskStatesRef.current.get(terminal.id) === "running" && terminal.state !== "running") void showTaskCompletion(terminal);
-            }
-          }
-          taskStatesRef.current = new Map(next.map((terminal) => [terminal.id, terminal.state]));
-          taskStatesReadyRef.current = true;
-          setTerminals(next);
-          setTerminalStats(data.stats ?? null);
-        }
-      } catch { /* Agent history remains usable when the optional terminal service is unavailable. */ }
-    };
-    void loadTerminals();
-    const timer = window.setInterval(() => { if (!document.hidden) void loadTerminals(); }, 5000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [cwd, refreshKey, showTaskCompletion]);
+    if (taskStatesReadyRef.current) {
+      for (const terminal of terminals) {
+        if (terminal.title?.startsWith("Task: ") && taskStatesRef.current.get(terminal.id) === "running" && terminal.state !== "running") void showTaskCompletion(terminal);
+      }
+    }
+    taskStatesRef.current = new Map(terminals.map((terminal) => [terminal.id, terminal.state]));
+    taskStatesReadyRef.current = true;
+  }, [showTaskCompletion, terminals]);
 
   useEffect(() => {
     taskStatesRef.current.clear();
@@ -310,7 +294,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     } finally {
       setBusyId(null);
     }
-  }, [cwd, launchModel, launchPermission, launchPrompt, launchReasoningEffort, launchServiceTier, launchTarget, launchWebSearch, onOpenCodexSession, onOpenTerminal]);
+  }, [cwd, launchModel, launchPermission, launchPrompt, launchReasoningEffort, launchServiceTier, launchTarget, launchWebSearch, onOpenCodexSession, onOpenTerminal, setTerminals]);
 
   const stopTerminal = useCallback(async (terminal: TerminalSession) => {
     setActionError(null);
@@ -322,7 +306,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to stop terminal");
     }
-  }, []);
+  }, [setTerminals]);
 
   const removeTerminalRecord = useCallback(async (terminal: TerminalSession) => {
     setActionError(null);
@@ -335,7 +319,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to remove terminal record");
     }
-  }, [onTerminalRemoved]);
+  }, [onTerminalRemoved, setTerminals]);
 
   const runProjectScript = useCallback(async (script: ProjectScript) => {
     const taskTitle = `Task: ${script.name}`;
@@ -382,7 +366,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     } finally {
       setProjectScriptBusy(null);
     }
-  }, [cwd, onOpenTerminal, projectScriptRunner, terminals]);
+  }, [cwd, onOpenTerminal, projectScriptRunner, setTerminals, terminals]);
 
   const clearEndedTerminalRecords = useCallback(async (provider?: TerminalProvider) => {
     const ended = terminals.filter((terminal) => (!provider || terminal.provider === provider) && terminal.state !== "running");
@@ -400,7 +384,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "Unable to clear terminal records");
     }
-  }, [cwd, onTerminalRemoved, terminals]);
+  }, [cwd, onTerminalRemoved, setTerminals, terminals]);
 
   const runningTerminalCount = terminals.filter((terminal) => terminal.state === "running").length;
   const endedTerminalCount = terminals.length - runningTerminalCount;
@@ -434,7 +418,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
         <span title={`Global: ${globalStats.running}/${limits.running} running · ${globalStats.records}/${limits.records} records · ${formatBytes(globalStats.bufferBytes)}`} style={overviewMetaStyle}>{globalStats.records} sessions · {formatBytes(globalStats.bufferBytes)}</span>
         {endedTerminalCount > 0 && <button type="button" onClick={() => setPendingAction({ kind: "clear", count: endedTerminalCount })} style={resourceClearStyle}>Clear {endedTerminalCount}</button>}
       </div>
-      <ProviderRow provider="shell" label="Terminal" badge=">_" badgeColor="#16a34a" open={shellOpen} onToggle={() => setShellOpen((value) => !value)} onNewAgent={onNewAgent} />
+      <ProviderRow provider="shell" label="Terminal" badge=">_" badgeColor="#16a34a" open={shellOpen} count={shellTerminals.length} running={shellTerminals.filter((terminal) => terminal.state === "running").length} onToggle={() => setShellOpen((value) => !value)} onNewAgent={onNewAgent} />
       {shellOpen && <div style={sessionListStyle}>
         {projectScripts.length > 0 && <div style={projectScriptsStyle}>
           <div style={projectScriptsHeaderStyle}><span style={projectScriptsLabelStyle}>Project scripts</span><span>{projectScripts.length}</span></div>
@@ -459,7 +443,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
         {manualShellTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "shell", count: shellTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
         {manualShellTerminals.length === 0 && projectScripts.length === 0 ? <InlineMessage>No workspace terminals</InlineMessage> : manualShellTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
       </div>}
-      <ProviderRow provider="codex" label="Codex" badge="C" badgeColor="var(--accent)" open={codexOpen} onToggle={() => setCodexOpen((value) => !value)} onNewAgent={onNewAgent} />
+      <ProviderRow provider="codex" label="Codex" badge="C" badgeColor="var(--accent)" open={codexOpen} count={codexTerminals.length + codexHistory.length} running={codexTerminals.filter((terminal) => terminal.state === "running").length + sessions.filter((session) => session.runtime?.state === "running" || session.runtime?.state === "approval").length} onToggle={() => setCodexOpen((value) => !value)} onNewAgent={onNewAgent} />
       {codexOpen && <div style={sessionListStyle}>
         <div style={sessionToolsStyle}>
           <label style={searchStyle}>
@@ -505,7 +489,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
                 </ActionMenu>
               </div>)}
       </div>}
-      <ProviderRow provider="claude" label="Claude" badge="A" badgeColor="#d97706" open={claudeOpen} onToggle={() => setClaudeOpen((value) => !value)} onNewAgent={onNewAgent} />
+      <ProviderRow provider="claude" label="Claude" badge="A" badgeColor="#d97706" open={claudeOpen} count={claudeTerminals.length} running={claudeTerminals.filter((terminal) => terminal.state === "running").length} onToggle={() => setClaudeOpen((value) => !value)} onNewAgent={onNewAgent} />
       {claudeOpen && <div style={sessionListStyle}>
         {claudeTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "claude", count: claudeTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
         {claudeTerminals.length === 0 ? <InlineMessage>No active Claude sessions</InlineMessage> : claudeTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
@@ -719,12 +703,14 @@ function TerminalRow({ terminal, preferredLabel, onOpen, onStop, onRemove }: { t
   </div>;
 }
 
-function ProviderRow({ provider, label, badge, badgeColor, open, onToggle, onNewAgent }: { provider: TerminalProvider; label: string; badge: string; badgeColor: string; open: boolean; onToggle: () => void; onNewAgent?: (provider: TerminalProvider) => void }) {
+function ProviderRow({ provider, label, badge, badgeColor, open, count, running, onToggle, onNewAgent }: { provider: TerminalProvider; label: string; badge: string; badgeColor: string; open: boolean; count: number; running: number; onToggle: () => void; onNewAgent?: (provider: TerminalProvider) => void }) {
   return <div style={providerStyle}>
     <button type="button" onClick={onToggle} aria-expanded={open} style={providerToggleStyle}>
       <Chevron open={open} />
       <span style={{ display: "grid", width: 20, placeItems: "center", color: badgeColor, fontSize: 11, fontWeight: 700 }}>{badge}</span>
       <span style={{ flex: 1, color: "var(--text)", fontSize: 12 }}>{label}</span>
+      {running > 0 && <span title={`${running} running`} aria-label={`${running} running`} style={providerRunningStyle}><StatusDot state="running" />{running}</span>}
+      <span title={`${count} ${label} items`} style={providerCountStyle}>{count}</span>
     </button>
     {onNewAgent && <button type="button" onClick={() => onNewAgent(provider)} title={`New ${label} terminal`} aria-label={`New ${label} terminal`} style={addStyle}>＋</button>}
   </div>;
@@ -774,6 +760,8 @@ const overviewMetaStyle: CSSProperties = { minWidth: 0, flex: 1, overflow: "hidd
 const resourceClearStyle: CSSProperties = { flexShrink: 0, padding: "3px 6px", border: 0, borderRadius: 4, background: "var(--bg-hover)", color: "var(--text-muted)", cursor: "pointer", font: "9.5px/1.2 inherit" };
 const providerStyle: CSSProperties = { display: "flex", alignItems: "center", minHeight: 36, marginTop: 1, border: "1px solid transparent", borderRadius: 8, background: "transparent" };
 const providerToggleStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 4, alignSelf: "stretch", minWidth: 0, flex: 1, padding: "0 4px 0 7px", border: 0, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", font: "inherit" };
+const providerRunningStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 4, padding: "2px 5px", borderRadius: 999, background: "color-mix(in srgb, #22c55e 10%, transparent)", color: "#16a34a", fontSize: 10, fontVariantNumeric: "tabular-nums" };
+const providerCountStyle: CSSProperties = { minWidth: 18, color: "var(--text-dim)", fontSize: 10, textAlign: "right", fontVariantNumeric: "tabular-nums" };
 const sessionListStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 2, margin: "0 0 5px", padding: "1px 3px 4px 17px", borderLeft: "1px solid color-mix(in srgb, var(--border) 72%, transparent)" };
 const projectScriptsStyle: CSSProperties = { display: "grid", gap: 6, margin: "3px 0 5px", padding: "8px", border: "1px solid var(--border)", borderRadius: 8, background: "color-mix(in srgb, var(--bg) 76%, transparent)" };
 const projectScriptsHeaderStyle: CSSProperties = { display: "flex", justifyContent: "space-between", color: "var(--text-dim)", fontSize: 9.5 };

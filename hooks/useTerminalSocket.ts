@@ -11,13 +11,13 @@ function terminalSocketUrl(id: string) {
   return `${protocol}//${window.location.host}/api/terminals/${encodeURIComponent(id)}/stream`;
 }
 
-export function useTerminalSocket({ terminalId, terminalRef, syncSize, onTerminalChange }: {
+export function useTerminalSocket({ terminalId, terminalRef, socketRef, syncSize, onTerminalChange }: {
   terminalId: string;
   terminalRef: RefObject<Terminal | null>;
+  socketRef: RefObject<WebSocket | null>;
   syncSize: () => void;
   onTerminalChange: (terminal: TerminalSession) => void;
 }) {
-  const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const connectRef = useRef<() => void>(() => undefined);
@@ -99,7 +99,7 @@ export function useTerminalSocket({ terminalId, terminalRef, syncSize, onTermina
         })
         .catch(() => scheduleReconnect());
     };
-  }, [clearReconnectTimer, onTerminalChange, scheduleReconnect, syncSize, terminalId, terminalRef]);
+  }, [clearReconnectTimer, onTerminalChange, scheduleReconnect, socketRef, syncSize, terminalId, terminalRef]);
   connectRef.current = connect;
 
   useEffect(() => {
@@ -121,7 +121,7 @@ export function useTerminalSocket({ terminalId, terminalRef, syncSize, onTermina
         socketRef.current = null;
       }
     };
-  }, [clearReconnectTimer, terminalId]);
+  }, [clearReconnectTimer, socketRef, terminalId]);
 
   return { socketRef, connection, connectionError, connect };
 }

@@ -32,6 +32,7 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
   const panelRef = useRef<HTMLElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const onConnectionChangeRef = useRef(onConnectionChange);
   onConnectionChangeRef.current = onConnectionChange;
@@ -105,7 +106,7 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
     } else if (value === "\x7f" || value === "\b") commandInputRef.current = commandInputRef.current.slice(0, -1);
     else if (value === "\x03" || value === "\x15") commandInputRef.current = "";
     else if (!value.startsWith("\x1b") && value >= " ") commandInputRef.current = (commandInputRef.current + value).slice(-8_000);
-  }, [terminal.chatInputOwned, transformInput]);
+  }, [socketRef, terminal.chatInputOwned, transformInput]);
 
   const updateTerminal = useCallback((next: TerminalSession) => {
     setTerminal(next);
@@ -124,8 +125,8 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cols, rows }),
       });
     }, 80);
-  }, [initial.id]);
-  const { socketRef, connection, connectionError, connect } = useTerminalSocket({ terminalId: initial.id, terminalRef, syncSize, onTerminalChange: updateTerminal });
+  }, [initial.id, socketRef]);
+  const { connection, connectionError, connect } = useTerminalSocket({ terminalId: initial.id, terminalRef, socketRef, syncSize, onTerminalChange: updateTerminal });
   const status = terminalStatus(terminal, connection);
   useEffect(() => { onConnectionChangeRef.current?.(connection); }, [connection]);
 

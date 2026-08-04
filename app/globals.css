@@ -1046,6 +1046,25 @@ span.linenumber {
   }
 }
 
+/* Application-local fullscreen, matching Pivot UI: only the right panel fills the viewport. */
+.right-panel-container.right-panel-fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 350;
+  flex: none !important;
+  width: 100vw !important;
+  min-width: 0 !important;
+  height: 100dvh;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0;
+  box-shadow: none;
+}
+.right-panel-container.right-panel-fullscreen > * {
+  width: 100% !important;
+  min-width: 0 !important;
+}
+
 /* assistant-ui Codex conversation surface */
 .codex-aui-thread{position:relative;height:100%;display:flex;flex-direction:column;background:var(--bg);color:var(--text)}
 .codex-aui-viewport{flex:1;overflow:auto;padding:22px max(20px,calc((100% - 820px)/2));scroll-behavior:smooth}

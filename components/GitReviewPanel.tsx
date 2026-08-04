@@ -791,34 +791,72 @@ function segPath(s: GraphSeg): string {
 function HistoryView({ cwd, refreshToken }: { cwd: string; refreshToken: number }) {
   const split = useSplit("pi-git-history-split", 300, 180, 620);
   const [log, setLog] = useState<GitLogResponse | null>(null);
-  const [, setLoading] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadMoreError, setLoadMoreError] = useState<string | null>(null);
   const [selectedHash, setSelectedHash] = useState<string | null>(null);
+  const logRef = useRef<GitLogResponse | null>(null);
+  const generationRef = useRef(0);
+  const loadingMoreRef = useRef(false);
+  logRef.current = log;
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback(async (append = false) => {
+    if (append && loadingMoreRef.current) return;
+    const generation = append ? generationRef.current : ++generationRef.current;
+    const baseLog = append ? logRef.current : null;
+    if (append) {
+      loadingMoreRef.current = true;
+      setLoadingMore(true);
+      setLoadMoreError(null);
+    } else {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+      setLoading(true);
+      setError(null);
+      setLoadMoreError(null);
+    }
     try {
-      const res = await fetch(`/api/git/log?${new URLSearchParams({ cwd, limit: "80" })}`);
+      const skip = append ? baseLog?.commits.length ?? 0 : 0;
+      const res = await fetch(`/api/git/log?${new URLSearchParams({ cwd, limit: "80", skip: String(skip) })}`);
       const next = await res.json() as GitLogResponse & { error?: string };
       if (!res.ok) throw new Error(next.error ?? `Failed to load history (${res.status})`);
-      setLog(next);
-      setSelectedHash((prev) => prev && next.commits.some((commit) => commit.hash === prev)
-        ? prev
-        : next.commits[0]?.hash ?? null);
+      if (generation !== generationRef.current) return;
+      if (append) {
+        setLog((current) => {
+          if (!current) return current;
+          const seen = new Set(current.commits.map((commit) => commit.hash));
+          const merged = { ...next, commits: [...current.commits, ...next.commits.filter((commit) => !seen.has(commit.hash))] };
+          logRef.current = merged;
+          return merged;
+        });
+      } else {
+        logRef.current = next;
+        setLog(next);
+        setSelectedHash((prev) => prev && next.commits.some((commit) => commit.hash === prev)
+          ? prev
+          : next.commits[0]?.hash ?? null);
+      }
     } catch (cause) {
-      setLog(null);
-      setError(cause instanceof Error ? cause.message : String(cause));
+      if (generation !== generationRef.current) return;
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (append) setLoadMoreError(message);
+      else { setLog(null); logRef.current = null; setError(message); }
     } finally {
-      setLoading(false);
+      if (generation === generationRef.current) {
+        if (append) { loadingMoreRef.current = false; setLoadingMore(false); }
+        else setLoading(false);
+      }
     }
   }, [cwd]);
 
-  useEffect(() => { void load(); }, [load, refreshToken]);
+  const initialLoadRef = useRef(load);
+  initialLoadRef.current = load;
+  useEffect(() => { void initialLoadRef.current(false); }, [cwd, refreshToken]);
 
   const graph = useMemo(() => computeCommitGraph(log?.commits ?? []), [log]);
 
-  if (error) return <EmptyState title="Unable to load history" detail={error} action={load} />;
+  if (error) return <EmptyState title="Unable to load history" detail={error} action={() => void load(false)} />;
   if (!log) return <EmptyState title="Loading history…" />;
   if (log.commits.length === 0) return <EmptyState title="No commits yet" detail="This repository has no history." />;
 
@@ -874,11 +912,8 @@ function HistoryView({ cwd, refreshToken }: { cwd: string; refreshToken: number 
             </button>
           );
         })}
-        {log.hasMore && (
-          <div style={{ padding: "8px 10px", color: "var(--text-dim)", fontSize: 11 }}>
-            Showing the latest {log.commits.length} commits.
-          </div>
-        )}
+        {log.hasMore && <button type="button" onClick={() => void load(true)} disabled={loadingMore || loading} style={{ width: "calc(100% - 12px)", height: 30, margin: "6px 6px 2px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)", color: loadMoreError ? "#f87171" : "var(--text-muted)", cursor: loadingMore ? "default" : "pointer", fontSize: 11 }}>{loadingMore ? "Loading more…" : loadMoreError ? "Retry loading more" : `Load more · ${log.commits.length} shown`}</button>}
+        {loadMoreError && <div role="alert" style={{ padding: "2px 8px 7px", color: "#f87171", fontSize: 10, lineHeight: 1.35 }}>{loadMoreError}</div>}
       </aside>
       <div className="resize-handle" onMouseDown={split.onDragStart} role="separator" aria-orientation="vertical" title="Drag to resize" />
       <main style={{ minWidth: 0, flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
