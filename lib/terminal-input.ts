@@ -61,3 +61,21 @@ export function toTerminalKeyData(event: TerminalKeyEventLike): string | null {
 export function asBracketedPaste(text: string): string {
   return `\x1b[200~${text}\x1b[201~`;
 }
+
+export type TerminalModifier = "ctrl" | "alt";
+
+export function applyTerminalModifier(modifier: TerminalModifier, data: string): string {
+  if (modifier === "alt") return `\x1b${data}`;
+  const [first, ...rest] = Array.from(data);
+  if (!first) return data;
+  if (first === " ") return `\x00${rest.join("")}`;
+  if (first === "?") return `\x7f${rest.join("")}`;
+  const uppercase = first.toUpperCase();
+  const code = uppercase.length === 1 ? uppercase.charCodeAt(0) : 0;
+  return `${code >= 64 && code <= 95 ? String.fromCharCode(code & 0x1f) : first}${rest.join("")}`;
+}
+
+export function getTerminalVisibleHeight(layoutHeight: number, viewportHeight: number, viewportOffsetTop: number, terminalTop: number): number | null {
+  if (layoutHeight - viewportHeight <= 120) return null;
+  return Math.max(0, Math.floor(viewportHeight - terminalTop + viewportOffsetTop));
+}

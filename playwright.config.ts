@@ -1,0 +1,33 @@
+import { defineConfig, devices } from "@playwright/test";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const localMacChromium = join(homedir(), "Library/Caches/ms-playwright/chromium-1228/chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing");
+const localLaunchOptions = process.platform === "darwin" && existsSync(localMacChromium) ? { executablePath: localMacChromium } : {};
+
+export default defineConfig({
+  testDir: "./e2e",
+  fullyParallel: false,
+  forbidOnly: Boolean(process.env.CI),
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI ? 1 : undefined,
+  reporter: process.env.CI ? "github" : "list",
+  use: {
+    baseURL: "http://127.0.0.1:30142",
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
+    video: "retain-on-failure",
+    launchOptions: localLaunchOptions,
+  },
+  projects: [
+    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    { name: "mobile-chromium", use: { ...devices["Pixel 7"] } },
+  ],
+  webServer: {
+    command: "PI_WEB_NEXT_DIST_DIR=.next-e2e node server/pi-web-server.js dev -H 127.0.0.1 -p 30142",
+    url: "http://127.0.0.1:30142",
+    reuseExistingServer: !process.env.CI,
+    timeout: 120_000,
+  },
+});

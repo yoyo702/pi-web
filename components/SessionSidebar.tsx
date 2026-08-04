@@ -4,6 +4,8 @@ import { useEffect, useLayoutEffect, useState, useCallback, useRef, type CSSProp
 import type { SessionInfo } from "@/lib/types";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
+import type { TerminalProvider } from "@/lib/agents/terminal";
+import { AgentsPanel, type CodexSessionTarget } from "./agents/AgentsPanel";
 
 declare global {
   interface Window {
@@ -31,6 +33,11 @@ interface Props {
   onAtMentions?: (relativePaths: string[]) => void;
   onOpenGitReview?: () => void;
   gitReviewOpen?: boolean;
+  onNewAgent?: (provider: TerminalProvider) => void;
+  onOpenCodexSession?: (target: CodexSessionTarget) => void;
+  onOpenAgentTerminal?: (terminal: import("@/lib/agents/terminal").TerminalSession, label?: string) => void;
+  onAgentTerminalRemoved?: (terminalId: string) => void;
+  onCodexSessionChanged?: (change: { id: string; action: "rename" | "archive" | "unarchive" | "delete"; name?: string }) => void;
 }
 
 interface WorktreeEntry {
@@ -51,6 +58,39 @@ interface WorktreeState {
 }
 
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
+const sidebarSectionHeaderStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 6, width: "100%", flex: "0 0 auto", padding: "7px 10px", border: 0, borderTop: "1px solid var(--border)", background: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase", textAlign: "left" };
+
+function useVerticalPaneSize(storageKey: string, defaultSize: number, min: number, max: number) {
+  const [size, setSize] = useState(defaultSize);
+  const sizeRef = useRef(defaultSize);
+  sizeRef.current = size;
+  useEffect(() => {
+    const stored = Number(window.localStorage.getItem(storageKey));
+    if (Number.isFinite(stored) && stored > 0) setSize(Math.min(max, Math.max(min, stored)));
+  }, [storageKey, min, max]);
+  const onDragStart = useCallback((event: React.MouseEvent) => {
+    event.preventDefault();
+    const origin = event.clientY;
+    const startSize = sizeRef.current;
+    let latest = startSize;
+    const onMove = (moveEvent: MouseEvent) => {
+      latest = Math.min(max, Math.max(min, startSize + moveEvent.clientY - origin));
+      setSize(latest);
+    };
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      try { window.localStorage.setItem(storageKey, String(Math.round(latest))); } catch { /* storage may be disabled */ }
+    };
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }, [storageKey, min, max]);
+  return { size, onDragStart };
+}
 
 function loadUnreadSessionIds(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -324,8 +364,12 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onOpenGitReview, gitReviewOpen }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onOpenGitReview, gitReviewOpen, onNewAgent, onOpenCodexSession, onOpenAgentTerminal, onAgentTerminalRemoved, onCodexSessionChanged }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  const sessionPane = useVerticalPaneSize("pi-sidebar-sessions-h", 280, 100, 640);
+  const agentsPane = useVerticalPaneSize("pi-sidebar-agents-h", 250, 90, 560);
+  const [sessionsExpanded, setSessionsExpanded] = useState(true);
+  const [agentsExpanded, setAgentsExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCwd, setSelectedCwd] = useState<string | null>(null);
@@ -1371,7 +1415,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       </div>
 
       {/* Session list */}
-      <div style={{ flex: explorerOpen && (selectedCwdProp || selectedCwd) ? "1 1 0" : "1 1 auto", overflowY: "auto", padding: "0", minHeight: 80 }}>
+      <button type="button" onClick={() => setSessionsExpanded((value) => !value)} aria-expanded={sessionsExpanded} style={sidebarSectionHeaderStyle}>
+        <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ transform: sessionsExpanded ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}><polyline points="3 2 7 5 3 8" /></svg>
+        Pi Sessions
+      </button>
+      {sessionsExpanded && <div style={{ flex: (selectedCwdProp || selectedCwd) && explorerOpen ? `0 1 ${sessionPane.size}px` : "1 1 auto", height: (selectedCwdProp || selectedCwd) && explorerOpen ? sessionPane.size : undefined, overflowY: "auto", padding: "0", minHeight: 80 }}>
         {loading && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
             Loading...
@@ -1403,10 +1451,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             depth={0}
           />
         ))}
-      </div>
+      </div>}
+
+      {/* Optional external agents — separate from the Pi session browser and file explorer. */}
+      {(selectedCwdProp || selectedCwd) && (onNewAgent || onOpenCodexSession) && <>
+        {sessionsExpanded && agentsExpanded && explorerOpen && <div className="resize-handle resize-handle--h" onMouseDown={sessionPane.onDragStart} role="separator" aria-orientation="horizontal" aria-label="Resize Pi sessions and Agents" title="Drag to resize panels" />}
+        <AgentsPanel cwd={(selectedCwdProp || selectedCwd)!} style={agentsExpanded ? { height: agentsPane.size, flexBasis: agentsPane.size } : { height: "auto", flexBasis: "auto" }} onExpandedChange={setAgentsExpanded} onNewAgent={onNewAgent} onOpenCodexSession={onOpenCodexSession} onOpenTerminal={onOpenAgentTerminal} onTerminalRemoved={onAgentTerminalRemoved} onCodexSessionChanged={onCodexSessionChanged} />
+      </>}
 
       {/* File Explorer section */}
       {(selectedCwdProp || selectedCwd) && (
+        <>
+        {(onNewAgent || onOpenCodexSession) && agentsExpanded && explorerOpen && <div className="resize-handle resize-handle--h" onMouseDown={agentsPane.onDragStart} role="separator" aria-orientation="horizontal" aria-label="Resize Agents and Explorer" title="Drag to resize panels" />}
         <div
           style={{
             borderTop: "1px solid var(--border)",
@@ -1549,6 +1605,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             </div>
           )}
         </div>
+        </>
       )}
     </div>
   );

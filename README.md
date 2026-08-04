@@ -40,7 +40,13 @@ PI_WEB_HOSTNAME=0.0.0.0 pi-web  # explicit network exposure
 PI_WEB_NO_OPEN=1 pi-web         # useful when running as a background service
 ```
 
-Pi Web has no application-level authentication and can invoke a high-privilege agent. Do not expose it to the internet; only use non-loopback bindings on a trusted network.
+Pi Web can be password protected with `PI_WEB_PASSWORD`. Password authentication is required for any non-loopback binding, and it protects the entire app (chat, files, Git, settings, and terminals):
+
+```bash
+PI_WEB_PASSWORD='use-a-strong-password' pi-web --hostname 0.0.0.0
+```
+
+A signed-in browser has the same local privileges as Pi Web's server user. Do not expose it directly to the internet; use HTTPS and a trusted network.
 
 ## HTTP Proxy
 
@@ -72,7 +78,8 @@ npx @agegr/pi-web@latest
 - **Chat beside the project**: browse files on the left and preview source, docs, images, audio, and PDFs on the right while the agent works.
 - **See session state clearly**: context usage, cost, compaction state, and system prompt details are visible from the top bar.
 - **Configure less from the terminal**: manage models, login/API keys, model tests, and skill switches from the web UI.
-
+- **Interactive AI CLI terminals**: launch and reconnect to local Codex or Claude terminals from the right panel. Pi can inspect, send text to, or stop them only when you explicitly ask.
+- **Configure less from the terminal**: manage models, login/API keys, model tests, and skill switches from the web UI.
 ## Notes
 
 - **Data directory**: Pi Web reads `~/.pi/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another pi agent directory.
@@ -91,7 +98,7 @@ npm run dev
 ```
 
 The local dev server runs at [http://127.0.0.1:30141](http://127.0.0.1:30141).
-
+The local dev server runs at [http://127.0.0.1:30141](http://127.0.0.1:30141). Interactive terminals use the native `node-pty` module; if its install script is blocked by your package manager, approve it or run `npm exec -- node-gyp rebuild --directory=node_modules/node-pty` with a working native build toolchain.
 Common checks:
 
 ```bash

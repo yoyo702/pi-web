@@ -7,7 +7,11 @@ import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
 import { GitReviewPanel } from "./GitReviewPanel";
+import { AgentTerminalPanel } from "./agents/AgentTerminalPanel";
+import { CodexChatPanel } from "./agents/codex/CodexChatPanel";
+import { NewAgentDialog } from "./agents/NewAgentDialog";
 import { TabBar, type Tab } from "./TabBar";
+import { getMissingSplitTerminalTabs } from "@/lib/terminal-restore";
 import { ModelsConfig } from "./ModelsConfig";
 import { SkillsConfig } from "./SkillsConfig";
 import { PluginsConfig } from "./PluginsConfig";
@@ -15,12 +19,13 @@ import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { copyText } from "@/lib/clipboard";
-import { getFileName } from "@/lib/file-paths";
+import { getFileName, joinFilePath } from "@/lib/file-paths";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
+import type { TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -28,11 +33,14 @@ type AutoNameStatus =
   | { kind: "naming" }
   | { kind: "success" }
   | { kind: "error"; message: string };
+const WORKSPACE_TABS_STORAGE_KEY = "pi-web:workspace-tabs";
+const workspaceTabsStorageKey = (cwd: string) => `${WORKSPACE_TABS_STORAGE_KEY}:${encodeURIComponent(cwd)}`;
 
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
+  const [activeCwd, setActiveCwd] = useState<string | null>(null);
   const { isDark, toggleTheme } = useTheme();
   const isMobile = useIsMobile();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
@@ -147,10 +155,82 @@ export function AppShell() {
     return () => ro.disconnect();
   }, [activeTopPanel]);
 
-  // Right panel tabs: file viewers and the Git Review panel.
+  // The center is the primary workspace: Pi is permanent, external agents open
+  // as sibling tabs. The right panel remains auxiliary (files and Git only).
+  const [workspaceTabs, setWorkspaceTabs] = useState<Tab[]>([{ id: "pi", label: "Pi", kind: "pi", closable: false }]);
+  const [activeWorkspaceTabId, setActiveWorkspaceTabId] = useState("pi");
+  const [mountedWorkspaceTabIds, setMountedWorkspaceTabIds] = useState<Set<string>>(() => new Set(["pi"]));
+  const [workspaceTabsHydratedCwd, setWorkspaceTabsHydratedCwd] = useState<string | null>(null);
+  const [terminalSplit, setTerminalSplit] = useState<{ primaryTabId: string; secondaryTerminalId: string; direction: "horizontal" | "vertical"; ratio: number; reversed: boolean } | null>(null);
+  const splitRestoreAttemptRef = useRef<string | null>(null);
+  useEffect(() => {
+    splitRestoreAttemptRef.current = null;
+    setWorkspaceTabs([{ id: "pi", label: "Pi", kind: "pi", closable: false }]);
+    setActiveWorkspaceTabId("pi");
+    setMountedWorkspaceTabIds(new Set(["pi"]));
+    setTerminalSplit(null);
+    if (!activeCwd) { setWorkspaceTabsHydratedCwd(null); return; }
+    try {
+      const raw = localStorage.getItem(workspaceTabsStorageKey(activeCwd)) ?? localStorage.getItem(WORKSPACE_TABS_STORAGE_KEY);
+      const parsed = JSON.parse(raw || "null") as { tabs?: unknown; activeId?: unknown; split?: unknown } | null;
+      const restored = Array.isArray(parsed?.tabs) ? parsed.tabs.filter((value): value is Tab => {
+        if (!value || typeof value !== "object") return false;
+        const tab = value as Partial<Tab>;
+        return typeof tab.id === "string" && typeof tab.label === "string" && tab.cwd === activeCwd && (tab.kind === "terminal" || tab.kind === "codex-chat");
+      }) : [];
+      if (restored.length > 0) setWorkspaceTabs([{ id: "pi", label: "Pi", kind: "pi", closable: false }, ...restored.map((tab) => ({ ...tab, status: tab.kind === "codex-chat" ? "idle" as const : tab.status }))]);
+      if (typeof parsed?.activeId === "string" && (parsed.activeId === "pi" || restored.some((tab) => tab.id === parsed.activeId))) setActiveWorkspaceTabId(parsed.activeId);
+      if (parsed?.split && typeof parsed.split === "object") {
+        const split = parsed.split as Partial<{ primaryTabId: string; secondaryTerminalId: string; direction: "horizontal" | "vertical"; ratio: number; reversed: boolean }>;
+        if (typeof split.primaryTabId === "string" && typeof split.secondaryTerminalId === "string" && (split.direction === "horizontal" || split.direction === "vertical")) {
+          setTerminalSplit({ primaryTabId: split.primaryTabId, secondaryTerminalId: split.secondaryTerminalId, direction: split.direction, ratio: typeof split.ratio === "number" ? Math.max(20, Math.min(80, split.ratio)) : 50, reversed: split.reversed === true });
+        }
+      }
+    } catch { /* Ignore malformed or unavailable browser storage. */ }
+    setWorkspaceTabsHydratedCwd(activeCwd);
+  }, [activeCwd]);
+  useEffect(() => {
+    if (!activeCwd || workspaceTabsHydratedCwd !== activeCwd) return;
+    try {
+      localStorage.setItem(workspaceTabsStorageKey(activeCwd), JSON.stringify({ tabs: workspaceTabs.filter((tab) => tab.id !== "pi"), activeId: activeWorkspaceTabId, split: terminalSplit }));
+    } catch { /* Ignore storage quota/privacy errors. */ }
+  }, [activeCwd, activeWorkspaceTabId, terminalSplit, workspaceTabs, workspaceTabsHydratedCwd]);
+  useEffect(() => {
+    setMountedWorkspaceTabIds((current) => {
+      if (current.has(activeWorkspaceTabId)) return current;
+      const next = new Set(current);
+      next.add(activeWorkspaceTabId);
+      return next;
+    });
+  }, [activeWorkspaceTabId]);
+  // Right panel tabs: file viewers and Git Review.
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
+  const [terminals, setTerminals] = useState<Record<string, TerminalSession>>({});
+  const [newTerminalProvider, setNewTerminalProvider] = useState<TerminalProvider | null>(null);
+  const [pendingTerminalClose, setPendingTerminalClose] = useState<{ tabId: string; terminal: TerminalSession } | null>(null);
+  const [terminalCloseBusy, setTerminalCloseBusy] = useState(false);
+  const [terminalCloseError, setTerminalCloseError] = useState<string | null>(null);
+  const [terminalRestartingId, setTerminalRestartingId] = useState<string | null>(null);
+  const [terminalRestartError, setTerminalRestartError] = useState<string | null>(null);
+  const terminalRestoreInFlightRef = useRef(new Set<string>());
+  const [terminalRestoreErrors, setTerminalRestoreErrors] = useState<Record<string, string>>({});
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  useEffect(() => {
+    const misplaced = fileTabs.filter((tab) => tab.kind === "terminal" || tab.kind === "codex-chat");
+    if (misplaced.length === 0) return;
+    setWorkspaceTabs((current) => {
+      const existing = new Set(current.map((tab) => tab.id));
+      return [...current, ...misplaced.filter((tab) => !existing.has(tab.id))];
+    });
+    if (activeFileTabId && misplaced.some((tab) => tab.id === activeFileTabId)) setActiveWorkspaceTabId(activeFileTabId);
+    setFileTabs((current) => {
+      const next = current.filter((tab) => tab.kind !== "terminal" && tab.kind !== "codex-chat");
+      if (next.length === 0) setRightPanelOpen(false);
+      return next;
+    });
+    setActiveFileTabId((current) => current && misplaced.some((tab) => tab.id === current) ? null : current);
+  }, [activeFileTabId, fileTabs]);
   // Collapse the center chat column to give the right panel the full width
   // (a "focus the file/git view" mode). Only meaningful while the right panel
   // is open, so reopening later never leaves both main columns hidden.
@@ -262,7 +342,6 @@ export function AppShell() {
   }, []);
 
   const initialSessionId = initialNavigation.sessionId;
-  const [activeCwd, setActiveCwd] = useState<string | null>(null);
   // True once the initial ?session= URL param has been resolved (or confirmed absent)
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
@@ -334,6 +413,7 @@ export function AppShell() {
   }, [router, selectedSession]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+    setActiveWorkspaceTabId("pi");
     setNewSessionCwd(null);
     setSelectedSession(session);
     setSessionKey((k) => k + 1);
@@ -354,6 +434,7 @@ export function AppShell() {
   }, [router, isMobile]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
+    setActiveWorkspaceTabId("pi");
     setSelectedSession(null);
     setNewSessionCwd(cwd);
     setSessionKey((k) => k + 1);
@@ -532,6 +613,87 @@ export function AppShell() {
     });
   }, [fileTabs]);
 
+  const removeWorkspaceTab = useCallback((tabId: string) => {
+    if (tabId === "pi") return;
+    setWorkspaceTabs((current) => current.filter((tab) => tab.id !== tabId));
+    setActiveWorkspaceTabId((current) => {
+      if (current !== tabId) return current;
+      const index = workspaceTabs.findIndex((tab) => tab.id === tabId);
+      return workspaceTabs[index - 1]?.id ?? workspaceTabs[index + 1]?.id ?? "pi";
+    });
+    setMountedWorkspaceTabIds((current) => { const next = new Set(current); next.delete(tabId); return next; });
+    setTerminalSplit((current) => current && (current.primaryTabId === tabId || `terminal:${current.secondaryTerminalId}` === tabId) ? null : current);
+  }, [workspaceTabs]);
+
+  const handleCloseWorkspaceTab = useCallback((tabId: string) => {
+    const tab = workspaceTabs.find((item) => item.id === tabId);
+    const terminal = tab?.terminalId ? terminals[tab.terminalId] : null;
+    if (terminal?.state === "running") {
+      setTerminalCloseError(null);
+      setPendingTerminalClose({ tabId, terminal });
+      return;
+    }
+    removeWorkspaceTab(tabId);
+  }, [removeWorkspaceTab, terminals, workspaceTabs]);
+
+  const closeTerminalTab = useCallback(async (stop: boolean) => {
+    const target = pendingTerminalClose;
+    if (!target) return;
+    if (!stop) { setPendingTerminalClose(null); removeWorkspaceTab(target.tabId); return; }
+    setTerminalCloseBusy(true);
+    setTerminalCloseError(null);
+    try {
+      const response = await fetch(`/api/terminals/${encodeURIComponent(target.terminal.id)}/stop`, { method: "POST" });
+      const data = await response.json() as { terminal?: TerminalSession; error?: string };
+      if (!response.ok) throw new Error(data.error || "Unable to stop terminal");
+      if (data.terminal) setTerminals((current) => ({ ...current, [data.terminal!.id]: data.terminal! }));
+      setPendingTerminalClose(null);
+      removeWorkspaceTab(target.tabId);
+    } catch (cause) { setTerminalCloseError(cause instanceof Error ? cause.message : "Unable to stop terminal"); }
+    finally { setTerminalCloseBusy(false); }
+  }, [pendingTerminalClose, removeWorkspaceTab]);
+
+  const handleSelectWorkspaceTab = useCallback((tabId: string) => {
+    if (terminalSplit && tabId === `terminal:${terminalSplit.secondaryTerminalId}`) setTerminalSplit(null);
+    setActiveWorkspaceTabId(tabId);
+    setActiveTopPanel(null);
+  }, [terminalSplit]);
+
+  const beginTerminalSplitResize = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const container = event.currentTarget.parentElement;
+    const split = terminalSplit;
+    if (!container || !split) return;
+    event.preventDefault();
+    const onMove = (moveEvent: PointerEvent) => {
+      const rect = container.getBoundingClientRect();
+      const direction = isMobile ? "vertical" : split.direction;
+      const raw = direction === "horizontal" ? (moveEvent.clientX - rect.left) / rect.width * 100 : (moveEvent.clientY - rect.top) / rect.height * 100;
+      setTerminalSplit((current) => current ? { ...current, ratio: Math.max(20, Math.min(80, raw)) } : null);
+    };
+    const onUp = () => { document.removeEventListener("pointermove", onMove); document.removeEventListener("pointerup", onUp); };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp, { once: true });
+  }, [isMobile, terminalSplit]);
+
+  const handleCodexSessionChanged = useCallback((change: { id: string; action: "rename" | "archive" | "unarchive" | "delete"; name?: string }) => {
+    if (change.action === "rename" && change.name) {
+      setWorkspaceTabs((current) => current.map((tab) => tab.sourceSessionId === change.id ? { ...tab, label: change.name!, ...(tab.kind === "codex-chat" ? { sessionName: change.name! } : {}) } : tab));
+      return;
+    }
+    if (change.action !== "archive" && change.action !== "delete") return;
+    setWorkspaceTabs((current) => current.filter((tab) => !(tab.kind === "codex-chat" && tab.sourceSessionId === change.id)));
+    setActiveWorkspaceTabId((current) => {
+      const active = workspaceTabs.find((tab) => tab.id === current);
+      return active?.kind === "codex-chat" && active.sourceSessionId === change.id ? "pi" : current;
+    });
+  }, [workspaceTabs]);
+
+  const handleAgentTerminalRemoved = useCallback((terminalId: string) => {
+    setTerminals((current) => { const next = { ...current }; delete next[terminalId]; return next; });
+    setWorkspaceTabs((current) => current.filter((tab) => tab.terminalId !== terminalId));
+    setActiveWorkspaceTabId((current) => current === `terminal:${terminalId}` || current === `codex-chat:${terminalId}` ? "pi" : current);
+  }, []);
+
   const handleOpenGitReview = useCallback(() => {
     if (!activeCwd) return;
     const tabId = "git-review";
@@ -548,6 +710,104 @@ export function AppShell() {
     setRightPanelOpen(true);
     if (isMobile) setSidebarOpen(false);
   }, [activeCwd, isMobile, rightPanelOpen, activeFileTabId, handleCloseFileTab]);
+
+  const handleTerminalCreated = useCallback((terminal: TerminalSession, preferredLabel?: string) => {
+    const tabId = `terminal:${terminal.id}`;
+    setTerminals((current) => ({ ...current, [terminal.id]: terminal }));
+    setWorkspaceTabs((current) => current.some((tab) => tab.id === tabId)
+      ? current
+      : [...current, { id: tabId, label: preferredLabel || terminal.title || (terminal.provider === "shell" ? "Terminal" : `${terminal.provider} terminal`), kind: "terminal", terminalId: terminal.id, terminalProvider: terminal.provider, terminalPermissionMode: terminal.permissionMode, terminalLaunchMode: terminal.launchMode, terminalNoAltScreen: terminal.noAltScreen, terminalModel: terminal.model, terminalWebSearch: terminal.webSearch, terminalChatMode: terminal.chatMode, cwd: terminal.cwd, sourceSessionId: terminal.sourceSessionId, status: terminal.state === "running" ? "running" : "ended" }]);
+    setActiveWorkspaceTabId(tabId);
+    setNewTerminalProvider(null);
+    if (isMobile) setSidebarOpen(false);
+  }, [isMobile]);
+
+  const restartUnavailableTerminal = useCallback(async (tab: Tab): Promise<TerminalSession | null> => {
+    if (!tab.terminalProvider || !tab.cwd) return null;
+    if (terminalRestoreInFlightRef.current.has(tab.id)) return null;
+    terminalRestoreInFlightRef.current.add(tab.id);
+    setTerminalRestartingId(tab.id);
+    setTerminalRestartError(null);
+    setTerminalRestoreErrors((current) => { const next = { ...current }; delete next[tab.id]; return next; });
+    try {
+      if (tab.terminalId) await fetch(`/api/terminals/${encodeURIComponent(tab.terminalId)}`, { method: "DELETE" }).catch(() => undefined);
+      const resumeCodex = tab.terminalProvider === "codex" && Boolean(tab.sourceSessionId);
+      const response = await fetch("/api/terminals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: tab.terminalProvider, cwd: tab.cwd, permissionMode: tab.terminalPermissionMode, launchMode: resumeCodex ? "resume" : "new", sourceSessionId: resumeCodex ? tab.sourceSessionId : undefined, noAltScreen: tab.terminalNoAltScreen, model: tab.terminalModel, webSearch: tab.terminalWebSearch, chatMode: tab.terminalChatMode }) });
+      const data = await response.json() as { terminal?: TerminalSession; error?: string };
+      if (!response.ok || !data.terminal) throw new Error(data.error || "Unable to restart terminal");
+      const renamedResponse = await fetch(`/api/terminals/${encodeURIComponent(data.terminal.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: tab.label }) });
+      const renamedData = await renamedResponse.json() as { terminal?: TerminalSession };
+      const restarted = renamedResponse.ok && renamedData.terminal ? renamedData.terminal : { ...data.terminal, title: tab.label };
+      setTerminals((current) => { const next = { ...current, [restarted.id]: restarted }; if (tab.terminalId) delete next[tab.terminalId]; return next; });
+      setWorkspaceTabs((current) => current.map((item) => item.id === tab.id ? { ...item, terminalId: restarted.id, terminalProvider: restarted.provider, terminalPermissionMode: restarted.permissionMode, terminalLaunchMode: restarted.launchMode, terminalNoAltScreen: restarted.noAltScreen, terminalModel: restarted.model, terminalWebSearch: restarted.webSearch, terminalChatMode: restarted.chatMode, sourceSessionId: restarted.sourceSessionId, status: "running" } : item));
+      setTerminalSplit((current) => current && tab.terminalId && current.secondaryTerminalId === tab.terminalId ? { ...current, secondaryTerminalId: restarted.id } : current);
+      return restarted;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Unable to restart terminal";
+      setTerminalRestartError(message);
+      setTerminalRestoreErrors((current) => ({ ...current, [tab.id]: message }));
+      return null;
+    } finally { terminalRestoreInFlightRef.current.delete(tab.id); setTerminalRestartingId((current) => current === tab.id ? null : current); }
+  }, []);
+
+  const handleOpenCodexChat = useCallback((terminal: TerminalSession) => {
+    const tabId = `codex-chat:${terminal.id}`;
+    setWorkspaceTabs((current) => current.some((tab) => tab.id === tabId) ? current : [...current, { id: tabId, label: "Codex Chat", kind: "codex-chat", terminalId: terminal.id, sourceSessionId: terminal.sourceSessionId, cwd: terminal.cwd, model: terminal.model }]);
+    setActiveWorkspaceTabId(tabId);
+  }, []);
+
+  const handleOpenCodexSessionChat = useCallback((target: { sessionId: string; sessionName: string; cwd: string; model?: string; reasoningEffort?: string; serviceTier?: string; approvalPolicy: "untrusted" | "on-request" | "never" }) => {
+    const tabId = `codex-chat:${target.sessionId}`;
+    setWorkspaceTabs((current) => current.some((tab) => tab.id === tabId)
+      ? current.map((tab) => tab.id === tabId ? { ...tab, label: target.sessionName, sessionName: target.sessionName, cwd: target.cwd, model: target.model, reasoningEffort: target.reasoningEffort, serviceTier: target.serviceTier, approvalPolicy: target.approvalPolicy } : tab)
+      : [...current, { id: tabId, label: target.sessionName, kind: "codex-chat", sourceSessionId: target.sessionId, cwd: target.cwd, model: target.model, reasoningEffort: target.reasoningEffort, serviceTier: target.serviceTier, approvalPolicy: target.approvalPolicy, sessionName: target.sessionName }]);
+    setActiveWorkspaceTabId(tabId);
+  }, []);
+
+  const handleTerminalChanged = useCallback((terminal: TerminalSession) => {
+    setTerminals((current) => ({ ...current, [terminal.id]: terminal }));
+    setWorkspaceTabs((current) => current.map((tab) => tab.terminalId === terminal.id && tab.kind === "terminal" ? { ...tab, label: terminal.title || tab.label, terminalPermissionMode: terminal.permissionMode, terminalLaunchMode: terminal.launchMode, terminalNoAltScreen: terminal.noAltScreen, terminalModel: terminal.model, terminalWebSearch: terminal.webSearch, terminalChatMode: terminal.chatMode, sourceSessionId: terminal.sourceSessionId, status: terminal.state === "running" ? "running" : "ended" } : tab));
+  }, []);
+
+  const handleCodexTabStatus = useCallback((tabId: string, status: "idle" | "running" | "approval") => {
+    setWorkspaceTabs((current) => current.map((tab) => tab.id === tabId && tab.status !== status ? { ...tab, status } : tab));
+  }, []);
+
+  const handleCodexTabConfiguration = useCallback((tabId: string, configuration: { model?: string; reasoningEffort?: string; serviceTier?: string; approvalPolicy?: "untrusted" | "on-request" | "never" }) => {
+    setWorkspaceTabs((current) => current.map((tab) => tab.id === tabId ? { ...tab, ...configuration } : tab));
+  }, []);
+
+  useEffect(() => {
+    if (!activeCwd || workspaceTabsHydratedCwd !== activeCwd) return;
+    let cancelled = false;
+    void fetch(`/api/terminals?${new URLSearchParams({ cwd: activeCwd })}`, { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const data = await response.json() as { terminals?: TerminalSession[] };
+        if (cancelled || !data.terminals) return;
+        setTerminals(Object.fromEntries(data.terminals.map((terminal) => [terminal.id, terminal])));
+        const available = new Set(data.terminals.map((terminal) => terminal.id));
+        setWorkspaceTabs((current) => {
+          let changed = false;
+          const next = current.map((tab) => {
+            if (tab.kind !== "terminal" || !tab.terminalId || available.has(tab.terminalId) || tab.status === "ended") return tab;
+            changed = true;
+            return { ...tab, status: "ended" as const };
+          });
+          return changed ? next : current;
+        });
+        if (terminalSplit) {
+          const restoreTabs = getMissingSplitTerminalTabs(workspaceTabs, terminalSplit, available);
+          const restoreKey = `${activeCwd}:${terminalSplit.primaryTabId}:${terminalSplit.secondaryTerminalId}`;
+          if (restoreTabs.length > 0 && splitRestoreAttemptRef.current !== restoreKey) {
+            splitRestoreAttemptRef.current = restoreKey;
+            void Promise.all(restoreTabs.map((tab) => restartUnavailableTerminal(tab)));
+          }
+        }
+      })
+      .catch(() => { /* terminal support must not disrupt the existing shell */ });
+    return () => { cancelled = true; };
+  }, [activeCwd, restartUnavailableTerminal, terminalSplit, workspaceTabs, workspaceTabsHydratedCwd]);
 
   const handleOpenLinkedFile = useCallback((filePath: string) => {
     handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
@@ -603,6 +863,11 @@ export function AppShell() {
         onAtMentions={handleAtMentions}
         onOpenGitReview={handleOpenGitReview}
         gitReviewOpen={rightPanelOpen && activeFileTabId === "git-review"}
+        onNewAgent={setNewTerminalProvider}
+        onOpenCodexSession={handleOpenCodexSessionChat}
+        onOpenAgentTerminal={handleTerminalCreated}
+        onAgentTerminalRemoved={handleAgentTerminalRemoved}
+        onCodexSessionChanged={handleCodexSessionChanged}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([
@@ -794,10 +1059,9 @@ export function AppShell() {
         />
       )}
 
-      {/* Center: chat */}
+      {/* Center workspace: Pi plus external-agent tabs. */}
       <div style={{ flex: chatHidden ? "0 0 0" : 1, display: chatHidden ? "none" : "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
-        {/* Top bar with sidebar toggle */}
-        <div ref={topBarRef} style={{ display: "flex", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
+        <div style={{ display: "flex", alignItems: "center", height: 36, flexShrink: 0, borderBottom: "1px solid var(--border)", background: "var(--bg-panel)" }}>
           <button
             onClick={handleSidebarToggle}
             title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
@@ -821,6 +1085,12 @@ export function AppShell() {
               </svg>
             )}
           </button>
+          <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
+            <TabBar tabs={workspaceTabs} activeTabId={activeWorkspaceTabId} onSelectTab={handleSelectWorkspaceTab} onCloseTab={handleCloseWorkspaceTab} />
+          </div>
+        </div>
+        {/* Pi-specific controls are only relevant while the Pi workspace is active. */}
+        <div ref={topBarRef} style={{ display: activeWorkspaceTabId === "pi" ? "flex" : "none", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
           <button
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
@@ -1320,6 +1590,7 @@ export function AppShell() {
 
         {/* Chat content */}
         <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
+          <div style={{ position: "absolute", inset: 0, display: activeWorkspaceTabId === "pi" ? "block" : "none" }}>
           {showChat ? (
             <ChatWindow
               key={sessionKey}
@@ -1378,6 +1649,25 @@ export function AppShell() {
               </div>
             )
           ) : null}
+          </div>
+          {workspaceTabs.filter((tab) => (tab.kind === "terminal" || tab.kind === "codex-chat") && mountedWorkspaceTabIds.has(tab.id) && (!terminalSplit || tab.id !== `terminal:${terminalSplit.secondaryTerminalId}`)).map((tab) => {
+            const terminal = tab.terminalId ? terminals[tab.terminalId] ?? null : null;
+            const split = terminalSplit?.primaryTabId === tab.id ? terminalSplit : null;
+            const secondaryTerminal = split ? terminals[split.secondaryTerminalId] ?? null : null;
+            const splitDirection = isMobile ? "vertical" : split?.direction;
+            const splitCandidates = terminal ? Object.values(terminals).filter((candidate) => candidate.id !== terminal.id && candidate.state === "running") : [];
+            const primaryPanel = terminal ? <AgentTerminalPanel terminal={terminal} splitCandidates={splitCandidates} splitActive={Boolean(split && secondaryTerminal)} onSplit={(secondaryTerminalId, direction) => setTerminalSplit({ primaryTabId: tab.id, secondaryTerminalId, direction, ratio: 50, reversed: false })} onUnsplit={() => setTerminalSplit(null)} onSwapSplit={() => setTerminalSplit((current) => current ? { ...current, reversed: !current.reversed, ratio: 100 - current.ratio } : null)} onRestart={() => void restartUnavailableTerminal(tab)} onTerminalChange={handleTerminalChanged} onTerminalStarted={handleTerminalCreated} onOpenCodexChat={handleOpenCodexChat} /> : null;
+            const secondaryTab = split ? workspaceTabs.find((item) => item.kind === "terminal" && item.terminalId === split.secondaryTerminalId) ?? null : null;
+            const secondaryPanel = secondaryTerminal ? <AgentTerminalPanel terminal={secondaryTerminal} splitActive onUnsplit={() => setTerminalSplit(null)} onSwapSplit={() => setTerminalSplit((current) => current ? { ...current, reversed: !current.reversed, ratio: 100 - current.ratio } : null)} onRestart={() => secondaryTab && void restartUnavailableTerminal(secondaryTab)} onTerminalChange={handleTerminalChanged} onTerminalStarted={handleTerminalCreated} onOpenCodexChat={handleOpenCodexChat} /> : secondaryTab ? <div style={{ height: "100%", display: "grid", placeItems: "center", padding: 18, background: "var(--bg)", color: "var(--text-dim)", fontSize: 12 }}><div style={{ display: "grid", justifyItems: "center", gap: 8, textAlign: "center" }}><strong style={{ color: "var(--text)" }}>Split terminal unavailable</strong><span>{terminalRestoreErrors[secondaryTab.id] || "Restoring this pane after the server restart…"}</span><div style={{ display: "flex", gap: 7 }}><button type="button" disabled={terminalRestartingId === secondaryTab.id} onClick={() => void restartUnavailableTerminal(secondaryTab)} style={terminalRecoveryButtonStyle}>{terminalRestartingId === secondaryTab.id ? "Restoring…" : "Retry"}</button><button type="button" onClick={() => setTerminalSplit(null)} style={terminalRecoveryButtonStyle}>Remove pane</button></div></div></div> : null;
+            return <div key={tab.id} style={{ position: "absolute", inset: 0, display: activeWorkspaceTabId === tab.id ? "block" : "none" }}>
+              {tab.kind === "codex-chat" && (terminal || tab.sourceSessionId) ? (
+                <CodexChatPanel terminal={terminal ? { ...terminal, model: tab.model ?? terminal.model, reasoningEffort: tab.reasoningEffort, serviceTier: tab.serviceTier, approvalPolicy: tab.approvalPolicy, sessionName: tab.sessionName } : { cwd: tab.cwd ?? activeCwd ?? "", model: tab.model, sourceSessionId: tab.sourceSessionId, reasoningEffort: tab.reasoningEffort, serviceTier: tab.serviceTier, approvalPolicy: tab.approvalPolicy, sessionName: tab.sessionName }} workspaceTabId={tab.id} onStatusChange={handleCodexTabStatus} onConfigurationChange={handleCodexTabConfiguration} onOpenFile={(filePath) => { const absolutePath = filePath.startsWith("/") ? filePath : joinFilePath(tab.cwd ?? activeCwd ?? "", filePath); handleOpenFile(absolutePath, getFileName(absolutePath), tab.sourceSessionId); }} />
+              ) : terminal ? (split && secondaryTab ? <div className={`terminal-split terminal-split--${splitDirection}`} style={splitDirection === "horizontal" ? { gridTemplateColumns: `${split.ratio}fr 5px ${100 - split.ratio}fr` } : { gridTemplateRows: `${split.ratio}fr 5px ${100 - split.ratio}fr` }}>{split.reversed ? secondaryPanel : primaryPanel}<div className="terminal-split-divider" role="separator" aria-orientation={splitDirection === "horizontal" ? "vertical" : "horizontal"} onPointerDown={beginTerminalSplitResize} />{split.reversed ? primaryPanel : secondaryPanel}</div> : primaryPanel
+              ) : (
+                <div style={{ height: "100%", display: "grid", placeItems: "center", padding: 24, color: "var(--text-dim)", fontSize: 12 }}><div style={{ display: "grid", justifyItems: "center", gap: 10, textAlign: "center" }}><strong style={{ color: "var(--text)", fontSize: 14 }}>Terminal process is unavailable</strong><span>The server restarted or this terminal process ended outside Pi Web.</span>{tab.terminalProvider && <button type="button" disabled={terminalRestartingId === tab.id} onClick={() => void restartUnavailableTerminal(tab)} style={{ padding: "7px 11px", border: "1px solid var(--accent)", borderRadius: 6, background: "var(--accent)", color: "white" }}>{terminalRestartingId === tab.id ? "Restarting…" : "Restart terminal"}</button>}{terminalRestartError && activeWorkspaceTabId === tab.id && <span style={{ color: "#f87171" }}>{terminalRestartError}</span>}</div></div>
+              )}
+            </div>;
+          })}
         </div>
       </div>
 
@@ -1388,7 +1678,7 @@ export function AppShell() {
           onMouseDown={chatHidden ? restoreChatFromResize : beginRightPanelResize}
           role="separator"
           aria-orientation="vertical"
-          title={chatHidden ? "Drag to restore chat and resize the right panel" : "Drag to resize the right panel"}
+          title={chatHidden ? "Drag to restore workspace and resize the right panel" : "Drag to resize the right panel"}
         />
       )}
 
@@ -1433,8 +1723,8 @@ export function AppShell() {
             <button
               type="button"
               onClick={() => setChatCollapsed((v) => !v)}
-              title={chatHidden ? "Show chat" : "Hide chat (expand panel)"}
-              aria-label={chatHidden ? "Show chat" : "Hide chat"}
+              title={chatHidden ? "Show workspace" : "Hide workspace (expand panel)"}
+              aria-label={chatHidden ? "Show workspace" : "Hide workspace"}
               aria-pressed={chatHidden}
               style={{ width: 36, height: 36, padding: 0, border: "none", borderLeft: "1px solid var(--border)", background: "transparent", color: "var(--text-muted)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}
             >
@@ -1509,6 +1799,15 @@ export function AppShell() {
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
       </svg>
     </button>
+    {newTerminalProvider && activeCwd && (
+      <NewAgentDialog
+        cwd={activeCwd}
+        provider={newTerminalProvider}
+        onClose={() => setNewTerminalProvider(null)}
+        onCreated={handleTerminalCreated}
+      />
+    )}
+    {pendingTerminalClose && <TerminalCloseDialog terminal={pendingTerminalClose.terminal} busy={terminalCloseBusy} error={terminalCloseError} onCancel={() => { if (!terminalCloseBusy) setPendingTerminalClose(null); }} onKeepRunning={() => void closeTerminalTab(false)} onStop={() => void closeTerminalTab(true)} />}
     {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} />}
     {skillsConfigOpen && (activeCwd ?? selectedSession?.cwd ?? newSessionCwd) && (
       <SkillsConfig cwd={(activeCwd ?? selectedSession?.cwd ?? newSessionCwd)!} onClose={() => setSkillsConfigOpen(false)} />
@@ -1524,3 +1823,16 @@ export function AppShell() {
     </>
   );
 }
+
+function TerminalCloseDialog({ terminal, busy, error, onCancel, onKeepRunning, onStop }: { terminal: TerminalSession; busy: boolean; error: string | null; onCancel: () => void; onKeepRunning: () => void; onStop: () => void }) {
+  useEffect(() => {
+    if (busy) return;
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onCancel(); };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [busy, onCancel]);
+  return <div role="dialog" aria-modal="true" aria-label="Close terminal" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }} style={{ position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 20, background: "rgb(0 0 0 / 55%)" }}><section style={{ width: "min(100%, 420px)", padding: 18, border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 20px 60px rgb(0 0 0 / 45%)" }}><strong>Close {terminal.provider} terminal?</strong><p style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>The process is still running in {terminal.cwd}. You can keep it running and reopen it from Agents, or stop it now.</p>{error && <p role="alert" style={{ color: "#f87171", fontSize: 12 }}>{error}</p>}<div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginTop: 18 }}><button type="button" disabled={busy} onClick={onCancel} style={terminalCloseButtonStyle}>Cancel</button><button type="button" disabled={busy} onClick={onKeepRunning} style={terminalCloseButtonStyle}>Keep running</button><button type="button" disabled={busy} onClick={onStop} style={{ ...terminalCloseButtonStyle, color: "#ef4444", borderColor: "rgb(239 68 68 / 45%)", background: "rgb(239 68 68 / 10%)" }}>{busy ? "Stopping…" : "Stop and close"}</button></div></section></div>;
+}
+
+const terminalCloseButtonStyle: React.CSSProperties = { padding: "7px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text)", cursor: "pointer", font: "12px/1.3 inherit" };
+const terminalRecoveryButtonStyle: React.CSSProperties = { padding: "6px 9px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text)", cursor: "pointer", font: "11.5px/1.3 inherit" };

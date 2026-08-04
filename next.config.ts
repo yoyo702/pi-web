@@ -10,12 +10,15 @@ try {
 } catch { /* package not found, use default */ }
 
 const nextConfig: NextConfig = {
+  ...(process.env.PI_WEB_NEXT_DIST_DIR ? { distDir: process.env.PI_WEB_NEXT_DIST_DIR } : {}),
   serverExternalPackages: [
     "undici",
     "@earendil-works/pi-coding-agent",
     "@earendil-works/pi-agent-core",
     "@earendil-works/pi-ai",
     "@earendil-works/pi-tui",
+    "node-pty",
+    "ws",
   ],
   allowedDevOrigins: ['192.168.*.*'],
   async headers() {

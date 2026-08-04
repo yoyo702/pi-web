@@ -9,6 +9,7 @@ import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
+import { terminalTools } from "./agents/terminal-tools";
 
 // ============================================================================
 // Types
@@ -1146,6 +1147,7 @@ export async function startRpcSession(
     const { session: inner } = await createAgentSessionFromServices({
       services,
       sessionManager,
+      customTools: terminalTools,
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
     });
 

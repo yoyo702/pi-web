@@ -21,21 +21,7 @@ const { parseLaunchOptions } = require("./pi-web-options");
 const pkgDir = path.join(__dirname, "..");
 const nextDir = path.join(pkgDir, ".next");
 
-// Resolve next's CLI entry directly to avoid relying on .bin symlinks (which
-// may not exist when installed via npx).
-let nextBin;
-try {
-  nextBin = require.resolve("next/dist/bin/next", { paths: [pkgDir] });
-} catch {
-  // Fallback: locate next package root and derive the bin path manually.
-  try {
-    const nextPkg = require.resolve("next/package.json", { paths: [pkgDir] });
-    nextBin = path.join(path.dirname(nextPkg), "dist", "bin", "next");
-  } catch {
-    nextBin = path.join(pkgDir, "node_modules", "next", "dist", "bin", "next");
-  }
-}
-
+const serverPath = path.join(pkgDir, "server", "pi-web-server.js");
 const { port, hostname, openBrowser } = parseLaunchOptions();
 const loopbackHostnames = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
@@ -44,18 +30,13 @@ if (!fs.existsSync(nextDir)) {
   process.exit(1);
 }
 
-if (!loopbackHostnames.has(hostname)) {
-  console.warn(
-    `Warning: pi-web is listening on ${hostname} without authentication. Only use this on a trusted network.`,
-  );
+if (!loopbackHostnames.has(hostname) && !process.env.PI_WEB_PASSWORD) {
+  console.error("PI_WEB_PASSWORD must be set when Pi Web listens on a non-loopback host.");
+  process.exit(1);
 }
+const serverArgs = [serverPath, "start", "-p", port, "-H", hostname];
 
-const nextArgs = ["start", "-p", port];
-nextArgs.push("-H", hostname);
-
-// Always run next's JS entry with node directly — avoids .bin symlink issues
-// and path-with-spaces problems on Windows when shell: true is used.
-const child = spawn(process.execPath, [nextBin, ...nextArgs], {
+const child = spawn(process.execPath, serverArgs, {
   cwd: pkgDir,
   stdio: ["inherit", "pipe", "inherit"],
   env: { ...process.env },
