@@ -1,7 +1,11 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { Clock3, Eye, EyeOff } from "lucide-react";
+import { RECENT_PROJECTS_STORAGE_KEY, parseRecentProjects, type RecentProject } from "@/lib/project-workspaces";
+
+const SHOW_HIDDEN_STORAGE_KEY = "pi-web:directory-picker-show-hidden";
 
 interface DirectoryEntry {
   name: string;
@@ -15,8 +19,11 @@ interface BrowseResponse {
   error?: string;
 }
 
-async function loadDirectories(directory?: string): Promise<BrowseResponse> {
-  const query = directory ? `?path=${encodeURIComponent(directory)}` : "";
+async function loadDirectories(directory: string | undefined, showHidden: boolean): Promise<BrowseResponse> {
+  const params = new URLSearchParams();
+  if (directory) params.set("path", directory);
+  if (!showHidden) params.set("hideHidden", "1");
+  const query = params.size > 0 ? `?${params}` : "";
   const response = await fetch(`/api/cwd/browse${query}`);
   const data = await response.json() as BrowseResponse;
   if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
@@ -46,17 +53,23 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   const [directories, setDirectories] = useState<DirectoryEntry[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [showHidden, setShowHidden] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
+  const showHiddenRef = useRef(false);
+  const listRef = useRef<HTMLDivElement>(null);
 
-  const navigateTo = useCallback(async (directory?: string) => {
+  const navigateTo = useCallback(async (directory?: string, hiddenFilesVisible = showHiddenRef.current) => {
     setLoading(true);
     setLoadError(null);
     try {
-      const data = await loadDirectories(directory);
+      const data = await loadDirectories(directory, hiddenFilesVisible);
       const nextPath = data.path ?? directory ?? "/";
       setCurrentPath(nextPath);
       setParentDirectory(data.parentPath ?? null);
       setPathInput(nextPath);
       setDirectories(data.directories ?? []);
+      setActiveIndex(0);
     } catch (cause) {
       setLoadError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -66,8 +79,19 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
 
   useEffect(() => {
     setPortalTarget(document.body);
-    void navigateTo();
+    let hiddenFilesVisible = false;
+    try {
+      hiddenFilesVisible = localStorage.getItem(SHOW_HIDDEN_STORAGE_KEY) === "true";
+      setRecentProjects(parseRecentProjects(localStorage.getItem(RECENT_PROJECTS_STORAGE_KEY)));
+    } catch { /* local storage may be unavailable */ }
+    showHiddenRef.current = hiddenFilesVisible;
+    setShowHidden(hiddenFilesVisible);
+    void navigateTo(undefined, hiddenFilesVisible);
   }, [navigateTo]);
+
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>(`[data-directory-index="${activeIndex}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [activeIndex]);
 
   const handlePathSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -132,6 +156,12 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
               setPathInput(event.target.value);
               setLoadError(null);
             }}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowDown" || directories.length === 0) return;
+              event.preventDefault();
+              setActiveIndex(0);
+              listRef.current?.focus();
+            }}
             style={{ minWidth: 0, flex: 1, height: 36, padding: "0 10px", border: "1px solid var(--border)", borderRadius: 6, outline: "none", background: "var(--bg-panel)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12 }}
           />
           <button
@@ -143,20 +173,59 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
           >
             Go
           </button>
+          <button
+            className="directory-picker-action"
+            type="button"
+            aria-label={showHidden ? "Hide hidden folders" : "Show hidden folders"}
+            aria-pressed={showHidden}
+            title={showHidden ? "Hide hidden folders" : "Show hidden folders"}
+            disabled={loading}
+            onClick={() => {
+              const next = !showHidden;
+              showHiddenRef.current = next;
+              setShowHidden(next);
+              try { localStorage.setItem(SHOW_HIDDEN_STORAGE_KEY, String(next)); } catch { /* local storage may be unavailable */ }
+              void navigateTo(currentPath || undefined, next);
+            }}
+            style={{ width: 36, height: 36, padding: 0, display: "grid", placeItems: "center", flexShrink: 0, border: "1px solid var(--border)", borderRadius: 6, background: showHidden ? "var(--bg-selected)" : "var(--bg-hover)", color: showHidden ? "var(--accent)" : "var(--text-muted)", cursor: loading ? "default" : "pointer", opacity: loading ? 0.6 : 1 }}
+          >
+            {showHidden ? <Eye size={15} /> : <EyeOff size={15} />}
+          </button>
         </form>
 
-        <div className="directory-picker-list" style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "8px 10px" }}>
+        <div className="directory-picker-list" ref={listRef} tabIndex={0} role="listbox" aria-label="Directories" aria-activedescendant={directories[activeIndex] ? `directory-option-${activeIndex}` : undefined} onKeyDown={(event) => {
+          if (directories.length === 0) return;
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            setActiveIndex((current) => (current + (event.key === "ArrowDown" ? 1 : -1) + directories.length) % directories.length);
+          } else if (event.key === "Home" || event.key === "End") {
+            event.preventDefault();
+            setActiveIndex(event.key === "Home" ? 0 : directories.length - 1);
+          } else if (event.key === "Enter") {
+            event.preventDefault();
+            void navigateTo(directories[activeIndex]?.path);
+          }
+        }} style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "8px 10px", outline: "none" }}>
+          {recentProjects.length > 0 && <section style={{ margin: "0 0 8px", paddingBottom: 8, borderBottom: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 8px 5px", color: "var(--text-dim)", fontSize: 10, fontWeight: 650, textTransform: "uppercase", letterSpacing: ".04em" }}><Clock3 size={11} />Recent projects</div>
+            {recentProjects.slice(0, 5).map((project) => <button key={project.path} type="button" onClick={() => void navigateTo(project.path)} title={project.path} style={{ width: "100%", minHeight: 30, display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", border: 0, borderRadius: 5, background: "none", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}><FolderIcon /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{project.label}</span><small style={{ maxWidth: "55%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>{project.path}</small></button>)}
+          </section>}
           {loading ? (
             <div style={{ padding: 8, color: "var(--text-dim)", fontSize: 11 }}>Loading directories…</div>
           ) : directories.length > 0 ? (
             directories.map((entry) => (
               <button
                 key={entry.path}
+                id={`directory-option-${directories.indexOf(entry)}`}
+                data-directory-index={directories.indexOf(entry)}
                 className="directory-picker-entry"
                 type="button"
+                role="option"
+                aria-selected={directories.indexOf(entry) === activeIndex}
+                onMouseEnter={() => setActiveIndex(directories.indexOf(entry))}
                 onClick={() => void navigateTo(entry.path)}
                 title={entry.path}
-                style={{ width: "100%", minHeight: 30, display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", border: 0, borderRadius: 5, background: "none", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontFamily: "var(--font-mono)", fontSize: 11 }}
+                style={{ width: "100%", minHeight: 30, display: "flex", alignItems: "center", gap: 7, padding: "5px 8px", border: 0, borderRadius: 5, background: directories.indexOf(entry) === activeIndex ? "var(--bg-selected)" : "none", color: directories.indexOf(entry) === activeIndex ? "var(--text)" : "var(--text-muted)", cursor: "pointer", textAlign: "left", fontFamily: "var(--font-mono)", fontSize: 11 }}
               >
                 <FolderIcon />
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.name}</span>

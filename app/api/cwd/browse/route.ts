@@ -26,7 +26,9 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ error: "Path is not a directory" }, { status: 400 });
     }
 
-    const directories = await listDirectories(resolved);
+    const directories = await listDirectories(resolved, {
+      hideHidden: request.nextUrl.searchParams.get("hideHidden") === "1",
+    });
 
     return NextResponse.json({
       path: resolved,

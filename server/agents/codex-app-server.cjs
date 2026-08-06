@@ -107,6 +107,13 @@ function runtimeForSession(threadId) {
   const runState = state.incoming.size ? "approval" : state.activeTurnId ? "running" : "idle";
   return { owner: "chat", state: runState, connected: state.listeners.size > 0 };
 }
+function listRuntimes() {
+  return [...sessions.entries()].map(([threadId, state]) => ({
+    threadId,
+    cwd: state.cwd,
+    ...runtimeForSession(threadId),
+  }));
+}
 async function readModels(cwd) {
   const child = spawn("codex", ["app-server", "--stdio"], { cwd, stdio: ["pipe", "pipe", "pipe"] });
   let nextId = 1;
@@ -172,4 +179,4 @@ async function listModels(cwd) {
   modelCatalogCache.set(cwd, { promise, expiresAt: 0 });
   return promise;
 }
-module.exports = { start, stop, stopAndWait, prompt, readThread, command, respond, fork, interrupt, subscribe, isClaimed, isAttached, snapshot, runtimeForSession, listModels, handleProtocolMessage, failState };
+module.exports = { start, stop, stopAndWait, prompt, readThread, command, respond, fork, interrupt, subscribe, isClaimed, isAttached, snapshot, runtimeForSession, listRuntimes, listModels, handleProtocolMessage, failState };

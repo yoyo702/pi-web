@@ -30,6 +30,7 @@ if (!isLoopback && !auth.configured()) {
 }
 
 let handle;
+let nextUpgradeHandler;
 
 function writeJson(res, status, body, headers = {}) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
@@ -215,15 +216,29 @@ const server = (tls ? https : http).createServer(tls || undefined, (req, res) =>
   handle(req, res);
 });
 
-const app = next({ dev, dir: root, hostname, port, httpServer: server });
+// Keep WebSocket ownership explicit. Passing `httpServer` here makes Next add
+// its own upgrade listener lazily, alongside the terminal listener below. In
+// development that race can leave the HMR socket with an invalid response and
+// prevent the client bundle from hydrating. Route each upgrade through one
+// listener instead: terminal streams stay local and everything else goes to
+// Next (including /_next/webpack-hmr).
+const app = next({ dev, dir: root, hostname, port });
 
 function isTerminalStream(url) {
   return /^\/api\/terminals\/[^/]+\/stream$/.test(url.pathname);
 }
 
-server.prependListener("upgrade", (req, socket, head) => {
+server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || hostname}`);
-  if (!isTerminalStream(url)) return;
+  if (!isTerminalStream(url)) {
+    if (nextUpgradeHandler) {
+      void nextUpgradeHandler(req, socket, head);
+    } else {
+      socket.write("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+    }
+    return;
+  }
 
   if (auth.configured() && !auth.getSessionFromRequest(req)) {
     socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
@@ -248,6 +263,7 @@ server.prependListener("upgrade", (req, socket, head) => {
 
 app.prepare().then(() => {
   handle = app.getRequestHandler();
+  nextUpgradeHandler = app.getUpgradeHandler();
   server.listen(port, hostname, () => {
     const authStatus = auth.configured() ? "password authentication enabled" : "no password configured (loopback only)";
     console.log(`Ready on ${tls ? "https" : "http"}://${hostname}:${port} (${authStatus})`);

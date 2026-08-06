@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useMemo } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
+import { ProjectRail } from "./ProjectRail";
 import { ChatWindow } from "./ChatWindow";
 import { FileViewer } from "./FileViewer";
 import { GitReviewPanel } from "./GitReviewPanel";
@@ -29,6 +30,7 @@ import type { TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
 import type { TerminalConnectionState } from "@/hooks/useTerminalSocket";
 import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
 import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelsTopLeft, Plus, TerminalSquare } from "lucide-react";
+import { PROJECT_WORKSPACES_STORAGE_KEY, RECENT_PROJECTS_STORAGE_KEY, parseProjectWorkspaceSnapshot, parseRecentProjects, projectLabel, updateRecentProjects, upsertProjectWorkspace, type ProjectWorkspace } from "@/lib/project-workspaces";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -41,12 +43,19 @@ const rightPanelToolMenuStyle: React.CSSProperties = { position: "absolute", zIn
 const rightPanelToolItemStyle: React.CSSProperties = { minHeight: 32, display: "flex", alignItems: "center", gap: 8, padding: "0 9px", border: 0, borderRadius: 5, background: "transparent", color: "var(--text)", cursor: "pointer", font: "12px/1.2 inherit", textAlign: "left" };
 const WORKSPACE_TABS_STORAGE_KEY = "pi-web:workspace-tabs";
 const workspaceTabsStorageKey = (cwd: string) => `${WORKSPACE_TABS_STORAGE_KEY}:${encodeURIComponent(cwd)}`;
+const RIGHT_PANEL_TABS_STORAGE_KEY = "pi-web:right-panel-tabs";
+const rightPanelTabsStorageKey = (projectRoot: string) => `${RIGHT_PANEL_TABS_STORAGE_KEY}:${encodeURIComponent(projectRoot)}`;
 
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation] = useState(() => getInitialNavigation(searchParams));
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
+  const [projectWorkspaces, setProjectWorkspaces] = useState<ProjectWorkspace[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [projectWorkspacesHydrated, setProjectWorkspacesHydrated] = useState(false);
+  const [projectSelectionDismissed, setProjectSelectionDismissed] = useState(false);
+  const [sidebarCwdResetKey, setSidebarCwdResetKey] = useState(0);
   const { isDark, toggleTheme } = useTheme();
   const isMobile = useIsMobile();
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
@@ -75,6 +84,16 @@ export function AppShell() {
   useEffect(() => {
     setMobileSidebarReady(true);
   }, []);
+  useEffect(() => {
+    const restored = parseProjectWorkspaceSnapshot(localStorage.getItem(PROJECT_WORKSPACES_STORAGE_KEY));
+    setProjectWorkspaces(restored.workspaces);
+    setActiveProjectId(restored.activeId);
+    setProjectWorkspacesHydrated(true);
+  }, []);
+  useEffect(() => {
+    if (!projectWorkspacesHydrated) return;
+    try { localStorage.setItem(PROJECT_WORKSPACES_STORAGE_KEY, JSON.stringify({ workspaces: projectWorkspaces, activeId: activeProjectId })); } catch { /* storage may be unavailable */ }
+  }, [activeProjectId, projectWorkspaces, projectWorkspacesHydrated]);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
 
@@ -226,6 +245,46 @@ export function AppShell() {
   // Right panel tabs: file viewers and Git Review.
   const [fileTabs, setFileTabs] = useState<Tab[]>([]);
   const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
+  const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [fileTabsHydratedProject, setFileTabsHydratedProject] = useState<string | null>(null);
+  const rightPanelStateCacheRef = useRef(new Map<string, { tabs: Tab[]; activeId: string | null; open: boolean }>());
+  useLayoutEffect(() => {
+    setFileTabs([]);
+    setActiveFileTabId(null);
+    setRightPanelOpen(false);
+    if (!activeProjectId) { setFileTabsHydratedProject(null); return; }
+    try {
+      const parsed = rightPanelStateCacheRef.current.get(activeProjectId) ?? JSON.parse(localStorage.getItem(rightPanelTabsStorageKey(activeProjectId)) || "null") as { tabs?: unknown; activeId?: unknown; open?: unknown } | null;
+      const restored = Array.isArray(parsed?.tabs) ? parsed.tabs.filter((value): value is Tab => {
+        if (!value || typeof value !== "object") return false;
+        const tab = value as Partial<Tab>;
+        return typeof tab.id === "string" && typeof tab.label === "string" && (tab.kind === "file" || tab.kind === "git");
+      }) : [];
+      setFileTabs(restored);
+      if (typeof parsed?.activeId === "string" && restored.some((tab) => tab.id === parsed.activeId)) setActiveFileTabId(parsed.activeId);
+      setRightPanelOpen(parsed?.open === true && restored.length > 0);
+    } catch { /* ignore malformed storage */ }
+    setFileTabsHydratedProject(activeProjectId);
+  }, [activeProjectId]);
+  useLayoutEffect(() => {
+    if (!activeProjectId || fileTabsHydratedProject !== activeProjectId) return;
+    const snapshot = { tabs: fileTabs, activeId: activeFileTabId, open: rightPanelOpen };
+    rightPanelStateCacheRef.current.set(activeProjectId, snapshot);
+    try { localStorage.setItem(rightPanelTabsStorageKey(activeProjectId), JSON.stringify(snapshot)); } catch { /* storage may be unavailable */ }
+  }, [activeFileTabId, activeProjectId, fileTabs, fileTabsHydratedProject, rightPanelOpen]);
+  const currentProjectPanelsRef = useRef({ activeCwd, activeFileTabId, activeProjectId, activeWorkspaceTabId, fileTabs, fileTabsHydratedProject, rightPanelOpen, terminalSplit, workspaceTabs, workspaceTabsHydratedCwd });
+  currentProjectPanelsRef.current = { activeCwd, activeFileTabId, activeProjectId, activeWorkspaceTabId, fileTabs, fileTabsHydratedProject, rightPanelOpen, terminalSplit, workspaceTabs, workspaceTabsHydratedCwd };
+  const persistCurrentProjectPanels = useCallback(() => {
+    const current = currentProjectPanelsRef.current;
+    try {
+      if (current.activeCwd && current.workspaceTabsHydratedCwd === current.activeCwd) localStorage.setItem(workspaceTabsStorageKey(current.activeCwd), JSON.stringify({ tabs: current.workspaceTabs.filter((tab) => tab.id !== "pi"), activeId: current.activeWorkspaceTabId, split: current.terminalSplit }));
+      if (current.activeProjectId && current.fileTabsHydratedProject === current.activeProjectId) {
+        const snapshot = { tabs: current.fileTabs, activeId: current.activeFileTabId, open: current.rightPanelOpen };
+        rightPanelStateCacheRef.current.set(current.activeProjectId, snapshot);
+        localStorage.setItem(rightPanelTabsStorageKey(current.activeProjectId), JSON.stringify(snapshot));
+      }
+    } catch { /* storage may be unavailable */ }
+  }, []);
   const { terminals: terminalList, loaded: terminalsLoaded, update: updateTerminals } = useWorkspaceTerminals(activeCwd ?? "");
   const terminals = useMemo(() => Object.fromEntries(terminalList.map((terminal) => [terminal.id, terminal])), [terminalList]);
   const [newTerminalProvider, setNewTerminalProvider] = useState<TerminalProvider | null>(null);
@@ -236,7 +295,6 @@ export function AppShell() {
   const [terminalRestartError, setTerminalRestartError] = useState<string | null>(null);
   const terminalRestoreInFlightRef = useRef(new Set<string>());
   const [terminalRestoreErrors, setTerminalRestoreErrors] = useState<Record<string, string>>({});
-  const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const mobileOverlayHistoryRef = useRef(false);
   const mobileOverlayHistoryReadyRef = useRef(false);
   useEffect(() => {
@@ -418,6 +476,20 @@ export function AppShell() {
   const [initialSessionRestored, setInitialSessionRestored] = useState<boolean>(() => !initialSessionId);
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
   const suppressCwdBumpRef = useRef(false);
+  const projectSwitchTokenRef = useRef(0);
+
+  const recordProjectWorkspace = useCallback((cwd: string, projectRoot = cwd, sessionId?: string | null) => {
+    setProjectSelectionDismissed(false);
+    setActiveProjectId(projectRoot);
+    setProjectWorkspaces((current) => upsertProjectWorkspace(current, { projectRoot, cwd, sessionId }));
+  }, []);
+
+  const rememberRecentProject = useCallback((workspace: ProjectWorkspace) => {
+    try {
+      const recent = parseRecentProjects(localStorage.getItem(RECENT_PROJECTS_STORAGE_KEY));
+      localStorage.setItem(RECENT_PROJECTS_STORAGE_KEY, JSON.stringify(updateRecentProjects(recent, workspace.projectRoot, workspace.label)));
+    } catch { /* local storage may be unavailable */ }
+  }, []);
 
   useEffect(() => {
     const requestedCwd = initialNavigation.requestedCwd;
@@ -458,6 +530,9 @@ export function AppShell() {
     setActiveCwd(cwd);
     // Skip if cwd is null (initial mount) or during the initial URL restore.
     if (!cwd) return;
+    const newProject = projectRoot ?? cwd;
+    const selectedProject = selectedSession ? selectedSession.projectRoot ?? selectedSession.cwd : null;
+    recordProjectWorkspace(cwd, newProject, selectedProject === newProject ? selectedSession?.id : undefined);
     if (suppressCwdBumpRef.current) {
       suppressCwdBumpRef.current = false;
       return;
@@ -465,7 +540,6 @@ export function AppShell() {
     // Worktrees of one repo share a project root. Moving the effective cwd
     // within the same project (e.g. switching worktree, or clicking a session
     // that lives in another worktree) must not close the open session.
-    const newProject = projectRoot ?? cwd;
     if (selectedSession && (selectedSession.projectRoot ?? selectedSession.cwd) === newProject) {
       return;
     }
@@ -482,9 +556,10 @@ export function AppShell() {
     setSystemPrompt(null);
     setActiveTopPanel(null);
     router.replace("/", { scroll: false });
-  }, [router, selectedSession]);
+  }, [recordProjectWorkspace, router, selectedSession]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
+    recordProjectWorkspace(session.cwd, session.projectRoot ?? session.cwd, session.id);
     setActiveWorkspaceTabId("pi");
     setNewSessionCwd(null);
     setSelectedSession(session);
@@ -503,9 +578,10 @@ export function AppShell() {
     if (!isRestore) {
       router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
     }
-  }, [router, isMobile]);
+  }, [recordProjectWorkspace, router, isMobile]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
+    recordProjectWorkspace(cwd, activeProjectId ?? cwd, null);
     setActiveWorkspaceTabId("pi");
     setSelectedSession(null);
     setNewSessionCwd(cwd);
@@ -516,7 +592,102 @@ export function AppShell() {
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
     router.replace("/", { scroll: false });
-  }, [router, isMobile]);
+  }, [activeProjectId, recordProjectWorkspace, router, isMobile]);
+
+  const activateProjectWorkspace = useCallback(async (workspace: ProjectWorkspace) => {
+    persistCurrentProjectPanels();
+    rememberRecentProject(workspace);
+    const token = ++projectSwitchTokenRef.current;
+    setActiveProjectId(workspace.id);
+    setProjectSelectionDismissed(false);
+    setProjectWorkspaces((current) => upsertProjectWorkspace(current, { ...workspace, lastActive: Date.now() }));
+    setActiveCwd(workspace.cwd);
+    setActiveWorkspaceTabId("pi");
+    setSelectedSession(null);
+    setNewSessionCwd(workspace.cwd);
+    setSessionKey((key) => key + 1);
+    setBranchTree([]);
+    setBranchActiveLeafId(null);
+    setSystemPrompt(null);
+    setActiveTopPanel(null);
+    suppressCwdBumpRef.current = true;
+    router.replace("/", { scroll: false });
+    if (!workspace.sessionId) return;
+    try {
+      const response = await fetch("/api/sessions", { cache: "no-store" });
+      if (!response.ok) return;
+      const data = await response.json() as { sessions?: SessionInfo[] };
+      const session = data.sessions?.find((candidate) => candidate.id === workspace.sessionId);
+      if (!session || token !== projectSwitchTokenRef.current) return;
+      setNewSessionCwd(null);
+      setSelectedSession(session);
+      recordProjectWorkspace(session.cwd, session.projectRoot ?? workspace.projectRoot, session.id);
+      setSessionKey((key) => key + 1);
+      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+    } catch { /* keep the project open with a fresh Pi tab */ }
+  }, [persistCurrentProjectPanels, recordProjectWorkspace, rememberRecentProject, router]);
+
+  const handleAddProjectWorkspace = useCallback(async (path: string) => {
+    try {
+      const response = await fetch("/api/cwd/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: path }) });
+      const data = await response.json() as { cwd?: string };
+      if (!response.ok || !data.cwd) return;
+      const workspace: ProjectWorkspace = { id: data.cwd, projectRoot: data.cwd, cwd: data.cwd, label: projectLabel(data.cwd), sessionId: null, lastActive: Date.now() };
+      await activateProjectWorkspace(workspace);
+    } catch { /* directory picker already leaves the current workspace intact */ }
+  }, [activateProjectWorkspace]);
+
+  const handleCloseProjectWorkspace = useCallback((workspace: ProjectWorkspace) => {
+    if (workspace.id === activeProjectId) persistCurrentProjectPanels();
+    const remaining = projectWorkspaces.filter((candidate) => candidate.id !== workspace.id);
+    setProjectWorkspaces(remaining);
+    if (workspace.id !== activeProjectId) return;
+    const next = remaining[0];
+    if (next) void activateProjectWorkspace(next);
+    else {
+      projectSwitchTokenRef.current += 1;
+      setActiveProjectId(null);
+      setProjectSelectionDismissed(true);
+      setSidebarCwdResetKey((key) => key + 1);
+      setActiveCwd(null);
+      setSelectedSession(null);
+      setNewSessionCwd(null);
+      setSessionKey((key) => key + 1);
+      router.replace("/", { scroll: false });
+    }
+  }, [activeProjectId, activateProjectWorkspace, persistCurrentProjectPanels, projectWorkspaces, router]);
+
+  const handleReorderProjectWorkspaces = useCallback((sourceId: string, targetId: string) => {
+    setProjectWorkspaces((current) => {
+      const sourceIndex = current.findIndex((workspace) => workspace.id === sourceId);
+      const targetIndex = current.findIndex((workspace) => workspace.id === targetId);
+      if (sourceIndex < 0 || targetIndex < 0) return current;
+      const next = [...current];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next.sort((left, right) => Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)));
+    });
+  }, []);
+
+  const handleRenameProjectWorkspace = useCallback((workspace: ProjectWorkspace, label: string) => {
+    const nextLabel = label.trim();
+    if (!nextLabel) return;
+    const renamed = { ...workspace, label: nextLabel };
+    setProjectWorkspaces((current) => current.map((candidate) => candidate.id === workspace.id ? renamed : candidate));
+    rememberRecentProject(renamed);
+  }, [rememberRecentProject]);
+
+  const handleTogglePinnedProjectWorkspace = useCallback((workspace: ProjectWorkspace) => {
+    setProjectWorkspaces((current) => current
+      .map((candidate) => candidate.id === workspace.id ? { ...candidate, pinned: !candidate.pinned } : candidate)
+      .sort((left, right) => Number(Boolean(right.pinned)) - Number(Boolean(left.pinned))));
+  }, []);
+
+  useEffect(() => {
+    if (!projectWorkspacesHydrated || activeCwd || !activeProjectId || initialSessionId) return;
+    const workspace = projectWorkspaces.find((candidate) => candidate.id === activeProjectId);
+    if (workspace) void activateProjectWorkspace(workspace);
+  }, [activeCwd, activeProjectId, activateProjectWorkspace, initialSessionId, projectWorkspaces, projectWorkspacesHydrated]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -541,12 +712,13 @@ export function AppShell() {
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo) => {
+    recordProjectWorkspace(session.cwd, session.projectRoot ?? activeProjectId ?? session.cwd, session.id);
     setNewSessionCwd(null);
     setSelectedSession(session);
     setRefreshKey((k) => k + 1);
     hydrateSelectedSession(session.id);
     router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
-  }, [router, hydrateSelectedSession]);
+  }, [activeProjectId, recordProjectWorkspace, router, hydrateSelectedSession]);
 
   const handleAgentEnd = useCallback(() => {
     setRefreshKey((k) => k + 1);
@@ -958,7 +1130,7 @@ export function AppShell() {
         onSelectSession={handleSelectSession}
         onNewSession={handleNewSession}
         initialSessionId={initialSessionId}
-        skipInitialProjectSelection={initialNavigation.requestedCwd !== null}
+        skipInitialProjectSelection={!projectWorkspacesHydrated || projectSelectionDismissed || initialNavigation.requestedCwd !== null || (!initialSessionId && activeProjectId !== null)}
         onInitialRestoreDone={handleInitialRestoreDone}
         refreshKey={refreshKey}
         onSessionDeleted={handleSessionDeleted}
@@ -980,6 +1152,7 @@ export function AppShell() {
         onCodexSessionChanged={handleCodexSessionChanged}
         requestedModule={isMobile ? mobileSidebarModule : undefined}
         explorerRevealKey={isMobile ? mobileExplorerRevealKey : undefined}
+        cwdResetKey={sidebarCwdResetKey}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([
@@ -1142,6 +1315,22 @@ export function AppShell() {
           opacity: sidebarOpen ? 1 : 0,
           pointerEvents: sidebarOpen ? "auto" : "none",
           transition: "opacity 0.25s ease",
+        }}
+      />
+
+      <ProjectRail
+        workspaces={projectWorkspaces}
+        activeId={activeProjectId}
+        onSelect={(workspace) => void activateProjectWorkspace(workspace)}
+        onAdd={(path) => void handleAddProjectWorkspace(path)}
+        onClose={handleCloseProjectWorkspace}
+        onRestore={(workspace) => void activateProjectWorkspace(workspace)}
+        onReorder={handleReorderProjectWorkspaces}
+        onRename={handleRenameProjectWorkspace}
+        onTogglePinned={handleTogglePinnedProjectWorkspace}
+        onOpenTerminal={(workspace) => {
+          void activateProjectWorkspace(workspace);
+          setNewTerminalProvider("shell");
         }}
       />
 
@@ -1934,25 +2123,25 @@ export function AppShell() {
       <button type="button" aria-pressed={sidebarOpen && mobileSidebarModule === "explorer"} onClick={() => { prepareMobileOverlayHistory(); setMobileSidebarModule("explorer"); setMobileExplorerRevealKey((key) => key + 1); setRightPanelOpen(false); setSidebarOpen(true); }}><Files size={18} /><small>Files</small></button>
       <button type="button" disabled={!activeCwd} aria-pressed={rightPanelOpen && activeFileTabId === "git-review"} onClick={() => { setSidebarOpen(false); if (!(rightPanelOpen && activeFileTabId === "git-review")) { prepareMobileOverlayHistory(); handleOpenGitReview(); } else setRightPanelOpen(false); }}><GitBranch size={18} /><small>Git</small></button>
     </nav>}
-    <button
-      onClick={() => setRightPanelOpen((v) => !v)}
-      title={rightPanelOpen ? "Hide file panel" : "Show file panel"}
-      aria-label={rightPanelOpen ? "Hide file panel" : "Show file panel"}
+    {!rightPanelOpen && <button
+      onClick={() => setRightPanelOpen(true)}
+      title="Show file panel"
+      aria-label="Show file panel"
       style={{
         position: "fixed", top: 0, right: 0, zIndex: 300,
         display: "flex", alignItems: "center", justifyContent: "center",
         width: 36, height: 36, padding: 0,
         background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-        color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
+        color: "var(--text-muted)",
         cursor: "pointer", transition: "color 0.12s",
       }}
       onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
+      onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
     >
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
       </svg>
-    </button>
+    </button>}
     {newTerminalProvider && activeCwd && (
       <NewAgentDialog
         cwd={activeCwd}

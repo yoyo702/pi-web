@@ -30,7 +30,7 @@ export async function resolveDirectory(directory: string): Promise<string> {
   return realpath(normalizeDirectory(directory));
 }
 
-export async function listDirectories(directory: string): Promise<BrowsableDirectory[]> {
+export async function listDirectories(directory: string, options: { hideHidden?: boolean } = {}): Promise<BrowsableDirectory[]> {
   const entries = await readdir(directory, { withFileTypes: true });
   // 忽略损坏、不可访问或不指向目录的符号链接。
   const candidates = await Promise.all(entries.map(async (entry) => {
@@ -52,5 +52,6 @@ export async function listDirectories(directory: string): Promise<BrowsableDirec
 
   return candidates
     .filter((entry): entry is BrowsableDirectory => entry !== null)
+    .filter((entry) => !options.hideHidden || !entry.name.startsWith("."))
     .sort((left, right) => left.name.localeCompare(right.name));
 }

@@ -19,9 +19,12 @@ function safeSession(id, cwd) {
   if (cwd && canonical !== terminalApi.authorizedCwd(cwd)) throw Object.assign(new Error("Codex session belongs to a different workspace"), { code: "forbidden_cwd" });
   return { ...session, cwd: canonical };
 }
-function isCodexSessionPath(pathname) { return pathname === "/api/codex/sessions" || /^\/api\/codex\/sessions\/[^/]+(?:\/(?:archive|unarchive|delete|rename))?$/.test(pathname); }
+function isCodexSessionPath(pathname) { return pathname === "/api/codex/runtime" || pathname === "/api/codex/sessions" || /^\/api\/codex\/sessions\/[^/]+(?:\/(?:archive|unarchive|delete|rename))?$/.test(pathname); }
 async function handleCodexSessionRequest(req, res, url) {
   try {
+    if (url.pathname === "/api/codex/runtime" && req.method === "GET") {
+      return json(res, 200, { runtimes: codexAppServer.listRuntimes() });
+    }
     const parts = url.pathname.split("/").filter(Boolean);
     if (url.pathname === "/api/codex/sessions" && req.method === "GET") {
       const cwd = url.searchParams.get("cwd");

@@ -42,6 +42,7 @@ interface Props {
   onCodexSessionChanged?: (change: { id: string; action: "rename" | "archive" | "unarchive" | "delete"; name?: string }) => void;
   requestedModule?: "sessions" | "agents" | "explorer";
   explorerRevealKey?: number;
+  cwdResetKey?: number;
 }
 
 interface WorktreeEntry {
@@ -373,7 +374,7 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onExplorerPathRenamed, onExplorerPathDeleted, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onOpenGitReview, gitReviewOpen, onNewAgent, onOpenCodexSession, onOpenAgentTerminal, onAgentTerminalRemoved, onCodexSessionChanged, requestedModule, explorerRevealKey }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onExplorerPathRenamed, onExplorerPathDeleted, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onOpenGitReview, gitReviewOpen, onNewAgent, onOpenCodexSession, onOpenAgentTerminal, onAgentTerminalRemoved, onCodexSessionChanged, requestedModule, explorerRevealKey, cwdResetKey = 0 }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const sessionPane = useVerticalPaneSize("pi-sidebar-sessions-h", 280, 100, 640);
   const [sessionsExpanded, setSessionsExpanded] = useState(true);
@@ -572,6 +573,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       setSelectedCwd(selectedCwdProp);
     }
   }, [selectedCwdProp]);
+  useEffect(() => {
+    if (cwdResetKey === 0) return;
+    lastSyncedCwdPropRef.current = null;
+    lastNotifiedCwdRef.current = null;
+    setSelectedCwd(null);
+  }, [cwdResetKey]);
 
   // Load worktrees for the current effective cwd
   const [wtRefreshKey, setWtRefreshKey] = useState(0);
