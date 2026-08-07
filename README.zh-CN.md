@@ -93,7 +93,9 @@ npm install
 npm run dev
 ```
 
-本地开发端口为 [http://127.0.0.1:30141](http://127.0.0.1:30141)。交互终端使用原生 `node-pty`；如果包管理器阻止其安装脚本，请在具备原生构建工具链的环境中批准脚本，或运行 `npm exec -- node-gyp rebuild --directory=node_modules/node-pty`。
+默认开发服务器通过 HTTP 运行在 [http://127.0.0.1:30141](http://127.0.0.1:30141)，仅允许本机访问，不需要密码、证书或 `mkcert`。需要从局域网内的其他设备通过 HTTPS 测试时，请显式运行 `npm run dev:https`。
+
+交互终端使用原生 `node-pty`；如果包管理器阻止其安装脚本，请在具备原生构建工具链的环境中批准脚本，或运行 `npm exec -- node-gyp rebuild --directory=node_modules/node-pty`。
 
 常用检查：
 

@@ -29,7 +29,7 @@
     "package.json"
   ],
   "scripts": {
-    "dev": "node scripts/dev-https.cjs",
+    "dev": "node server/pi-web-server.js dev -H 127.0.0.1 -p 30141",
     "dev:local": "node server/pi-web-server.js dev -H 127.0.0.1 -p 30141",
     "dev:lan": "node server/pi-web-server.js dev -H 0.0.0.0 -p 30141",
     "dev:https": "node scripts/dev-https.cjs",

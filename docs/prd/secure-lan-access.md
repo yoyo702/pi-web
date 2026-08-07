@@ -6,6 +6,8 @@ Pi Web 会暴露本机项目文件、Session 和 Terminal。局域网访问必�
 
 ## 已实现范围
 
+- `npm run dev` 默认仅通过 `127.0.0.1` 提供 HTTP 服务，不触发证书流程。
+- 局域网 HTTPS 是显式模式，通过 `npm run dev:https` 启动。
 - Loopback 模式可在无密码时通过 HTTP 运行。
 - 非 Loopback 监听必须配置密码。
 - 开发脚本生成并复用本地 HTTPS 证书。

@@ -97,8 +97,10 @@ npm install
 npm run dev
 ```
 
-The local dev server runs at [http://127.0.0.1:30141](http://127.0.0.1:30141).
-The local dev server runs at [http://127.0.0.1:30141](http://127.0.0.1:30141). Interactive terminals use the native `node-pty` module; if its install script is blocked by your package manager, approve it or run `npm exec -- node-gyp rebuild --directory=node_modules/node-pty` with a working native build toolchain.
+The default dev server runs over HTTP at [http://127.0.0.1:30141](http://127.0.0.1:30141). It is loopback-only and requires no password, certificate, or `mkcert`. For HTTPS access from another device on your LAN, run `npm run dev:https` explicitly.
+
+Interactive terminals use the native `node-pty` module; if its install script is blocked by your package manager, approve it or run `npm exec -- node-gyp rebuild --directory=node_modules/node-pty` with a working native build toolchain.
+
 Common checks:
 
 ```bash
