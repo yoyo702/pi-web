@@ -622,19 +622,21 @@ export function AppShell() {
     // Explicit roots are held in server memory. Re-authorize a workspace before
     // restoring it from localStorage or switching back to it after a server
     // restart, otherwise Explorer/Git/Worktree requests race ahead with 403s.
-    let authorizedCwd: string;
-    try {
-      const response = await fetch("/api/cwd/validate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: workspace.cwd }),
-      });
-      const data = await response.json().catch(() => ({})) as { cwd?: string };
-      if (!response.ok || !data.cwd) return;
-      authorizedCwd = data.cwd;
-      authorizedCwdsRef.current.add(authorizedCwd);
-    } catch {
-      return;
+    let authorizedCwd = workspace.cwd;
+    if (!authorizedCwdsRef.current.has(workspace.cwd)) {
+      try {
+        const response = await fetch("/api/cwd/validate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ cwd: workspace.cwd }),
+        });
+        const data = await response.json().catch(() => ({})) as { cwd?: string };
+        if (!response.ok || !data.cwd) return;
+        authorizedCwd = data.cwd;
+        authorizedCwdsRef.current.add(authorizedCwd);
+      } catch {
+        return;
+      }
     }
     const authorizedWorkspace = authorizedCwd === workspace.cwd
       ? workspace
@@ -677,7 +679,15 @@ export function AppShell() {
   }, [persistCurrentProjectPanels, recordProjectWorkspace, rememberRecentProject, router]);
 
   const handleAddProjectWorkspace = useCallback(async (path: string) => {
-    const workspace: ProjectWorkspace = { id: path, projectRoot: path, cwd: path, label: projectLabel(path), sessionId: null, lastActive: Date.now() };
+    const response = await fetch("/api/cwd/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: path }),
+    });
+    const data = await response.json().catch(() => ({})) as { cwd?: string; error?: string };
+    if (!response.ok || !data.cwd) throw new Error(data.error ?? `Unable to open directory (HTTP ${response.status})`);
+    authorizedCwdsRef.current.add(data.cwd);
+    const workspace: ProjectWorkspace = { id: data.cwd, projectRoot: data.cwd, cwd: data.cwd, label: projectLabel(data.cwd), sessionId: null, lastActive: Date.now() };
     await activateProjectWorkspace(workspace);
   }, [activateProjectWorkspace]);
 

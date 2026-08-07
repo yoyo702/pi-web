@@ -28,7 +28,7 @@ interface Props {
   workspaces: ProjectWorkspace[];
   activeId: string | null;
   onSelect: (workspace: ProjectWorkspace) => void;
-  onAdd: (path: string) => void;
+  onAdd: (path: string) => void | Promise<void>;
   onClose: (workspace: ProjectWorkspace) => void;
   onRestore: (workspace: ProjectWorkspace) => void;
   onReorder: (sourceId: string, targetId: string) => void;
@@ -46,6 +46,8 @@ const contextMenuButtonStyle: CSSProperties = { minHeight: 32, display: "flex", 
 
 export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, onRestore, onReorder, onOpenTerminal, onRename, onTogglePinned }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerBusy, setPickerBusy] = useState(false);
+  const [pickerError, setPickerError] = useState<string | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [draggedId, setDraggedId] = useState<string | null>(null);
   const [runningByCwd, setRunningByCwd] = useState<Record<string, number>>({});
@@ -267,7 +269,7 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
           </div>;
         })}
       </div>
-      <button type="button" className="project-rail-add" aria-label="Open project" title="Open project (⌘⇧O)" onClick={() => setPickerOpen(true)}><FolderPlus size={16} /><span>Open project</span></button>
+      <button type="button" className="project-rail-add" aria-label="Open project" title="Open project (⌘⇧O)" onClick={() => { setPickerError(null); setPickerOpen(true); }}><FolderPlus size={16} /><span>Open project</span></button>
     </nav>
     {contextMenu && <div className="project-rail-context" role="menu" aria-label={`${contextMenu.workspace.label} actions`} style={{ position: "fixed", zIndex: 1200, width: 196, display: "grid", gap: 2, padding: 5, left: Math.max(8, Math.min(contextMenu.x, window.innerWidth - 204)), top: Math.max(8, Math.min(contextMenu.y, window.innerHeight - 238)), border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", boxShadow: "0 14px 38px rgba(0,0,0,.32)" }}>
       <button type="button" role="menuitem" style={contextMenuButtonStyle} onClick={() => { onSelect(contextMenu.workspace); setContextMenu(null); }}><FolderOpen size={14} />Open project</button>
@@ -312,6 +314,22 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
         <button type="button" className="project-mobile-add" onClick={() => { setMobileOpen(false); setPickerOpen(true); }}><FolderPlus size={14} />Open project</button>
       </div>}
     </div>
-    {pickerOpen && <DirectoryPicker onCancel={() => setPickerOpen(false)} onSelect={(path) => { setPickerOpen(false); onAdd(path); }} />}
+    {pickerOpen && <DirectoryPicker
+      busy={pickerBusy}
+      error={pickerError}
+      onCancel={() => { if (!pickerBusy) setPickerOpen(false); }}
+      onSelect={async (path) => {
+        setPickerBusy(true);
+        setPickerError(null);
+        try {
+          await onAdd(path);
+          setPickerOpen(false);
+        } catch (error) {
+          setPickerError(error instanceof Error ? error.message : String(error));
+        } finally {
+          setPickerBusy(false);
+        }
+      }}
+    />}
   </>;
 }
