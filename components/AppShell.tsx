@@ -595,16 +595,40 @@ export function AppShell() {
   }, [activeProjectId, recordProjectWorkspace, router, isMobile]);
 
   const activateProjectWorkspace = useCallback(async (workspace: ProjectWorkspace) => {
+    // Explicit roots are held in server memory. Re-authorize a workspace before
+    // restoring it from localStorage or switching back to it after a server
+    // restart, otherwise Explorer/Git/Worktree requests race ahead with 403s.
+    let authorizedCwd: string;
+    try {
+      const response = await fetch("/api/cwd/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: workspace.cwd }),
+      });
+      const data = await response.json().catch(() => ({})) as { cwd?: string };
+      if (!response.ok || !data.cwd) return;
+      authorizedCwd = data.cwd;
+    } catch {
+      return;
+    }
+    const authorizedWorkspace = authorizedCwd === workspace.cwd
+      ? workspace
+      : {
+          ...workspace,
+          cwd: authorizedCwd,
+          id: workspace.id === workspace.cwd ? authorizedCwd : workspace.id,
+          projectRoot: workspace.projectRoot === workspace.cwd ? authorizedCwd : workspace.projectRoot,
+        };
     persistCurrentProjectPanels();
-    rememberRecentProject(workspace);
+    rememberRecentProject(authorizedWorkspace);
     const token = ++projectSwitchTokenRef.current;
-    setActiveProjectId(workspace.id);
+    setActiveProjectId(authorizedWorkspace.id);
     setProjectSelectionDismissed(false);
-    setProjectWorkspaces((current) => upsertProjectWorkspace(current, { ...workspace, lastActive: Date.now() }));
-    setActiveCwd(workspace.cwd);
+    setProjectWorkspaces((current) => upsertProjectWorkspace(current, { ...authorizedWorkspace, lastActive: Date.now() }));
+    setActiveCwd(authorizedWorkspace.cwd);
     setActiveWorkspaceTabId("pi");
     setSelectedSession(null);
-    setNewSessionCwd(workspace.cwd);
+    setNewSessionCwd(authorizedWorkspace.cwd);
     setSessionKey((key) => key + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
@@ -612,29 +636,24 @@ export function AppShell() {
     setActiveTopPanel(null);
     suppressCwdBumpRef.current = true;
     router.replace("/", { scroll: false });
-    if (!workspace.sessionId) return;
+    if (!authorizedWorkspace.sessionId) return;
     try {
       const response = await fetch("/api/sessions", { cache: "no-store" });
       if (!response.ok) return;
       const data = await response.json() as { sessions?: SessionInfo[] };
-      const session = data.sessions?.find((candidate) => candidate.id === workspace.sessionId);
+      const session = data.sessions?.find((candidate) => candidate.id === authorizedWorkspace.sessionId);
       if (!session || token !== projectSwitchTokenRef.current) return;
       setNewSessionCwd(null);
       setSelectedSession(session);
-      recordProjectWorkspace(session.cwd, session.projectRoot ?? workspace.projectRoot, session.id);
+      recordProjectWorkspace(session.cwd, session.projectRoot ?? authorizedWorkspace.projectRoot, session.id);
       setSessionKey((key) => key + 1);
       router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
     } catch { /* keep the project open with a fresh Pi tab */ }
   }, [persistCurrentProjectPanels, recordProjectWorkspace, rememberRecentProject, router]);
 
   const handleAddProjectWorkspace = useCallback(async (path: string) => {
-    try {
-      const response = await fetch("/api/cwd/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ cwd: path }) });
-      const data = await response.json() as { cwd?: string };
-      if (!response.ok || !data.cwd) return;
-      const workspace: ProjectWorkspace = { id: data.cwd, projectRoot: data.cwd, cwd: data.cwd, label: projectLabel(data.cwd), sessionId: null, lastActive: Date.now() };
-      await activateProjectWorkspace(workspace);
-    } catch { /* directory picker already leaves the current workspace intact */ }
+    const workspace: ProjectWorkspace = { id: path, projectRoot: path, cwd: path, label: projectLabel(path), sessionId: null, lastActive: Date.now() };
+    await activateProjectWorkspace(workspace);
   }, [activateProjectWorkspace]);
 
   const handleCloseProjectWorkspace = useCallback((workspace: ProjectWorkspace) => {

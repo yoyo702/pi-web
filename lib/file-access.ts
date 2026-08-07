@@ -24,7 +24,10 @@ export function isWindowsAbsolutePath(filePath: string): boolean {
 export async function getAllowedFileRoots(): Promise<Set<string>> {
   const now = Date.now();
   const cached = globalThis.__piAllowedRootsCache;
-  if (cached && cached.expiresAt > now) return cached.roots;
+  if (cached && cached.expiresAt > now) {
+    for (const root of getAdditionalAllowedRoots()) cached.roots.add(root);
+    return cached.roots;
+  }
 
   const sessions = await listAllSessions();
   const roots = new Set<string>();
