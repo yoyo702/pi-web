@@ -477,6 +477,7 @@ export function AppShell() {
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
   const suppressCwdBumpRef = useRef(false);
   const projectSwitchTokenRef = useRef(0);
+  const authorizedCwdsRef = useRef(new Set<string>());
 
   const recordProjectWorkspace = useCallback((cwd: string, projectRoot = cwd, sessionId?: string | null) => {
     setProjectSelectionDismissed(false);
@@ -558,6 +559,29 @@ export function AppShell() {
     router.replace("/", { scroll: false });
   }, [recordProjectWorkspace, router, selectedSession]);
 
+  // Some cwd changes originate inside SessionSidebar (session restore,
+  // worktree selection, or state retained by Fast Refresh) and therefore do
+  // not pass through activateProjectWorkspace. Always establish the server
+  // grant for the effective cwd, then retry every view that may have raced the
+  // grant with an initial 403.
+  useEffect(() => {
+    if (!activeCwd || authorizedCwdsRef.current.has(activeCwd)) return;
+    const controller = new AbortController();
+    void fetch("/api/cwd/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: activeCwd }),
+      signal: controller.signal,
+    }).then((response) => {
+      if (!response.ok || controller.signal.aborted) return;
+      authorizedCwdsRef.current.add(activeCwd);
+      setExplorerRefreshKey((key) => key + 1);
+      setRefreshKey((key) => key + 1);
+      setModelsRefreshKey((key) => key + 1);
+    }).catch(() => {});
+    return () => controller.abort();
+  }, [activeCwd]);
+
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     recordProjectWorkspace(session.cwd, session.projectRoot ?? session.cwd, session.id);
     setActiveWorkspaceTabId("pi");
@@ -608,6 +632,7 @@ export function AppShell() {
       const data = await response.json().catch(() => ({})) as { cwd?: string };
       if (!response.ok || !data.cwd) return;
       authorizedCwd = data.cwd;
+      authorizedCwdsRef.current.add(authorizedCwd);
     } catch {
       return;
     }
