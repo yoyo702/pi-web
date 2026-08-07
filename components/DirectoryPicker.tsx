@@ -40,7 +40,7 @@ function FolderIcon() {
 
 interface Props {
   onCancel: () => void;
-  onSelect: (path: string) => void;
+  onSelect: (path: string) => void | Promise<void>;
   busy?: boolean;
   error?: string | null;
 }
@@ -56,6 +56,8 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   const [showHidden, setShowHidden] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
+  const [selectionBusy, setSelectionBusy] = useState(false);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
   const showHiddenRef = useRef(false);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -98,8 +100,28 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
     const candidate = pathInput.trim();
     if (candidate) void navigateTo(candidate);
   };
+  const selectCurrentDirectory = useCallback(async () => {
+    if (!currentPath || selectionBusy || busy) return;
+    setSelectionBusy(true);
+    setSelectionError(null);
+    try {
+      const response = await fetch("/api/cwd/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: currentPath }),
+      });
+      const data = await response.json().catch(() => ({})) as { cwd?: string; error?: string };
+      if (!response.ok || !data.cwd) throw new Error(data.error ?? `Unable to open directory (HTTP ${response.status})`);
+      await onSelect(data.cwd);
+    } catch (cause) {
+      setSelectionError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSelectionBusy(false);
+    }
+  }, [busy, currentPath, onSelect, selectionBusy]);
   const hasUncommittedPath = pathInput.trim() !== currentPath;
-  const canSelect = Boolean(currentPath) && !hasUncommittedPath && !busy;
+  const effectiveBusy = busy || selectionBusy;
+  const canSelect = Boolean(currentPath) && !hasUncommittedPath && !effectiveBusy;
 
   if (!portalTarget) return null;
 
@@ -110,10 +132,10 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
       aria-modal="true"
       aria-label="Select directory"
       onClick={(event) => {
-        if (event.target === event.currentTarget && !busy) onCancel();
+        if (event.target === event.currentTarget && !effectiveBusy) onCancel();
       }}
       onKeyDown={(event) => {
-        if (event.key === "Escape" && !busy) onCancel();
+        if (event.key === "Escape" && !effectiveBusy) onCancel();
       }}
       style={{ position: "fixed", inset: 0, zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.35)" }}
     >
@@ -125,10 +147,10 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
           <button
             type="button"
             onClick={onCancel}
-            disabled={busy}
+            disabled={effectiveBusy}
             title="Close"
             aria-label="Close"
-            style={{ padding: "2px 6px", border: 0, background: "none", color: "var(--text-muted)", fontSize: 20, lineHeight: 1, cursor: busy ? "default" : "pointer", opacity: busy ? 0.5 : 1 }}
+            style={{ padding: "2px 6px", border: 0, background: "none", color: "var(--text-muted)", fontSize: 20, lineHeight: 1, cursor: effectiveBusy ? "default" : "pointer", opacity: effectiveBusy ? 0.5 : 1 }}
           >
             ×
           </button>
@@ -234,20 +256,20 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
           ) : (
             <div style={{ padding: 8, color: "var(--text-dim)", fontSize: 11 }}>No subdirectories</div>
           )}
-          {(loadError || error) && <div style={{ padding: "8px", color: "#dc2626", fontSize: 11 }}>{loadError ?? error}</div>}
+          {(loadError || selectionError || error) && <div style={{ padding: "8px", color: "#dc2626", fontSize: 11 }}>{loadError ?? selectionError ?? error}</div>}
         </div>
 
         <div className="directory-picker-footer" style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 10, flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
-          <button className="directory-picker-action" type="button" onClick={onCancel} disabled={busy} style={{ padding: "6px 14px", border: "1px solid var(--border)", borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: busy ? "default" : "pointer", fontSize: 13 }}>Cancel</button>
+          <button className="directory-picker-action" type="button" onClick={onCancel} disabled={effectiveBusy} style={{ padding: "6px 14px", border: "1px solid var(--border)", borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: effectiveBusy ? "default" : "pointer", fontSize: 13 }}>Cancel</button>
           <button
             className="directory-picker-action"
             type="button"
-            onClick={() => onSelect(currentPath)}
+            onClick={() => void selectCurrentDirectory()}
             disabled={!canSelect}
             title={hasUncommittedPath ? "Open this path before selecting it" : "Select current directory"}
             style={{ padding: "6px 16px", border: 0, borderRadius: 6, background: "var(--accent)", color: "#fff", fontSize: 13, fontWeight: 600, opacity: canSelect ? 1 : 0.6, cursor: canSelect ? "pointer" : "default" }}
           >
-            {busy ? "Checking…" : "Select this folder"}
+            {effectiveBusy ? "Checking…" : "Select this folder"}
           </button>
         </div>
       </div>

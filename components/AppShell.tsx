@@ -679,15 +679,8 @@ export function AppShell() {
   }, [persistCurrentProjectPanels, recordProjectWorkspace, rememberRecentProject, router]);
 
   const handleAddProjectWorkspace = useCallback(async (path: string) => {
-    const response = await fetch("/api/cwd/validate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd: path }),
-    });
-    const data = await response.json().catch(() => ({})) as { cwd?: string; error?: string };
-    if (!response.ok || !data.cwd) throw new Error(data.error ?? `Unable to open directory (HTTP ${response.status})`);
-    authorizedCwdsRef.current.add(data.cwd);
-    const workspace: ProjectWorkspace = { id: data.cwd, projectRoot: data.cwd, cwd: data.cwd, label: projectLabel(data.cwd), sessionId: null, lastActive: Date.now() };
+    authorizedCwdsRef.current.add(path);
+    const workspace: ProjectWorkspace = { id: path, projectRoot: path, cwd: path, label: projectLabel(path), sessionId: null, lastActive: Date.now() };
     await activateProjectWorkspace(workspace);
   }, [activateProjectWorkspace]);
 

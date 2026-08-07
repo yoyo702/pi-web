@@ -645,17 +645,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     setCustomPathValidating(true);
     setCustomPathError(null);
     try {
-      const res = await fetch("/api/cwd/validate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd: path }),
-      });
-      const data = await res.json().catch(() => ({})) as { cwd?: string; error?: string };
-      if (!res.ok || data.error) {
-        setCustomPathError(data.error ?? `HTTP ${res.status}`);
-        return;
-      }
-      setSelectedCwd(data.cwd ?? path);
+      setSelectedCwd(path);
       setCustomPathOpen(false);
       setCustomPathValue("");
       setDropdownOpen(false);
