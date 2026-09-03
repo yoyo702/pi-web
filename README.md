@@ -103,7 +103,7 @@ npm run dev
 
 The default dev server runs over HTTP at [http://127.0.0.1:30141](http://127.0.0.1:30141). It is loopback-only and requires no password, certificate, or `mkcert`. For HTTPS access from another device on your LAN, run `npm run dev:https` explicitly.
 
-Interactive terminals use the native `node-pty` module; if its install script is blocked by your package manager, approve it or run `npm exec -- node-gyp rebuild --directory=node_modules/node-pty` with a working native build toolchain.
+Interactive terminals use the native `node-pty` module. TianForge pi verifies the executable permission of its `spawn-helper` after installation and repairs it again at runtime. If your package manager blocks native dependency installation entirely, approve the install script or run `npm exec -- node-gyp rebuild --directory=node_modules/node-pty` with a working native build toolchain.
 
 Common checks:
 

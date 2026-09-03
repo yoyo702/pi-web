@@ -1,7 +1,7 @@
 {
   "name": "@agegr/pi-web",
   "version": "0.8.1",
-  "description": "Web UI for the pi coding agent",
+  "description": "TianForge browser workspace built on the pi coding agent",
   "homepage": "https://github.com/agegr/pi-web#readme",
   "repository": {
     "type": "git",
@@ -37,6 +37,7 @@
     "start": "node server/pi-web-server.js start -H 127.0.0.1 -p 30141",
     "start:lan": "node server/pi-web-server.js start -H 0.0.0.0 -p 30141",
     "lint": "eslint .",
+    "postinstall": "node server/agents/ensure-node-pty-helper.cjs",
     "test": "node --test server/agents/*.test.cjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",

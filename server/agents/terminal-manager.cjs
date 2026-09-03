@@ -5,6 +5,7 @@ const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { ensureNodePtySpawnHelper } = require("./ensure-node-pty-helper.cjs");
 
 const MAX_BUFFER_BYTES = 1024 * 1024;
 const MAX_RUNNING_TERMINALS = 20;
@@ -47,6 +48,7 @@ function assertTerminalCapacity() {
 
 function getPty() {
   try {
+    ensureNodePtySpawnHelper();
     return require("node-pty");
   } catch (error) {
     throw new TerminalError("runtime_unavailable", `Terminal runtime unavailable: ${error instanceof Error ? error.message : String(error)}`);

@@ -192,6 +192,10 @@ Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's
 - File tabs support wheel-to-horizontal scrolling and a context menu for reveal, path copy, lock/unlock, and close-left/right/others/all. Locked tabs survive bulk-close actions and are persisted with the project panel state.
 - `GET /api/git/repositories` discovers a root repository and nested repositories under the allowed workspace. `GitReviewPanel` scopes all status/diff/history/write operations to the selected repository and persists that choice per workspace.
 
+### Native terminal runtime
+- `node-pty` launches Unix terminals through its packaged `spawn-helper`. Some npm/package extraction paths leave that Mach-O/ELF helper at mode `0644`, which surfaces only as `posix_spawnp failed` even when the configured shell and cwd are valid.
+- The package `postinstall` and `getPty()` both call `ensureNodePtySpawnHelper()` to restore execute bits on the exact regular helper file. Keep the runtime check: it repairs existing installations without requiring a reinstall.
+
 ### Plugins and skills
 - `/api/plugins` uses pi's `SettingsManager` + `DefaultPackageManager` for global/project package install, remove, update, enable, and disable. Disabling writes empty `extensions/skills/prompts/themes` arrays for that package entry.
 - `/api/skills` uses `DefaultResourceLoader` so settings paths, package skills, and project `.agents/skills` are listed the same way the runtime sees them.
