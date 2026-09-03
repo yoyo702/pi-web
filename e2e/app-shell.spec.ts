@@ -519,6 +519,10 @@ test("switches between persisted project workspaces", async ({ page }, testInfo)
   await terminalDialog.getByRole("button", { name: "Cancel" }).click();
   await rail.getByTitle("/tmp/project-a").click();
   await page.getByRole("button", { name: "Show file panel" }).click();
+  await expect(page.getByRole("button", { name: "Hide file panel" })).toBeVisible();
+  await page.getByRole("button", { name: "Hide file panel" }).click();
+  await expect(page.locator(".right-panel-container")).toHaveClass(/right-panel-closed/);
+  await page.getByRole("button", { name: "Show file panel" }).click();
   await page.getByRole("button", { name: "Open Git Review" }).click();
   await expect(page.locator(".right-panel-container")).toHaveClass(/right-panel-open/);
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem(`pi-web:right-panel-tabs:${encodeURIComponent("/tmp/project-a")}`) || "null")?.open)).toBe(true);

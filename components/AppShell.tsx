@@ -29,7 +29,7 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
 import type { TerminalConnectionState } from "@/hooks/useTerminalSocket";
 import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
-import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelsTopLeft, Plus, TerminalSquare } from "lucide-react";
+import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PanelsTopLeft, Plus, TerminalSquare } from "lucide-react";
 import { PROJECT_WORKSPACES_STORAGE_KEY, RECENT_PROJECTS_STORAGE_KEY, parseProjectWorkspaceSnapshot, parseRecentProjects, projectLabel, updateRecentProjects, upsertProjectWorkspace, type ProjectWorkspace } from "@/lib/project-workspaces";
 
 type SessionCopyField = "file" | "id";
@@ -2191,6 +2191,17 @@ export function AppShell() {
               <path d="M8 6h8M6 8v4a6 6 0 0 0 6 6M18 8v4a6 6 0 0 1-6 6" />
             </svg>
           </button>
+          {!isMobile && (
+            <button
+              type="button"
+              onClick={() => setRightPanelOpen(false)}
+              title="Hide file panel"
+              aria-label="Hide file panel"
+              style={rightPanelHeaderButtonStyle}
+            >
+              <PanelRightClose size={16} />
+            </button>
+          )}
         </div>
 
         {/* File content */}
@@ -2239,9 +2250,7 @@ export function AppShell() {
       onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
       onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
     >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
-      </svg>
+      <PanelRightOpen size={16} />
     </button>}
     {newTerminalProvider && activeCwd && (
       <NewAgentDialog
