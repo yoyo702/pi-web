@@ -1,16 +1,16 @@
-# Pi Web
+# TianForge pi
 
 [English](./README.md) | [简体中文](./README.zh-CN.md)
 
-[pi コーディングエージェント](https://github.com/badlogic/pi-mono) のローカル Web UI です。Pi Web はローカルの pi セッションファイルを読み込み、セッションの閲覧、リアルタイムチャット、モデル設定、スキル管理、プロジェクトファイルのプレビューを行えるブラウザワークスペースを提供します。
+[pi コーディングエージェント](https://github.com/badlogic/pi-mono) を基盤にしたローカル開発ワークスペースです。TianForge pi はローカルの pi セッションファイルを読み込み、複数プロジェクトのセッション、リアルタイムチャット、Agent ターミナル、Git レビュー、プロジェクトファイルをブラウザにまとめます。
 
-![Pi Web では、CLI と同じ pi セッションを、構造化された Markdown、ツール呼び出し、プロジェクトナビゲーションとともに表示できます](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
+![TianForge pi では、CLI と同じ pi セッションを、構造化された Markdown、ツール呼び出し、プロジェクトナビゲーションとともに表示できます](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
 
-CLI と Pi Web で同じ pi セッションを利用できます。構造化されたツール呼び出し、読みやすい Markdown、セッション閲覧、整理された結果表示を備えています。
+CLI と TianForge pi で同じ pi セッションを利用できます。構造化されたツール呼び出し、読みやすい Markdown、セッション閲覧、整理された結果表示を備えています。
 
 ## クイックスタート
 
-Pi Web には Node.js 22.19.0 以降が必要です。現在のバージョンは `node --version` で確認できます。
+TianForge pi には Node.js 22.19.0 以降が必要です。現在のバージョンは `node --version` で確認できます。
 
 **インストールせずに実行：**
 
@@ -25,7 +25,7 @@ npm install -g @agegr/pi-web
 pi-web
 ```
 
-続いて [http://127.0.0.1:30141](http://127.0.0.1:30141) を開きます。サーバーの準備が整うと、CLI はブラウザを自動的に開こうとします。Pi Web はデフォルトで `127.0.0.1` のみをリッスンします。
+続いて [http://127.0.0.1:30141](http://127.0.0.1:30141) を開きます。サーバーの準備が整うと、CLI はブラウザを自動的に開こうとします。TianForge pi はデフォルトで `127.0.0.1` のみをリッスンします。
 
 **オプション：**
 
@@ -40,11 +40,11 @@ PI_WEB_HOSTNAME=0.0.0.0 pi-web  # ネットワーク公開を明示的に有効�
 PI_WEB_NO_OPEN=1 pi-web         # バックグラウンドサービスとして実行する場合に便利
 ```
 
-Pi Web にはアプリケーションレベルの認証がなく、高権限のエージェントを呼び出せます。インターネットには公開せず、loopback 以外のアドレスは信頼できるネットワークでのみ使用してください。
+`PI_WEB_PASSWORD` で TianForge pi のパスワード認証を有効にできます。loopback 以外へバインドする場合は必須です。インターネットへ直接公開せず、HTTPS と信頼できるネットワークを使用してください。
 
 ## HTTP プロキシ
 
-Pi Web は、サーバー側のモデルリクエストと API リクエストに標準の `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 環境変数を使用します。
+TianForge pi は、サーバー側のモデルリクエストと API リクエストに標準の `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 環境変数を使用します。
 
 macOS または Linux：
 
@@ -67,6 +67,8 @@ npx @agegr/pi-web@latest
 ## 機能
 
 - **作業をすぐに再開**：セッションのパスやターミナル履歴を探さずに、プロジェクトごとに過去の pi の会話を閲覧できます。
+- **複数プロジェクトを並行処理**：プロジェクトごとにセッション、ファイルタブ、Agent の状態を保持し、切り替えてもバックグラウンドタスクは継続します。
+- **長い会話を高速に切り替え**：最近の会話をブラウザにキャッシュし、古いメッセージはページ単位で読み込みます。
 - **別の方向性を安全に試す**：以前のメッセージから続けるか、セッションをフォークして別の進め方を試せます。
 - **ブランチをまたいで作業**：サイドバーから Git worktree を切り替えると、新しいセッションと Explorer が選択したチェックアウトに追従します。
 - **プロジェクトを見ながらチャット**：エージェントの作業中に、左側でファイルを閲覧し、右側でソース、ドキュメント、画像、音声、PDF をプレビューできます。
@@ -75,13 +77,13 @@ npx @agegr/pi-web@latest
 
 ## 注意事項
 
-- **データディレクトリ**：Pi Web はデフォルトで `~/.pi/agent/sessions` を読み込みます。別の pi エージェントディレクトリを指定するには `PI_CODING_AGENT_DIR` を設定してください。
+- **データディレクトリ**：TianForge pi はデフォルトで `~/.pi/agent/sessions` を読み込みます。別の pi エージェントディレクトリを指定するには `PI_CODING_AGENT_DIR` を設定してください。
 - **セッションファイル**：ファイルは `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl` に保存されます。
 - **モデル設定**：Models パネルは pi エージェントディレクトリ内の `models.json` を読み書きします。モデルの一覧とデフォルト値は pi の設定から取得されます。
 - **ファイルアクセス**：ファイルの閲覧とプレビューは、選択したプロジェクトディレクトリとセッションに含まれる作業ディレクトリに限定されます。
-- **Git worktree**：切り替え機能が表示される条件、新しい worktree の作成方法、削除時の動作については、[Pi Web の Worktree](./docs/worktrees.md) を参照してください。
+- **Git worktree**：切り替え機能が表示される条件、新しい worktree の作成方法、削除時の動作については、[TianForge pi の Worktree](./docs/worktrees.md) を参照してください。
 - **Fork とセッション内ブランチの違い**：Fork は新しい `.jsonl` ファイルを作成します。"Edit from here" は同じセッションファイル内に別のブランチを作成します。
-- **同期について**：Pi Web とターミナルの `pi` は同じセッションファイルを共有します。自動的に更新される内容と避けるべきケースについては [Staying in Sync](./docs/sync.md) を参照してください。
+- **同期について**：TianForge pi とターミナルの `pi` は同じセッションファイルを共有します。バックグラウンド更新、キャッシュ、ページング、同時書き込みの制約については [Staying in Sync](./docs/sync.md) を参照してください。
 
 ## 開発
 

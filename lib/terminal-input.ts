@@ -6,6 +6,11 @@ export interface TerminalKeyEventLike {
   shiftKey: boolean;
 }
 
+export function isTerminalCopyShortcut(event: TerminalKeyEventLike, hasSelection: boolean): boolean {
+  if (!hasSelection || event.key.toLowerCase() !== "c") return false;
+  return event.metaKey || (event.ctrlKey && event.shiftKey);
+}
+
 const SPECIAL_KEY_SEQUENCES: Record<string, string> = {
   ArrowUp: "\x1b[A",
   ArrowDown: "\x1b[B",

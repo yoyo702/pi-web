@@ -171,6 +171,16 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
     const refresh = async () => {
       const entries = await Promise.all(workspaces.map(async (workspace) => {
         try {
+          // The rail is restored from browser storage before the active project
+          // finishes mounting. Re-establish each saved workspace grant before
+          // asking protected Git routes for badges, and repeat on the low-rate
+          // poll so a backend restart heals without user interaction.
+          const authorization = await fetch("/api/cwd/validate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ cwd: workspace.cwd }),
+          });
+          if (!authorization.ok) return null;
           const response = await fetch(`/api/git/status?${new URLSearchParams({ cwd: workspace.cwd })}`, { cache: "no-store" });
           if (!response.ok) return null;
           const status = await response.json() as GitStatusResponse;

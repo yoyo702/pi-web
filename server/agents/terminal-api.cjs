@@ -9,6 +9,7 @@ const codexAppServer = require("./codex-app-server.cjs");
 
 const state = global.__piWebTerminalAuthorization || { roots: new Set() };
 global.__piWebTerminalAuthorization = state;
+const allowedRootsFile = process.env.PI_WEB_ALLOWED_ROOTS_FILE || path.join(os.homedir(), ".pi-web", "allowed-roots.json");
 
 function json(res, status, value, headers = {}) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
@@ -33,6 +34,16 @@ function registerCwd(cwd) {
 }
 function sessionRoots() {
   const roots = new Set(state.roots);
+  // /api/cwd/validate is handled by the Next route, which persists grants for
+  // Files, Git, Worktrees, and terminals in one shared file. Reload it for
+  // every authorization check so this long-lived proxy process sees grants
+  // created by a Next worker without needing a second registration endpoint.
+  try {
+    const persisted = JSON.parse(fs.readFileSync(allowedRootsFile, "utf8"));
+    if (Array.isArray(persisted)) {
+      for (const root of persisted) if (typeof root === "string" && path.isAbsolute(root)) roots.add(root);
+    }
+  } catch { /* no explicit workspace grants yet */ }
   const sessionBase = path.join(os.homedir(), ".pi", "agent", "sessions");
   try {
     for (const dir of fs.readdirSync(sessionBase)) {

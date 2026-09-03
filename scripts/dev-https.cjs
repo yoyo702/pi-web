@@ -30,7 +30,7 @@ function developmentPassword() {
   const generated = crypto.randomBytes(18).toString("base64url");
   fs.mkdirSync(authDir, { recursive: true, mode: 0o700 });
   fs.writeFileSync(passwordFile, `${generated}\n`, { mode: 0o600, flag: "wx" });
-  console.log(`Generated a persistent Pi Web development password: ${generated}`);
+  console.log(`Generated a persistent TianForge pi development password: ${generated}`);
   console.log(`Stored securely at ${passwordFile}. This message is shown only once.`);
   return generated;
 }
@@ -45,7 +45,7 @@ if (!fs.existsSync(cert) || !fs.existsSync(key)) {
   fs.chmodSync(key, 0o600);
 }
 const password = developmentPassword();
-console.log("Pi Web LAN addresses:");
+console.log("TianForge pi LAN addresses:");
 for (const ip of ips) console.log(`  https://${ip}:30141`);
 const child = spawn(process.execPath, ["server/pi-web-server.js", "dev", "-H", "0.0.0.0", "-p", "30141"], { cwd: root, stdio: "inherit", env: { ...process.env, PI_WEB_PASSWORD: password, PI_WEB_HTTPS_CERT: cert, PI_WEB_HTTPS_KEY: key } });
 child.on("exit", (code) => process.exit(code ?? 0));

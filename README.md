@@ -1,16 +1,16 @@
-# Pi Web
+# TianForge pi
 
 [中文文档](./README.zh-CN.md) | [日本語](./README.ja.md)
 
-Local web UI for the [pi coding agent](https://github.com/badlogic/pi-mono). Pi Web reads your local pi session files and gives you a browser workspace for session browsing, real-time chat, model configuration, skill management, and project file preview.
+TianForge is a local development workspace built on the [pi coding agent](https://github.com/badlogic/pi-mono); the smaller `pi` in the product wordmark identifies that foundation. It reads local pi session files and brings multi-project sessions, live chat, agent terminals, Git review, and project files into one browser workspace.
 
-![Pi Web shows the same pi session with structured Markdown, tool calls, and project navigation beside the CLI](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
+![TianForge pi shows the same pi session with structured Markdown, tool calls, and project navigation beside the CLI](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
 
-The same pi session in CLI and Pi Web: structured tool calls, readable Markdown, session browsing, and cleaner results.
+The same pi session in the CLI and TianForge pi: structured tool calls, readable Markdown, session browsing, and cleaner results.
 
 ## Quick Start
 
-Pi Web requires Node.js 22.19.0 or newer. Check your version with `node --version`.
+TianForge pi requires Node.js 22.19.0 or newer. Check your version with `node --version`.
 
 **Run without installing:**
 
@@ -25,7 +25,7 @@ npm install -g @agegr/pi-web
 pi-web
 ```
 
-Then open [http://127.0.0.1:30141](http://127.0.0.1:30141). The CLI will try to open the browser automatically after the server is ready. Pi Web listens on `127.0.0.1` by default.
+Then open [http://127.0.0.1:30141](http://127.0.0.1:30141). The CLI will try to open the browser automatically after the server is ready. TianForge pi listens on `127.0.0.1` by default.
 
 **Options:**
 
@@ -40,17 +40,17 @@ PI_WEB_HOSTNAME=0.0.0.0 pi-web  # explicit network exposure
 PI_WEB_NO_OPEN=1 pi-web         # useful when running as a background service
 ```
 
-Pi Web can be password protected with `PI_WEB_PASSWORD`. Password authentication is required for any non-loopback binding, and it protects the entire app (chat, files, Git, settings, and terminals):
+TianForge pi can be password protected with `PI_WEB_PASSWORD`. Password authentication is required for any non-loopback binding, and it protects the entire app (chat, files, Git, settings, and terminals):
 
 ```bash
 PI_WEB_PASSWORD='use-a-strong-password' pi-web --hostname 0.0.0.0
 ```
 
-A signed-in browser has the same local privileges as Pi Web's server user. Do not expose it directly to the internet; use HTTPS and a trusted network.
+A signed-in browser has the same local privileges as the TianForge pi server user. Do not expose it directly to the internet; use HTTPS and a trusted network.
 
 ## HTTP Proxy
 
-Pi Web reads the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables for server-side model and API requests.
+TianForge pi reads the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables for server-side model and API requests.
 
 On macOS or Linux:
 
@@ -72,23 +72,27 @@ npx @agegr/pi-web@latest
 
 ## Features
 
+- **Work across projects in parallel**: each project keeps its own session, file tabs, and agents. Switching projects does not stop background work, and completion events continue to update its snapshot.
+- **Switch long conversations quickly**: recent sessions are cached in memory and IndexedDB, restored immediately, and reconciled with disk. Older messages load in pages instead of all at once.
 - **Pick work back up**: browse previous pi conversations by project without digging through terminal history or session paths.
 - **Try different directions safely**: continue from an earlier message or fork a session into a separate route.
 - **Work across branches**: switch Git worktrees from the sidebar so new sessions and the Explorer follow the checkout you choose.
-- **Chat beside the project**: browse files on the left and preview source, docs, images, audio, and PDFs on the right while the agent works.
+- **Chat beside the project**: browse files on the left and preview source, docs, images, audio, and PDFs on the right. File tabs support wheel scrolling, locking, bulk close actions, path copying, and reveal in Explorer.
+- **Reveal generated files on demand**: Explorer hides `.git`, `node_modules`, `dist`, and similar generated content by default, with a toolbar toggle to reveal it. macOS `._*` metadata remains filtered.
+- **Review multiple repositories**: Git Review discovers nested repositories inside a workspace and remembers the selected repository.
 - **See session state clearly**: context usage, cost, compaction state, and system prompt details are visible from the top bar.
-- **Configure less from the terminal**: manage models, login/API keys, model tests, and skill switches from the web UI.
 - **Interactive AI CLI terminals**: launch and reconnect to local Codex or Claude terminals from the right panel. Pi can inspect, send text to, or stop them only when you explicitly ask.
 - **Configure less from the terminal**: manage models, login/API keys, model tests, and skill switches from the web UI.
+
 ## Notes
 
-- **Data directory**: Pi Web reads `~/.pi/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another pi agent directory.
+- **Data directory**: TianForge pi reads `~/.pi/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another pi agent directory.
 - **Session files**: files are stored as `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`.
 - **Model config**: the Models panel reads and writes `models.json` in the pi agent directory. Model lists and defaults come from pi's config.
-- **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions.
-- **Git worktrees**: see [Worktrees in Pi Web](./docs/worktrees.md) for when the switcher appears, how new worktrees are created, and what removal does.
+- **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions. Explicit roots persist in `~/.pi-web/allowed-roots.json`, including across server restarts.
+- **Git worktrees**: see [Worktrees in TianForge pi](./docs/worktrees.md) for when the switcher appears, how new worktrees are created, and what removal does.
 - **Forks vs in-session branches**: Fork creates a new `.jsonl` file. "Edit from here" creates another branch inside the same session file.
-- **Staying in sync**: Pi Web and the terminal `pi` share the same session files. See [Staying in Sync](./docs/sync.md) for what refreshes automatically and the one case to avoid.
+- **Staying in sync**: TianForge pi and the terminal `pi` share the same session files. See [Staying in Sync](./docs/sync.md) for background updates, browser caching, pagination, and the concurrent-write boundary.
 
 ## Development
 
@@ -121,6 +125,7 @@ app/
     cwd/validate/   # custom working directory validation
     default-cwd/    # pi default working directory lookup
     files/          # file listing, reading, preview, and watching
+    git/            # Git status, diffs, history, and nested repository discovery
     home/           # current user home directory
     models/         # available models, default model, thinking levels
     models-config/  # read/write models.json and test models
@@ -128,6 +133,7 @@ app/
     skills/         # skill listing, search, install, enable/disable
 components/
   AppShell.tsx        # main layout, URL state, top panels, file tabs
+  ProductBrand.tsx    # TianForge wordmark with the smaller pi foundation mark
   SessionSidebar.tsx  # project selector, session tree, Explorer
   DirectoryPicker.tsx # browsable and editable working-directory picker
   ChatWindow.tsx      # messages, SSE, image drag/drop, minimap
@@ -142,6 +148,9 @@ lib/
   http-dispatcher.ts  # HTTP(S) proxy setup for server-side fetch
   rpc-manager.ts      # AgentSessionWrapper lifecycle and global registry
   session-reader.ts   # parses .jsonl session files and branch contexts
+  session-snapshot-cache.ts # recent-session memory/IndexedDB snapshots
+  session-background-sync.ts # background event reduction and cache updates
+  git-repositories.ts # discovers Git repositories inside a workspace
   normalize.ts        # normalizes toolCall field names
   file-access.ts      # file read safety boundary
   file-paths.ts       # path encoding and relative path helpers

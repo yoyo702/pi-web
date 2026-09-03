@@ -115,6 +115,8 @@ pre, code {
   line-height: 1.7;
   color: var(--text);
   word-break: break-word;
+  -webkit-user-select: text;
+  user-select: text;
 }
 .markdown-body p { margin: 0 0 8px; }
 .markdown-body p:last-child { margin-bottom: 0; }

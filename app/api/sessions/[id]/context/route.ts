@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { resolveSessionPath, buildSessionContext } from "@/lib/session-reader";
+import { resolveSessionPath, buildSessionContext, paginateSessionContext } from "@/lib/session-reader";
 
 export async function GET(
   req: Request,
@@ -11,6 +11,8 @@ export async function GET(
   const leafId = url.searchParams.get("leafId") ?? undefined;
   const deferThinking = url.searchParams.has("deferThinking");
   const deferToolResultImages = url.searchParams.has("deferMedia");
+  const limit = Number.parseInt(url.searchParams.get("limit") ?? "", 10);
+  const beforeEntryId = url.searchParams.get("beforeEntryId");
 
   try {
     const filePath = await resolveSessionPath(id);
@@ -19,10 +21,13 @@ export async function GET(
     }
 
     const sm = SessionManager.open(filePath);
-    const context = buildSessionContext(sm.getEntries() as never, leafId, {
+    const fullContext = buildSessionContext(sm.getEntries() as never, leafId, {
       deferThinking,
       deferToolResultImages,
     });
+    const context = Number.isFinite(limit) && limit > 0
+      ? paginateSessionContext(fullContext, limit, beforeEntryId)
+      : fullContext;
 
     return NextResponse.json({ context });
   } catch (error) {

@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useState } from "react";
+import { ProductBrand } from "./ProductBrand";
 
 export function LoginForm() {
   const [password, setPassword] = useState("");
@@ -41,8 +42,8 @@ export function LoginForm() {
   return (
     <main style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "var(--bg)", padding: 20 }}>
       <form action="/login" method="post" onSubmit={submit} style={{ width: "min(100%, 360px)", border: "1px solid var(--border)", borderRadius: 10, padding: 24, background: "var(--bg-panel)", boxShadow: "0 14px 40px rgba(0,0,0,.18)" }}>
-        <h1 style={{ margin: 0, fontSize: 18, color: "var(--text)" }}>Sign in to Pi Web</h1>
-        <p style={{ margin: "8px 0 20px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.5 }}>This Pi Web instance is password protected. Signing in grants access to local projects and terminal sessions.</p>
+        <h1 style={{ margin: 0, fontSize: 18, color: "var(--text)", display: "flex", alignItems: "baseline", gap: 5 }}>Sign in to <ProductBrand size={18} /></h1>
+        <p style={{ margin: "8px 0 20px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.5 }}>This TianForge instance is password protected. Signing in grants access to local projects and terminal sessions.</p>
         <label style={{ display: "grid", gap: 7, fontSize: 12, color: "var(--text-muted)" }}>
           Password
           <input autoFocus name="password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} onInput={(event) => setPassword(event.currentTarget.value)} disabled={busy} style={{ background: "var(--bg)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 6, padding: "9px 10px", font: "inherit" }} />

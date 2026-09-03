@@ -10,6 +10,7 @@ import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-ty
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
 import { terminalTools } from "./agents/terminal-tools";
+import { projectBackgroundSessionEvent } from "./background-session-event";
 
 // ============================================================================
 // Types
@@ -258,7 +259,7 @@ export class AgentSessionWrapper {
             id: randomUUID(),
             method: "notify",
             notifyType: "warning",
-            message: "Extension requested shutdown, but shutdown is not supported in Pi Web.",
+            message: "Extension requested shutdown, but shutdown is not supported in TianForge pi.",
           } as ExtensionUiRequest as AgentEvent),
           onError: (error) => this.emit({
             type: "extension_error",
@@ -314,6 +315,7 @@ export class AgentSessionWrapper {
 
   private emit(event: AgentEvent): void {
     for (const l of this.listeners) l(event);
+    notifyRpcSessionEvent(this.sessionId, event);
   }
 
   private resetIdleTimer(): void {
@@ -990,7 +992,7 @@ export class AgentSessionWrapper {
       get theme() { return PLAIN_TEXT_THEME; },
       getAllThemes: () => [],
       getTheme: () => undefined,
-      setTheme: () => ({ success: false, error: "Theme switching is not supported in Pi Web extension UI yet" }),
+      setTheme: () => ({ success: false, error: "Theme switching is not supported in TianForge pi extension UI yet" }),
       getToolsExpanded: () => false,
       setToolsExpanded: () => {},
     };
@@ -1031,6 +1033,7 @@ declare global {
   var __piSessions: Map<string, AgentSessionWrapper> | undefined;
   var __piStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
   var __piRunningListeners: Set<(ids: string[]) => void> | undefined;
+  var __piSessionEventListeners: Set<(sessionId: string, event: AgentEvent) => void> | undefined;
 }
 
 function getRegistry(): Map<string, AgentSessionWrapper> {
@@ -1080,6 +1083,32 @@ export function subscribeRunningSessions(listener: (ids: string[]) => void): () 
   const listeners = getRunningListeners();
   listeners.add(listener);
   return () => { listeners.delete(listener); };
+}
+
+function getSessionEventListeners(): Set<(sessionId: string, event: AgentEvent) => void> {
+  if (!globalThis.__piSessionEventListeners) globalThis.__piSessionEventListeners = new Set();
+  return globalThis.__piSessionEventListeners;
+}
+
+/** Subscribe to events from every in-process Pi session. */
+export function subscribeRpcSessionEvents(listener: (sessionId: string, event: AgentEvent) => void): () => void {
+  const listeners = getSessionEventListeners();
+  // Project at the subscriber boundary. This matters during Next.js hot
+  // reload: an already-running wrapper can still hold the previous module's
+  // emit closure, but every newly connected global SSE subscriber remains
+  // protected from token-level events.
+  const boundedListener = (sessionId: string, event: AgentEvent) => {
+    const backgroundEvent = projectBackgroundSessionEvent(event);
+    if (backgroundEvent) listener(sessionId, backgroundEvent);
+  };
+  listeners.add(boundedListener);
+  return () => { listeners.delete(boundedListener); };
+}
+
+function notifyRpcSessionEvent(sessionId: string, event: AgentEvent): void {
+  for (const listener of getSessionEventListeners()) {
+    try { listener(sessionId, event); } catch { /* isolate subscribers */ }
+  }
 }
 
 let lastRunningSnapshot = "";
@@ -1135,7 +1164,7 @@ export async function startRpcSession(
       // Otherwise DO NOT pass a builtin-only allow-list: passing CODING_TOOL_NAMES
       // set allowedToolNames to coding builtins only, which filtered every
       // extension/package-provided tool (e.g. subagents, web access) out of the
-      // tool registry — so they were unavailable in Pi Web sessions even though the
+    // tool registry — so they were unavailable in TianForge pi sessions even though the
       // `pi` CLI keeps them. Leaving the allow-list unset lets the SDK register all
       // tools (and activate extension tools); we narrow the ACTIVE set below.
       toolsOption = toolNames.length === 0 ? [] : undefined;
@@ -1153,7 +1182,7 @@ export async function startRpcSession(
 
     // If specific tool names were requested (non-empty), set the active tools to the
     // requested builtin coding tools PLUS all extension/package tools, so installed
-    // extensions stay usable in Pi Web just like in the `pi` CLI.
+    // extensions stay usable in TianForge pi just like in the `pi` CLI.
     if (toolNames && toolNames.length > 0) {
       inner.setActiveToolsByName(withExtensionTools(inner, toolNames));
     }

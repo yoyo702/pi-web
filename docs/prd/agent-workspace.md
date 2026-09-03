@@ -2,7 +2,7 @@
 
 ## 背景与目标
 
-Pi Web 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测试侧栏。Agents 应成为项目工作区的一等能力，与 Pi、Explorer 和文件标签共同工作。
+TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测试侧栏。Agents 应成为项目工作区的一等能力，与 Pi、Explorer 和文件标签共同工作。
 
 ## 用户场景
 
@@ -43,7 +43,7 @@ Codex Chat 的审批来自 app-server 协议；普通 Terminal 不通过输出�
 
 ## 验收标准
 
-- 服务端进程缺失或 spawn 失败时返回可恢复错误，不导致 Pi Web 崩溃。
+- 服务端进程缺失或 spawn 失败时返回可恢复错误，不导致 TianForge pi 崩溃。
 - 终端重连不重复或丢失缓冲区输出。
 - 切换标签后草稿、模型与权限配置不丢失。
 - 审批卡片只针对真实协议审批请求显示。

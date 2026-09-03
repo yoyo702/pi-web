@@ -47,7 +47,7 @@ test("shell terminals launch the configured login shell without client-controlle
   }
 });
 
-test("terminal child environments exclude Pi Web server secrets", () => {
+test("terminal child environments exclude TianForge pi server secrets", () => {
   const modulePath = require.resolve("./terminal-manager.cjs");
   delete require.cache[modulePath];
   const { terminalEnvironment } = require("./terminal-manager.cjs");

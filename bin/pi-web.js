@@ -31,7 +31,7 @@ if (!fs.existsSync(nextDir)) {
 }
 
 if (!loopbackHostnames.has(hostname) && !process.env.PI_WEB_PASSWORD) {
-  console.error("PI_WEB_PASSWORD must be set when Pi Web listens on a non-loopback host.");
+  console.error("PI_WEB_PASSWORD must be set when TianForge pi listens on a non-loopback host.");
   process.exit(1);
 }
 const serverArgs = [serverPath, "start", "-p", port, "-H", hostname];

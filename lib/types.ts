@@ -305,4 +305,18 @@ export interface SessionContext {
   entryIds: string[]; // parallel to messages — the session entry id for each message
   thinkingLevel: string;
   model: { provider: string; modelId: string } | null;
+  stats?: {
+    userMessages: number;
+    assistantMessages: number;
+    toolCalls: number;
+    toolResults: number;
+    totalMessages: number;
+    tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+    cost: number;
+  };
+  page?: {
+    hasMore: boolean;
+    beforeEntryId: string | null;
+    totalMessages: number;
+  };
 }

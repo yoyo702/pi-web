@@ -76,6 +76,7 @@ export function AppShell() {
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const [mobileSidebarModule, setMobileSidebarModule] = useState<"sessions" | "agents" | "explorer">("sessions");
   const [mobileExplorerRevealKey, setMobileExplorerRevealKey] = useState(0);
+  const [explorerRevealRequest, setExplorerRevealRequest] = useState<{ path: string; key: number } | null>(null);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
   useEffect(() => {
@@ -195,7 +196,7 @@ export function AppShell() {
 
   // The center is the primary workspace: Pi is permanent, external agents open
   // as sibling tabs. The right panel remains auxiliary (files and Git only).
-  const [workspaceTabs, setWorkspaceTabs] = useState<Tab[]>([{ id: "pi", label: "Pi", kind: "pi", closable: false }]);
+  const [workspaceTabs, setWorkspaceTabs] = useState<Tab[]>([{ id: "pi", label: "TianForge pi", kind: "pi", closable: false }]);
   const [activeWorkspaceTabId, setActiveWorkspaceTabId] = useState("pi");
   const [mountedWorkspaceTabIds, setMountedWorkspaceTabIds] = useState<Set<string>>(() => new Set(["pi"]));
   const [workspaceTabsHydratedCwd, setWorkspaceTabsHydratedCwd] = useState<string | null>(null);
@@ -204,7 +205,7 @@ export function AppShell() {
   const splitRestoreAttemptRef = useRef<string | null>(null);
   useEffect(() => {
     splitRestoreAttemptRef.current = null;
-    setWorkspaceTabs([{ id: "pi", label: "Pi", kind: "pi", closable: false }]);
+    setWorkspaceTabs([{ id: "pi", label: "TianForge pi", kind: "pi", closable: false }]);
     setActiveWorkspaceTabId("pi");
     setMountedWorkspaceTabIds(new Set(["pi"]));
     setTerminalSplit(null);
@@ -217,7 +218,7 @@ export function AppShell() {
         const tab = value as Partial<Tab>;
         return typeof tab.id === "string" && typeof tab.label === "string" && tab.cwd === activeCwd && (tab.kind === "terminal" || tab.kind === "codex-chat");
       }) : [];
-      if (restored.length > 0) setWorkspaceTabs([{ id: "pi", label: "Pi", kind: "pi", closable: false }, ...restored.map((tab) => ({ ...tab, status: tab.kind === "codex-chat" ? "idle" as const : tab.status }))]);
+      if (restored.length > 0) setWorkspaceTabs([{ id: "pi", label: "TianForge pi", kind: "pi", closable: false }, ...restored.map((tab) => ({ ...tab, status: tab.kind === "codex-chat" ? "idle" as const : tab.status }))]);
       if (typeof parsed?.activeId === "string" && (parsed.activeId === "pi" || restored.some((tab) => tab.id === parsed.activeId))) setActiveWorkspaceTabId(parsed.activeId);
       if (parsed?.split && typeof parsed.split === "object") {
         const split = parsed.split as Partial<{ primaryTabId: string; secondaryTerminalId: string; direction: "horizontal" | "vertical"; ratio: number; reversed: boolean }>;
@@ -373,6 +374,13 @@ export function AppShell() {
   const [rightPanelWidth, setRightPanelWidth] = useState<number | null>(null);
   const [isResizing, setIsResizing] = useState(false);
   useEffect(() => {
+    // Recover a lock left by an older build or an interrupted hot reload.
+    if (document.body.style.userSelect !== "none") return;
+    document.body.style.userSelect = "";
+    if (document.body.style.cursor.includes("resize")) document.body.style.cursor = "";
+    setIsResizing(false);
+  }, []);
+  useEffect(() => {
     const s = Number(localStorage.getItem("pi-sidebar-w"));
     if (Number.isFinite(s) && s >= 180 && s <= 640) setSidebarWidth(s);
     const r = Number(localStorage.getItem("pi-right-panel-w"));
@@ -399,16 +407,26 @@ export function AppShell() {
       latest = Math.min(clampMax(), Math.max(180, startW + dir * (ev.clientX - startX)));
       setWidth(latest);
     };
-    const onUp = () => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") finish();
+    };
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
       document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("mouseup", finish);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("blur", finish);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       setIsResizing(false);
       try { localStorage.setItem(storageKey, String(Math.round(latest))); } catch {}
     };
     document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
+    document.addEventListener("mouseup", finish);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("blur", finish);
   }, []);
 
   const beginSidebarResize = beginResize(
@@ -443,16 +461,26 @@ export function AppShell() {
       latest = Math.min(max(), Math.max(300, startW - (moveEvent.clientX - startX)));
       setRightPanelWidth(latest);
     };
-    const onUp = () => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") finish();
+    };
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
       document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("mouseup", finish);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("blur", finish);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       setIsResizing(false);
       try { localStorage.setItem("pi-right-panel-w", String(Math.round(latest))); } catch {}
     };
     document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
+    document.addEventListener("mouseup", finish);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("blur", finish);
   }, []);
 
   const chatHidden = chatCollapsed && rightPanelOpen && !isMobile;
@@ -477,7 +505,6 @@ export function AppShell() {
   // Suppresses sessionKey bump in handleCwdChange during the initial URL restore
   const suppressCwdBumpRef = useRef(false);
   const projectSwitchTokenRef = useRef(0);
-  const authorizedCwdsRef = useRef(new Set<string>());
 
   const recordProjectWorkspace = useCallback((cwd: string, projectRoot = cwd, sessionId?: string | null) => {
     setProjectSelectionDismissed(false);
@@ -562,10 +589,11 @@ export function AppShell() {
   // Some cwd changes originate inside SessionSidebar (session restore,
   // worktree selection, or state retained by Fast Refresh) and therefore do
   // not pass through activateProjectWorkspace. Always establish the server
-  // grant for the effective cwd, then retry every view that may have raced the
-  // grant with an initial 403.
+  // grant for the effective cwd. Do not cache this as a client-side boolean:
+  // the server can restart while React state survives, and a remembered grant
+  // is not evidence that the current server process has loaded it.
   useEffect(() => {
-    if (!activeCwd || authorizedCwdsRef.current.has(activeCwd)) return;
+    if (!activeCwd) return;
     const controller = new AbortController();
     void fetch("/api/cwd/validate", {
       method: "POST",
@@ -574,7 +602,6 @@ export function AppShell() {
       signal: controller.signal,
     }).then((response) => {
       if (!response.ok || controller.signal.aborted) return;
-      authorizedCwdsRef.current.add(activeCwd);
       setExplorerRefreshKey((key) => key + 1);
       setRefreshKey((key) => key + 1);
       setModelsRefreshKey((key) => key + 1);
@@ -619,24 +646,22 @@ export function AppShell() {
   }, [activeProjectId, recordProjectWorkspace, router, isMobile]);
 
   const activateProjectWorkspace = useCallback(async (workspace: ProjectWorkspace) => {
-    // Explicit roots are held in server memory. Re-authorize a workspace before
-    // restoring it from localStorage or switching back to it after a server
-    // restart, otherwise Explorer/Git/Worktree requests race ahead with 403s.
-    let authorizedCwd = workspace.cwd;
-    if (!authorizedCwdsRef.current.has(workspace.cwd)) {
-      try {
-        const response = await fetch("/api/cwd/validate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ cwd: workspace.cwd }),
-        });
-        const data = await response.json().catch(() => ({})) as { cwd?: string };
-        if (!response.ok || !data.cwd) return;
-        authorizedCwd = data.cwd;
-        authorizedCwdsRef.current.add(authorizedCwd);
-      } catch {
-        return;
-      }
+    // Activation is the trust boundary. Always ask the current server to
+    // validate the path, even if the picker or a previous render already did.
+    // This keeps restored workspaces and Fast Refresh/server-restart state in
+    // sync instead of trusting stale client memory.
+    let authorizedCwd: string;
+    try {
+      const response = await fetch("/api/cwd/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd: workspace.cwd }),
+      });
+      const data = await response.json().catch(() => ({})) as { cwd?: string };
+      if (!response.ok || !data.cwd) return;
+      authorizedCwd = data.cwd;
+    } catch {
+      return;
     }
     const authorizedWorkspace = authorizedCwd === workspace.cwd
       ? workspace
@@ -679,7 +704,6 @@ export function AppShell() {
   }, [persistCurrentProjectPanels, recordProjectWorkspace, rememberRecentProject, router]);
 
   const handleAddProjectWorkspace = useCallback(async (path: string) => {
-    authorizedCwdsRef.current.add(path);
     const workspace: ProjectWorkspace = { id: path, projectRoot: path, cwd: path, label: projectLabel(path), sessionId: null, lastActive: Date.now() };
     await activateProjectWorkspace(workspace);
   }, [activateProjectWorkspace]);
@@ -813,7 +837,7 @@ export function AppShell() {
   }, []);
 
   // Git status, the file tree, and open-file diffs are only bumped on our own
-  // agent_end and on manual actions. Work done outside Pi Web (terminal `pi`,
+  // agent_end and on manual actions. Work done outside TianForge pi (terminal `pi`,
   // a git commit/checkout, or editing files in another app) leaves them stale.
   // Refresh those views (and the session list, so sessions created in the
   // terminal appear) both when the tab regains focus and on a low-frequency
@@ -890,6 +914,16 @@ export function AppShell() {
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
 
+  const handleRevealFileInExplorer = useCallback((filePath: string) => {
+    setExplorerRevealRequest((current) => ({ path: filePath, key: (current?.key ?? 0) + 1 }));
+    setSidebarOpen(true);
+    if (isMobile) {
+      prepareMobileOverlayHistory();
+      setMobileSidebarModule("explorer");
+      setRightPanelOpen(false);
+    }
+  }, [isMobile, prepareMobileOverlayHistory]);
+
   const handleExplorerPathRenamed = useCallback((oldPath: string, newPath: string, isDir: boolean) => {
     const matches = (value?: string) => Boolean(value && (value === oldPath || (isDir && value.startsWith(`${oldPath}/`))));
     const renamedPath = (value: string) => `${newPath}${value.slice(oldPath.length)}`;
@@ -911,19 +945,34 @@ export function AppShell() {
     if (remaining.length === 0) setRightPanelOpen(false);
   }, [fileTabs]);
 
+  const handleCloseFileTabs = useCallback((tabIds: string[]) => {
+    const requestedIds = new Set(tabIds);
+    const removedIds = new Set(fileTabs
+      .filter((tab) => requestedIds.has(tab.id) && tab.closable !== false && !tab.locked)
+      .map((tab) => tab.id));
+    if (removedIds.size === 0) return;
+
+    const remaining = fileTabs.filter((tab) => !removedIds.has(tab.id));
+    const activeIndex = fileTabs.findIndex((tab) => tab.id === activeFileTabId);
+    const nextActiveId = activeFileTabId && removedIds.has(activeFileTabId)
+      ? fileTabs.slice(activeIndex + 1).find((tab) => !removedIds.has(tab.id))?.id
+        ?? fileTabs.slice(0, Math.max(0, activeIndex)).reverse().find((tab) => !removedIds.has(tab.id))?.id
+        ?? null
+      : activeFileTabId;
+
+    setFileTabs(remaining);
+    setActiveFileTabId(nextActiveId);
+    // No tabs left means nothing to show — collapse the right panel.
+    if (remaining.length === 0) setRightPanelOpen(false);
+  }, [activeFileTabId, fileTabs]);
+
   const handleCloseFileTab = useCallback((tabId: string) => {
-    setFileTabs((prev) => {
-      const next = prev.filter((t) => t.id !== tabId);
-      // No tabs left means nothing to show — collapse the right panel.
-      if (next.length === 0) setRightPanelOpen(false);
-      return next;
-    });
-    setActiveFileTabId((cur) => {
-      if (cur !== tabId) return cur;
-      const remaining = fileTabs.filter((t) => t.id !== tabId);
-      return remaining.length > 0 ? remaining[remaining.length - 1].id : null;
-    });
-  }, [fileTabs]);
+    handleCloseFileTabs([tabId]);
+  }, [handleCloseFileTabs]);
+
+  const handleToggleFileTabLocked = useCallback((tabId: string) => {
+    setFileTabs((current) => current.map((tab) => tab.id === tabId ? { ...tab, locked: !tab.locked } : tab));
+  }, []);
 
   const removeWorkspaceTab = useCallback((tabId: string) => {
     if (tabId === "pi") return;
@@ -1157,7 +1206,7 @@ export function AppShell() {
     </div>}
   </div>;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
-  const windowTitle = activeCwdName ? `${activeCwdName} - Pi Web` : "Pi Web";
+  const windowTitle = activeCwdName ? `${activeCwdName} - TianForge pi` : "TianForge pi";
 
   useEffect(() => {
     const syncWindowTitle = () => {
@@ -1199,6 +1248,7 @@ export function AppShell() {
         onCodexSessionChanged={handleCodexSessionChanged}
         requestedModule={isMobile ? mobileSidebarModule : undefined}
         explorerRevealKey={isMobile ? mobileExplorerRevealKey : undefined}
+        explorerRevealRequest={explorerRevealRequest}
         cwdResetKey={sidebarCwdResetKey}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
@@ -1434,7 +1484,7 @@ export function AppShell() {
             )}
           </button>
           <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
-            <TabBar tabs={workspaceTabs} activeTabId={activeWorkspaceTabId} onSelectTab={handleSelectWorkspaceTab} onCloseTab={handleCloseWorkspaceTab} />
+            <TabBar ariaLabel="Workspace tabs" tabs={workspaceTabs} activeTabId={activeWorkspaceTabId} onSelectTab={handleSelectWorkspaceTab} onCloseTab={handleCloseWorkspaceTab} />
           </div>
           {showWorkspaceTabBar && activityControl}
         </div>
@@ -2028,7 +2078,7 @@ export function AppShell() {
                 <CodexChatPanel terminal={terminal ? { ...terminal, model: tab.model ?? terminal.model, reasoningEffort: tab.reasoningEffort, serviceTier: tab.serviceTier, approvalPolicy: tab.approvalPolicy, sessionName: tab.sessionName } : { cwd: tab.cwd ?? activeCwd ?? "", model: tab.model, sourceSessionId: tab.sourceSessionId, reasoningEffort: tab.reasoningEffort, serviceTier: tab.serviceTier, approvalPolicy: tab.approvalPolicy, sessionName: tab.sessionName }} workspaceTabId={tab.id} onStatusChange={handleCodexTabStatus} onConfigurationChange={handleCodexTabConfiguration} onOpenFile={(filePath) => { const absolutePath = filePath.startsWith("/") ? filePath : joinFilePath(tab.cwd ?? activeCwd ?? "", filePath); handleOpenFile(absolutePath, getFileName(absolutePath), tab.sourceSessionId); }} />
               ) : terminal ? (split && secondaryTab ? <div className={`terminal-split terminal-split--${splitDirection}`} style={splitDirection === "horizontal" ? { gridTemplateColumns: `${split.ratio}fr 5px ${100 - split.ratio}fr` } : { gridTemplateRows: `${split.ratio}fr 5px ${100 - split.ratio}fr` }}>{split.reversed ? secondaryPanel : primaryPanel}<div className="terminal-split-divider" role="separator" aria-orientation={splitDirection === "horizontal" ? "vertical" : "horizontal"} onPointerDown={beginTerminalSplitResize} />{split.reversed ? primaryPanel : secondaryPanel}</div> : primaryPanel
               ) : (
-                <div style={{ height: "100%", display: "grid", placeItems: "center", padding: 24, color: "var(--text-dim)", fontSize: 12 }}><div style={{ display: "grid", justifyItems: "center", gap: 10, textAlign: "center" }}><strong style={{ color: "var(--text)", fontSize: 14 }}>Terminal process is unavailable</strong><span>The server restarted or this terminal process ended outside Pi Web.</span>{tab.terminalProvider && <button type="button" disabled={terminalRestartingId === tab.id} onClick={() => void restartUnavailableTerminal(tab)} style={{ padding: "7px 11px", border: "1px solid var(--accent)", borderRadius: 6, background: "var(--accent)", color: "white" }}>{terminalRestartingId === tab.id ? "Restarting…" : "Restart terminal"}</button>}{terminalRestartError && activeWorkspaceTabId === tab.id && <span style={{ color: "#f87171" }}>{terminalRestartError}</span>}</div></div>
+                <div style={{ height: "100%", display: "grid", placeItems: "center", padding: 24, color: "var(--text-dim)", fontSize: 12 }}><div style={{ display: "grid", justifyItems: "center", gap: 10, textAlign: "center" }}><strong style={{ color: "var(--text)", fontSize: 14 }}>Terminal process is unavailable</strong><span>The server restarted or this terminal process ended outside TianForge.</span>{tab.terminalProvider && <button type="button" disabled={terminalRestartingId === tab.id} onClick={() => void restartUnavailableTerminal(tab)} style={{ padding: "7px 11px", border: "1px solid var(--accent)", borderRadius: 6, background: "var(--accent)", color: "white" }}>{terminalRestartingId === tab.id ? "Restarting…" : "Restart terminal"}</button>}{terminalRestartError && activeWorkspaceTabId === tab.id && <span style={{ color: "#f87171" }}>{terminalRestartError}</span>}</div></div>
               )}
             </div>;
           })}
@@ -2088,10 +2138,14 @@ export function AppShell() {
           )}
           <div style={{ flex: 1, overflow: "hidden" }}>
             <TabBar
+              ariaLabel="File and tool tabs"
               tabs={fileTabs}
               activeTabId={activeFileTabId ?? ""}
               onSelectTab={setActiveFileTabId}
               onCloseTab={handleCloseFileTab}
+              onCloseTabs={handleCloseFileTabs}
+              onToggleTabLocked={handleToggleFileTabLocked}
+              onRevealFile={handleRevealFileInExplorer}
             />
           </div>
           <div ref={rightPanelMenuRef} style={{ position: "relative", display: "flex", flexShrink: 0 }}>

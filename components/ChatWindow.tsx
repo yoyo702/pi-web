@@ -15,11 +15,9 @@ import { useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import {
   captureScrollDistance,
-  getNextVisibleCount,
-  getVisibleRenderWindow,
   restoreScrollTop,
-  VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
+import { ProductBrand } from "./ProductBrand";
 
 interface Props {
   session: SessionInfo | null;
@@ -198,6 +196,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const {
     loading, error, messages, entryIds, streamState,
+    hasOlderMessages, loadingOlderMessages,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
@@ -212,7 +211,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     handleCompact, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleRecallQueue,
     handleBuiltinSlashCommand,
-    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands,
+    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, loadOlderMessages,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
@@ -224,10 +223,9 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     registerAbortHandler(sessionBusy ? handleAbort : null);
   }, [sessionBusy, handleAbort]);
 
-  // --- Lazy-load historical messages ---
-  // Only render the last N messages initially. When the user scrolls to the
-  // top, load another page while keeping the scroll position stable.
-  const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
+  // --- Server-paged historical messages ---
+  // The initial API response contains only the tail of the conversation.
+  // Reaching the top fetches the preceding page and preserves the viewport.
   const sentinelRef = useRef<HTMLDivElement>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
 
@@ -239,27 +237,27 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     if (!sentinel || !container) return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0]?.isIntersecting) {
+        if (entries[0]?.isIntersecting && hasOlderMessages && !loadingOlderMessages) {
           // Save distance from top before prepending to restore scroll later
           prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
-          setVisibleCount((prev) => getNextVisibleCount(prev));
+          void loadOlderMessages();
         }
       },
       { root: container, threshold: 0 }
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [visibleCount, messages.length, scrollContainerRef]);
+  }, [hasOlderMessages, loadingOlderMessages, loadOlderMessages, messages.length, scrollContainerRef]);
 
-  // After visibleCount increases (more messages prepended), restore the
+  // After older messages are prepended, restore the
   // scroll position so the viewport doesn't jump.
   useEffect(() => {
-    if (prevScrollDistanceRef.current == null) return;
+    if (loadingOlderMessages || prevScrollDistanceRef.current == null) return;
     const container = scrollContainerRef.current;
     if (!container) return;
     container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current);
     prevScrollDistanceRef.current = null;
-  }, [visibleCount, scrollContainerRef]);
+  }, [loadingOlderMessages, messages.length, scrollContainerRef]);
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats
@@ -461,13 +459,12 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 fontFamily: "var(--font-mono)",
               }}
             >
-              <div style={{ display: "flex", alignItems: "baseline", gap: 10, minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
-                <span style={{ fontSize: 28, fontWeight: 700, letterSpacing: 0, color: "var(--text)", flexShrink: 0, whiteSpace: "nowrap" }}>π</span>
-                <span style={{ fontSize: 22, color: "var(--text)", fontWeight: 700, letterSpacing: 0, flexShrink: 0, whiteSpace: "nowrap" }}>Pi Web</span>
+              <div style={{ display: "flex", alignItems: "baseline", minWidth: 0, flex: 1, lineHeight: 1.4, overflow: "hidden" }}>
+                <ProductBrand size={22} style={{ flexShrink: 0 }} />
               </div>
               <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, flexShrink: 0 }}>
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                  web <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
+                  app <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</span>
                 </span>
                 <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
                   pi <span style={{ color: "var(--text)" }}>v{process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}</span>
@@ -668,15 +665,14 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 }
                 idx = endIdx;
               }
-              const { startIndex, hasMore } = getVisibleRenderWindow(rendered.length, visibleCount);
               return (
                 <>
-                  {hasMore && (
+                  {(hasOlderMessages || loadingOlderMessages) && (
                     <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
-                      Scroll up to load earlier messages ({startIndex} hidden)
+                      {loadingOlderMessages ? "Loading earlier messages..." : "Scroll up to load earlier messages"}
                     </div>
                   )}
-                  {rendered.slice(startIndex)}
+                  {rendered}
                 </>
               );
             })()}

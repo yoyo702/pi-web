@@ -13,8 +13,10 @@ import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "@
 
 const execFileAsync = promisify(execFile);
 
-// Same skip lists as /api/files — only used for the non-git readdir fallback.
-// Git-tracked repos rely on .gitignore instead (matches the TUI's fd behavior).
+// Same default filter as /api/files — only used for the non-git readdir
+// fallback. The Explorer can explicitly include these names when its
+// visibility toggle is enabled. `.git` and `node_modules` remain excluded from
+// recursive indexing to keep that opt-in search bounded.
 const IGNORED_NAMES = new Set([
   "node_modules", ".git", ".next", "dist", "build", "__pycache__",
   ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
@@ -47,6 +49,10 @@ interface CacheEntry {
   expiresAt: number;
 }
 
+function isMacMetadataPath(filePath: string): boolean {
+  return filePath.split(/[\\/]/).some((part) => part.startsWith("._"));
+}
+
 // Per-cwd cache on globalThis so it survives Next.js hot-reload; the @ menu
 // re-requests on every open and searches on every keystroke, so listings must
 // not be recomputed within a short window.
@@ -66,7 +72,7 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
       ["-C", cwd, "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
       { timeout: 10_000, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } },
     );
-    const all = stdout.split("\0").filter(Boolean);
+    const all = stdout.split("\0").filter((filePath) => filePath && !isMacMetadataPath(filePath));
     if (all.length > GIT_HARD_CAP) {
       return { files: all.slice(0, GIT_HARD_CAP), hardTruncated: true };
     }
@@ -77,7 +83,7 @@ async function listWithGit(cwd: string): Promise<FileListing | null> {
   }
 }
 
-function listWithWalk(cwd: string): FileListing {
+function listWithWalk(cwd: string, includeIgnored = false): FileListing {
   const files: string[] = [];
   // BFS so shallow files win when the cap truncates the listing.
   const queue: Array<{ abs: string; rel: string; depth: number }> = [{ abs: cwd, rel: "", depth: 0 }];
@@ -90,7 +96,10 @@ function listWithWalk(cwd: string): FileListing {
       continue;
     }
     for (const d of dirents) {
-      if (IGNORED_NAMES.has(d.name) || IGNORED_SUFFIXES.some((s) => d.name.endsWith(s))) continue;
+      if (d.name.startsWith("._")) continue;
+      const alwaysIgnored = d.name === ".git" || d.name === "node_modules";
+      const defaultIgnored = IGNORED_NAMES.has(d.name) || IGNORED_SUFFIXES.some((s) => d.name.endsWith(s));
+      if (alwaysIgnored || (!includeIgnored && defaultIgnored)) continue;
       const childRel = rel ? `${rel}/${d.name}` : d.name;
       if (d.isDirectory()) {
         if (depth + 1 <= MAX_WALK_DEPTH) {
@@ -107,7 +116,7 @@ function listWithWalk(cwd: string): FileListing {
   return { files, hardTruncated: false };
 }
 
-// GET /api/file-index?cwd=/abs/path[&q=query]
+// GET /api/file-index?cwd=/abs/path[&q=query][&includeIgnored=1]
 // Without q: { files: string[] (relative to cwd, capped at MAX_FILES),
 // truncated: boolean } — the client-side index for local filtering.
 // With q: { matches: { path, isDir }[] } — ranked against the FULL listing so
@@ -121,6 +130,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "cwd must be an absolute path" }, { status: 400 });
     }
     const query = req.nextUrl.searchParams.get("q")?.slice(0, MAX_QUERY_LENGTH) ?? "";
+    const includeIgnored = req.nextUrl.searchParams.get("includeIgnored") === "1";
 
     const allowedRoots = await getAllowedFileRoots();
     if (!isFilePathAllowed(cwd, allowedRoots)) {
@@ -142,15 +152,21 @@ export async function GET(req: NextRequest) {
 
     const cache = getIndexCache();
     const now = Date.now();
-    let cached = cache.get(cwd);
+    const cacheKey = `${cwd}\0${includeIgnored ? "all" : "default"}`;
+    let cached = cache.get(cacheKey);
     if (!cached || cached.expiresAt <= now) {
-      const listing = (await listWithGit(cwd)) ?? listWithWalk(cwd);
+      // Git's exclude rules intentionally hide generated output. When the user
+      // opts in, walk the tree instead so ignored output such as dist is
+      // searchable too (while still excluding .git and node_modules).
+      const listing = includeIgnored
+        ? listWithWalk(cwd, true)
+        : (await listWithGit(cwd)) ?? listWithWalk(cwd);
       for (const [key, entry] of cache) {
         if (entry.expiresAt <= now) cache.delete(key);
       }
       if (cache.size >= CACHE_MAX_ENTRIES) cache.clear();
       cached = { listing, expiresAt: now + CACHE_TTL_MS };
-      cache.set(cwd, cached);
+      cache.set(cacheKey, cached);
     }
 
     if (query) {

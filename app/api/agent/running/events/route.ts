@@ -1,14 +1,20 @@
-import { getRunningRpcSessionIds, subscribeRunningSessions } from "@/lib/rpc-manager";
+import { getRunningRpcSessionIds, subscribeRpcSessionEvents, subscribeRunningSessions } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
 
-// GET /api/agent/running/events - SSE stream of the set of currently-running
-// session ids. Pushes an update whenever any session starts or stops working,
-// so the sidebar never has to poll.
+// GET /api/agent/running/events - SSE stream of running ids plus the bounded,
+// completion-level events used to keep unmounted session snapshots warm.
 export async function GET(req: Request) {
+  let cleanupStream: (() => void) | null = null;
   const stream = new ReadableStream({
     start(controller) {
-      const encode = (data: unknown) => {
+      let closed = false;
+      const encode = (data: unknown, dropIfBackpressured = false) => {
+        if (closed) return;
+        // Background events are cache hints. If a browser stops reading, drop
+        // them instead of retaining serialized frames indefinitely; reopening
+        // the session reconciles from its JSONL file.
+        if (dropIfBackpressured && controller.desiredSize !== null && controller.desiredSize <= 0) return;
         const text = `data: ${JSON.stringify(data)}\n\n`;
         controller.enqueue(new TextEncoder().encode(text));
       };
@@ -22,6 +28,13 @@ export async function GET(req: Request) {
           // controller already closed
         }
       });
+      const unsubscribeSessionEvents = subscribeRpcSessionEvents((sessionId, event) => {
+        try {
+          encode({ type: "session_event", sessionId, event }, true);
+        } catch {
+          // controller already closed
+        }
+      });
 
       // Initial snapshot so the client renders the correct state immediately.
       // (A duplicate frame here is harmless: the client just sets the same set.)
@@ -30,19 +43,28 @@ export async function GET(req: Request) {
       // Heartbeat to keep the connection alive through proxies/timeouts.
       const heartbeat = setInterval(() => {
         try {
-          controller.enqueue(new TextEncoder().encode(":\n\n"));
+          if (controller.desiredSize === null || controller.desiredSize > 0) {
+            controller.enqueue(new TextEncoder().encode(":\n\n"));
+          }
         } catch {
           // controller already closed
         }
       }, 30_000);
 
       const cleanup = () => {
+        if (closed) return;
+        closed = true;
         clearInterval(heartbeat);
         unsubscribe();
+        unsubscribeSessionEvents();
         try { controller.close(); } catch { /* already closed */ }
       };
+      cleanupStream = cleanup;
 
       req.signal?.addEventListener("abort", cleanup);
+    },
+    cancel() {
+      cleanupStream?.();
     },
   });
 

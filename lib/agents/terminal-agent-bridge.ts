@@ -2,7 +2,7 @@ import type { TerminalSession } from "./terminal";
 
 function bridgeUrl(path: string): string {
   const port = process.env.PI_WEB_INTERNAL_PORT;
-  if (!port || !process.env.PI_WEB_INTERNAL_TERMINAL_TOKEN) throw new Error("Pi Web terminal bridge is unavailable outside the Pi Web server");
+  if (!port || !process.env.PI_WEB_INTERNAL_TERMINAL_TOKEN) throw new Error("TianForge pi terminal bridge is unavailable outside the TianForge pi server");
   return `http://127.0.0.1:${port}${path}`;
 }
 

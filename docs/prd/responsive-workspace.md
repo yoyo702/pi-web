@@ -2,7 +2,7 @@
 
 ## 背景与目标
 
-Pi Web 同时承载聊天、Session、Explorer、Terminal 和 Git Review。布局需要在桌面端支持高信息密度，在移动端保持核心任务可完成。
+TianForge pi 同时承载聊天、Session、Explorer、Terminal 和 Git Review。布局需要在桌面端支持高信息密度，在移动端保持核心任务可完成。
 
 ## 已实现范围
 
@@ -13,6 +13,7 @@ Pi Web 同时承载聊天、Session、Explorer、Terminal 和 Git Review。布�
 - Session 与 Explorer 区域可垂直拖动。
 - 右侧面板内部列表与详情区域可调整尺寸。
 - 中央工作区支持 Pi、Agent、Terminal 和文件多标签。
+- 标签栏支持滚轮横向滚动和右键管理；锁定标签不会被批量关闭。
 - 仅有 Pi 标签时隐藏标签栏，保持原始简洁模式。
 - 右侧面板支持聚焦放大与恢复。
 
@@ -39,6 +40,7 @@ Pi Web 同时承载聊天、Session、Explorer、Terminal 和 Git Review。布�
 - 移动端页面宽度不超过 viewport，不出现横向溢出。
 - 切换项目或标签不会丢失未发送草稿。
 - 菜单不会被容器裁切，并能点击外部关闭。
+- 拖动调整尺寸时即使窗口失焦或页面隐藏，也会恢复文本选择和鼠标样式。
 
 ## 后续计划
 

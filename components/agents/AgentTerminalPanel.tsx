@@ -6,10 +6,11 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, ChevronUp, History, Maximize2, Search, Star, X } from "lucide-react";
 import type { TerminalSession } from "@/lib/agents/terminal";
-import { applyTerminalModifier, asBracketedPaste, getTerminalVisibleHeight, type TerminalModifier } from "@/lib/terminal-input";
+import { applyTerminalModifier, asBracketedPaste, getTerminalVisibleHeight, isTerminalCopyShortcut, type TerminalModifier } from "@/lib/terminal-input";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useTheme } from "@/hooks/useTheme";
 import { useTerminalSocket, type TerminalConnectionState } from "@/hooks/useTerminalSocket";
+import { copyText } from "@/lib/clipboard";
 
 function terminalStatus(terminal: TerminalSession, connection: TerminalConnectionState) {
   if (terminal.state === "stopped") return { label: "Stopped", color: "var(--text-dim)" };
@@ -153,6 +154,10 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
     searchAddonRef.current = searchAddon;
     const searchResultDisposable = searchAddon.onDidChangeResults((result) => setSearchResult(result));
     xterm.attachCustomKeyEventHandler((event) => {
+      if (isTerminalCopyShortcut(event, xterm.hasSelection())) {
+        if (event.type === "keydown") void copyText(xterm.getSelection()).catch(() => setError("Unable to copy terminal selection"));
+        return false;
+      }
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "f") { setSearchOpen(true); return false; }
       return true;
     });
@@ -194,10 +199,20 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
       event.preventDefault();
     };
     const onTouchEnd = () => { touchScrolling = false; touchCancelled = false; touchRemainder = 0; };
+    const onContextMenu = (event: MouseEvent) => {
+      if (!xterm.hasSelection()) return;
+      // xterm paints its selection rather than exposing a DOM Range, so the
+      // browser's native Copy item has nothing to read. Right-clicking an
+      // xterm selection therefore copies it directly.
+      event.preventDefault();
+      event.stopPropagation();
+      void copyText(xterm.getSelection()).catch(() => setError("Unable to copy terminal selection"));
+    };
     host.addEventListener("touchstart", onTouchStart, { passive: true });
     host.addEventListener("touchmove", onTouchMove, { passive: false });
     host.addEventListener("touchend", onTouchEnd);
     host.addEventListener("touchcancel", onTouchEnd);
+    host.addEventListener("contextmenu", onContextMenu, { capture: true });
     void document.fonts?.ready.then(() => {
       if (terminalRef.current !== xterm) return;
       fit.fit();
@@ -213,6 +228,7 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
       host.removeEventListener("touchmove", onTouchMove);
       host.removeEventListener("touchend", onTouchEnd);
       host.removeEventListener("touchcancel", onTouchEnd);
+      host.removeEventListener("contextmenu", onContextMenu, { capture: true });
       if (resizeTimer.current) clearTimeout(resizeTimer.current);
       xterm.dispose();
       terminalRef.current = null;

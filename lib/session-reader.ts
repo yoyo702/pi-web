@@ -6,7 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { closeSync, openSync, readSync } from "fs";
 import { normalize as normalizePath } from "path";
-import type { AgentMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
+import type { AgentMessage, AssistantMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
 import { sessionPathKey } from "./session-path";
@@ -236,6 +236,65 @@ export function buildSessionContext(
     entryIds,
     thinkingLevel: piCtx.thinkingLevel,
     model: piCtx.model,
+    stats: summarizeSessionMessages(messages),
+  };
+}
+
+function summarizeSessionMessages(messages: AgentMessage[]): NonNullable<SessionContext["stats"]> {
+  const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+  let userMessages = 0;
+  let assistantMessages = 0;
+  let toolCalls = 0;
+  let toolResults = 0;
+  let cost = 0;
+  for (const message of messages) {
+    if (message.role === "user") userMessages += 1;
+    if (message.role === "toolResult") toolResults += 1;
+    if (message.role !== "assistant") continue;
+    assistantMessages += 1;
+    const assistant = message as AssistantMessage;
+    toolCalls += assistant.content.filter((block) => block.type === "toolCall").length;
+    if (!assistant.usage) continue;
+    tokens.input += assistant.usage.input ?? 0;
+    tokens.output += assistant.usage.output ?? 0;
+    tokens.cacheRead += assistant.usage.cacheRead ?? 0;
+    tokens.cacheWrite += assistant.usage.cacheWrite ?? 0;
+    cost += assistant.usage.cost?.total ?? 0;
+  }
+  tokens.total = tokens.input + tokens.output + tokens.cacheRead + tokens.cacheWrite;
+  return { userMessages, assistantMessages, toolCalls, toolResults, totalMessages: messages.length, tokens, cost };
+}
+
+/**
+ * Return one backwards page from an already branch-resolved session context.
+ * `beforeEntryId` is the first entry currently held by the client; the page
+ * immediately preceding it is returned. Keeping messages and entry ids sliced
+ * together preserves fork/navigation targets.
+ */
+export function paginateSessionContext(
+  context: SessionContext,
+  limit: number,
+  beforeEntryId?: string | null,
+): SessionContext {
+  const totalMessages = context.messages.length;
+  const safeLimit = Math.min(Math.max(Math.trunc(limit) || 1, 1), 500);
+  let end = totalMessages;
+  if (beforeEntryId) {
+    const cursorIndex = context.entryIds.indexOf(beforeEntryId);
+    if (cursorIndex >= 0) end = cursorIndex;
+  }
+  const start = Math.max(0, end - safeLimit);
+  const messages = context.messages.slice(start, end);
+  const entryIds = context.entryIds.slice(start, end);
+  return {
+    ...context,
+    messages,
+    entryIds,
+    page: {
+      hasMore: start > 0,
+      beforeEntryId: start > 0 ? entryIds[0] ?? null : null,
+      totalMessages,
+    },
   };
 }
 

@@ -40,6 +40,7 @@ interface Props {
   onUploadBusyChange?: (busy: boolean) => void;
   onPathRenamed?: (oldPath: string, newPath: string, isDir: boolean) => void;
   onPathDeleted?: (path: string, isDir: boolean) => void;
+  revealRequest?: { path: string; key: number } | null;
 }
 
 export interface FileExplorerHandle {
@@ -484,6 +485,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onUploadBusyChange,
   onPathRenamed,
   onPathDeleted,
+  revealRequest,
 }, ref) {
   const [roots, setRoots] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
@@ -514,6 +516,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
   const folderUploadInputRef = useRef<HTMLInputElement>(null);
+  const treeRef = useRef<HTMLDivElement>(null);
   const refreshToken = `${refreshKey ?? 0}:${treeRefreshKey}`;
   const uploadBusy = uploadPhase !== "idle";
 
@@ -610,7 +613,9 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       setSearch((current) => ({ ...current, loading: true, error: "" }));
-      void fetch(`/api/file-index?${new URLSearchParams({ cwd, q: trimmed })}`, { signal: controller.signal })
+      const searchParams = new URLSearchParams({ cwd, q: trimmed });
+      if (showHidden) searchParams.set("includeIgnored", "1");
+      void fetch(`/api/file-index?${searchParams}`, { signal: controller.signal })
         .then(async (response) => {
           const data = await response.json() as { matches?: SearchEntry[]; error?: string };
           if (!response.ok) throw new Error(data.error || `Search failed (HTTP ${response.status})`);
@@ -867,6 +872,56 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   }, [cwd, refreshKey, showHidden, treeRefreshKey]);
 
   useEffect(() => {
+    if (!revealRequest) return;
+    const normalizedCwd = normalizeFilePathSlashes(cwd).replace(/\/+$/, "");
+    const targetPath = normalizeFilePathSlashes(revealRequest.path);
+    if (!targetPath.startsWith(`${normalizedCwd}/`)) return;
+
+    const relativePath = targetPath.slice(normalizedCwd.length + 1);
+    const parts = relativePath.split("/").filter(Boolean);
+    if (parts.length === 0) return;
+
+    setQuery("");
+    setExpandedPaths((current) => {
+      const next = new Set(current);
+      let parent = normalizedCwd;
+      for (const part of parts.slice(0, -1)) {
+        parent = joinFilePath(parent, part);
+        next.add(parent);
+      }
+      return next;
+    });
+    setSelectedNode({
+      name: parts.at(-1)!,
+      fullPath: targetPath,
+      isDir: false,
+      size: 0,
+      loaded: true,
+    });
+
+    let cancelled = false;
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const scrollToTarget = () => {
+      if (cancelled) return;
+      const row = [...(treeRef.current?.querySelectorAll<HTMLElement>("[data-explorer-row]") ?? [])]
+        .find((element) => normalizeFilePathSlashes(element.dataset.filePath ?? "") === targetPath);
+      if (row) {
+        row.scrollIntoView({ block: "center", inline: "nearest" });
+        row.focus({ preventScroll: true });
+        return;
+      }
+      attempts += 1;
+      if (attempts < 30) timer = setTimeout(scrollToTarget, 80);
+    };
+    timer = setTimeout(scrollToTarget, 0);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [cwd, revealRequest]);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       if (!document.hidden && !uploadBusy && !mutationBusy) refreshTree();
     }, 10_000);
@@ -914,7 +969,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           {query && <button type="button" onClick={() => setQuery("")} aria-label="Clear file search" title="Clear" style={toolbarButtonStyle}><X size={12} /></button>}
         </label>
         <button type="button" onClick={() => setExpandedPaths(new Set())} aria-label="Collapse all folders" title="Collapse all" style={toolbarButtonStyle}><ChevronUp size={14} /></button>
-        <button type="button" onClick={() => setShowHidden((value) => !value)} aria-pressed={showHidden} aria-label={showHidden ? "Hide hidden files" : "Show hidden files"} title={showHidden ? "Hide hidden files" : "Show hidden files"} style={{ ...toolbarButtonStyle, ...(showHidden ? toolbarButtonActiveStyle : {}) }}>{showHidden ? <Eye size={14} /> : <EyeOff size={14} />}</button>
+        <button type="button" onClick={() => setShowHidden((value) => !value)} aria-pressed={showHidden} aria-label={showHidden ? "Hide hidden and generated files" : "Show hidden and generated files"} title={showHidden ? "Hide hidden and generated files" : "Show hidden and generated files"} style={{ ...toolbarButtonStyle, ...(showHidden ? toolbarButtonActiveStyle : {}) }}>{showHidden ? <Eye size={14} /> : <EyeOff size={14} />}</button>
         <button type="button" onClick={() => startMutation("create-file", selectedNode)} aria-label="New file" title="New file" style={toolbarButtonStyle}><FilePlus2 size={14} /></button>
         <button type="button" onClick={() => startMutation("create-folder", selectedNode)} aria-label="New folder" title="New folder" style={toolbarButtonStyle}><FolderPlus size={14} /></button>
       </div>
@@ -1060,7 +1115,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         </div>
       )}
 
-      <div role="tree" aria-label="Workspace files" style={{ padding: "2px 4px" }} onKeyDown={(event) => {
+      <div ref={treeRef} role="tree" aria-label="Workspace files" style={{ padding: "2px 4px" }} onKeyDown={(event) => {
         if (!(event.target instanceof Element)) return;
         const row = event.target.closest<HTMLElement>("[data-explorer-row]");
         if (!row) return;

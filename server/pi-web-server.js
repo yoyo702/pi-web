@@ -25,7 +25,7 @@ const tls = process.env.PI_WEB_HTTPS_CERT && process.env.PI_WEB_HTTPS_KEY ? { ce
 process.env.PI_WEB_INTERNAL_TERMINAL_TOKEN ||= crypto.randomBytes(32).toString("base64url");
 process.env.PI_WEB_INTERNAL_PORT = String(port);
 if (!isLoopback && !auth.configured()) {
-  console.error("PI_WEB_PASSWORD must be set when Pi Web listens on a non-loopback host.");
+  console.error("PI_WEB_PASSWORD must be set when TianForge pi listens on a non-loopback host.");
   process.exit(1);
 }
 
@@ -39,7 +39,7 @@ function writeJson(res, status, body, headers = {}) {
 
 function writeLoginPage(res, status = 200, errorMessage = "") {
   const error = errorMessage ? `<p role="alert" class="error">${String(errorMessage).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</p>` : "";
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><title>Sign in to Pi Web</title><style>:root{color-scheme:dark;--bg:#111318;--panel:#191c22;--border:#30343d;--text:#f2f3f5;--muted:#a6acb8;--accent:#2563eb}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif}main{min-height:100vh;min-height:100dvh;display:grid;place-items:center;padding:20px}form{width:min(100%,360px);padding:24px;border:1px solid var(--border);border-radius:10px;background:var(--panel);box-shadow:0 14px 40px #0003}h1{margin:0;font-size:18px}p{margin:8px 0 20px;color:var(--muted);font-size:13px;line-height:1.5}label{display:grid;gap:7px;color:var(--muted);font-size:12px}input{width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font:inherit}button{width:100%;margin-top:18px;padding:10px 12px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-weight:600}.error{margin:12px 0 0;color:#f87171;font-size:12px}</style></head><body><main><form action="/login" method="post"><h1>Sign in to Pi Web</h1><p>This Pi Web instance is password protected. Signing in grants access to local projects and terminal sessions.</p><label>Password<input autofocus name="password" type="password" autocomplete="current-password" required></label>${error}<button type="submit">Sign in</button></form></main></body></html>`;
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><title>Sign in to TianForge pi</title><style>:root{color-scheme:dark;--bg:#111318;--panel:#191c22;--border:#30343d;--text:#f2f3f5;--muted:#a6acb8;--accent:#2563eb}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif}main{min-height:100vh;min-height:100dvh;display:grid;place-items:center;padding:20px}form{width:min(100%,360px);padding:24px;border:1px solid var(--border);border-radius:10px;background:var(--panel);box-shadow:0 14px 40px #0003}h1{margin:0;font-size:18px}h1 small{margin-left:.32em;color:var(--muted);font-size:.56em;font-weight:650;letter-spacing:.02em}p{margin:8px 0 20px;color:var(--muted);font-size:13px;line-height:1.5}label{display:grid;gap:7px;color:var(--muted);font-size:12px}input{width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font:inherit}button{width:100%;margin-top:18px;padding:10px 12px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-weight:600}.error{margin:12px 0 0;color:#f87171;font-size:12px}</style></head><body><main><form action="/login" method="post"><h1>Sign in to TianForge<small>pi</small></h1><p>This TianForge instance is password protected. Signing in grants access to local projects and terminal sessions.</p><label>Password<input autofocus name="password" type="password" autocomplete="current-password" required></label>${error}<button type="submit">Sign in</button></form></main></body></html>`;
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Length": Buffer.byteLength(html), "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'", "X-Content-Type-Options": "nosniff" });
   res.end(html);
 }
@@ -146,7 +146,7 @@ async function handleAuthRequest(req, res, url) {
 const server = (tls ? https : http).createServer(tls || undefined, (req, res) => {
   if (!handle) {
     res.statusCode = 503;
-    res.end("Pi Web is starting");
+    res.end("TianForge pi is starting");
     return;
   }
 
@@ -208,11 +208,6 @@ const server = (tls ? https : http).createServer(tls || undefined, (req, res) =>
     void codexAppApi.handle(req, res, url);
     return;
   }
-  if (url.pathname === "/api/cwd/validate" && req.method === "POST") {
-    void readJson(req).then((body) => writeJson(res, 200, { success: true, cwd: terminalApi.registerCwd(body?.cwd) })).catch((error) => writeJson(res, 400, { error: error.message || "invalid working directory" }));
-    return;
-  }
-
   handle(req, res);
 });
 

@@ -27,6 +27,17 @@ type SelectedChange = {
   scope: GitDiffScope;
 };
 
+interface GitRepositoryEntry {
+  path: string;
+  repositoryRoot: string;
+  label: string;
+  relativePath: string;
+}
+
+function selectedRepositoryStorageKey(workspaceCwd: string): string {
+  return `pi-web:git-repository:${encodeURIComponent(workspaceCwd)}`;
+}
+
 const TABS: Array<{ key: PanelTab; label: string }> = [
   { key: "changes", label: "Changes" },
   { key: "branch", label: "Branch" },
@@ -110,9 +121,17 @@ function useSplit(storageKey: string, defaultSize: number, min: number, max: num
       latest = Math.min(max, Math.max(min, startSize + (pos - origin)));
       setSize(latest);
     };
-    const onUp = () => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") finish();
+    };
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
       document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
+      document.removeEventListener("mouseup", finish);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("blur", finish);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
       try { localStorage.setItem(storageKey, String(Math.round(latest))); } catch {}
@@ -120,7 +139,9 @@ function useSplit(storageKey: string, defaultSize: number, min: number, max: num
     document.body.style.cursor = axis === "x" ? "col-resize" : "row-resize";
     document.body.style.userSelect = "none";
     document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
+    document.addEventListener("mouseup", finish);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("blur", finish);
   }, [storageKey, min, max, axis]);
   return { size, onDragStart };
 }
@@ -140,9 +161,48 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
   const [generatingCommitMessage, setGeneratingCommitMessage] = useState(false);
   const [generationNotice, setGenerationNotice] = useState<string | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
+  const [repositories, setRepositories] = useState<GitRepositoryEntry[]>([]);
+  const [selectedRepositoryPath, setSelectedRepositoryPath] = useState<string | null>(null);
+  const [repositoriesLoading, setRepositoriesLoading] = useState(false);
+  const [repositoriesError, setRepositoriesError] = useState<string | null>(null);
+  const repositoryCwd = selectedRepositoryPath;
+
+  useEffect(() => {
+    setRepositories([]);
+    setSelectedRepositoryPath(null);
+    setRepositoriesError(null);
+    setStatus(null);
+    setSelected(null);
+    if (!cwd) return;
+
+    const controller = new AbortController();
+    setRepositoriesLoading(true);
+    void fetch(`/api/git/repositories?${new URLSearchParams({ cwd })}`, { signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json() as { repositories?: GitRepositoryEntry[]; error?: string };
+        if (!response.ok) throw new Error(data.error ?? `Failed to discover Git repositories (${response.status})`);
+        const next = data.repositories ?? [];
+        let storedPath: string | null = null;
+        try { storedPath = localStorage.getItem(selectedRepositoryStorageKey(cwd)); } catch { /* storage can be unavailable */ }
+        const selectedPath = next.some((repository) => repository.path === storedPath) ? storedPath : next[0]?.path ?? null;
+        setRepositories(next);
+        setSelectedRepositoryPath(selectedPath);
+      })
+      .catch((cause: unknown) => {
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        setRepositoriesError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => { if (!controller.signal.aborted) setRepositoriesLoading(false); });
+    return () => controller.abort();
+  }, [cwd]);
+
+  useEffect(() => {
+    if (!cwd || !selectedRepositoryPath) return;
+    try { localStorage.setItem(selectedRepositoryStorageKey(cwd), selectedRepositoryPath); } catch { /* storage can be unavailable */ }
+  }, [cwd, selectedRepositoryPath]);
 
   const loadStatus = useCallback(async () => {
-    if (!cwd) {
+    if (!repositoryCwd) {
       setStatus(null);
       setSelected(null);
       return;
@@ -150,7 +210,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/git/status?${new URLSearchParams({ cwd })}`);
+      const res = await fetch(`/api/git/status?${new URLSearchParams({ cwd: repositoryCwd })}`);
       const next = await res.json() as GitStatusResponse & { error?: string };
       if (!res.ok) throw new Error(next.error ?? `Failed to load Git status (${res.status})`);
       setStatus(next);
@@ -163,19 +223,19 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
     } finally {
       setLoading(false);
     }
-  }, [cwd]);
+  }, [repositoryCwd]);
 
   useEffect(() => { void loadStatus(); }, [loadStatus, refreshKey, nonce]);
 
   useEffect(() => {
-    if (!cwd || !selected) {
+    if (!repositoryCwd || !selected) {
       setDiff(null);
       return;
     }
     const controller = new AbortController();
     setLoadingDiff(true);
     setDiff(null);
-    const params = new URLSearchParams({ cwd, path: selected.file.filePath, scope: selected.scope });
+    const params = new URLSearchParams({ cwd: repositoryCwd, path: selected.file.filePath, scope: selected.scope });
     void fetch(`/api/git/diff?${params}`, { signal: controller.signal })
       .then(async (res) => {
         const next = await res.json() as GitFileDiffResponse & { error?: string };
@@ -188,7 +248,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
       })
       .finally(() => { if (!controller.signal.aborted) setLoadingDiff(false); });
     return () => controller.abort();
-  }, [cwd, selected]);
+  }, [repositoryCwd, selected]);
 
   const grouped = useMemo(() => new Map(GROUPS.map((group) => [
     group.key,
@@ -198,14 +258,14 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
   const refresh = useCallback(() => setNonce((value) => value + 1), []);
 
   const runWrite = useCallback(async (url: string, payload: Record<string, unknown>) => {
-    if (!cwd) return false;
+    if (!repositoryCwd) return false;
     setBusy(true);
     setActionError(null);
     try {
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, ...payload }),
+        body: JSON.stringify({ cwd: repositoryCwd, ...payload }),
       });
       const next = await res.json() as GitStatusResponse & { error?: string };
       if (!res.ok) throw new Error(next.error ?? `Action failed (${res.status})`);
@@ -221,7 +281,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
     } finally {
       setBusy(false);
     }
-  }, [cwd, onRepoChanged]);
+  }, [repositoryCwd, onRepoChanged]);
 
   const stage = useCallback((paths: string[]) => { if (paths.length) void runWrite("/api/git/stage", { paths }); }, [runWrite]);
   const unstage = useCallback((paths: string[]) => { if (paths.length) void runWrite("/api/git/unstage", { paths }); }, [runWrite]);
@@ -241,7 +301,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
     }
   }, [commitMessage, runWrite]);
   const generateCommitMessage = useCallback(async () => {
-    if (!cwd || generatingCommitMessage) return;
+    if (!repositoryCwd || generatingCommitMessage) return;
     setGeneratingCommitMessage(true);
     setActionError(null);
     setGenerationNotice(null);
@@ -249,7 +309,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
       const res = await fetch("/api/git/commit-message", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd }),
+        body: JSON.stringify({ cwd: repositoryCwd }),
       });
       const next = await res.json() as { error?: string; message?: string; provider?: string; modelId?: string; truncated?: boolean };
       if (!res.ok || !next.message) throw new Error(next.error ?? `Could not generate a commit message (${res.status})`);
@@ -260,7 +320,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
     } finally {
       setGeneratingCommitMessage(false);
     }
-  }, [cwd, generatingCommitMessage]);
+  }, [repositoryCwd, generatingCommitMessage]);
   const syncRemote = useCallback(async (action: "fetch" | "pull" | "push" | "publish") => {
     if (action !== "fetch" && action !== "publish" && !status?.upstream) return;
     const target = status?.upstream ?? "the default remote";
@@ -281,7 +341,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
     return <EmptyState title="No workspace selected" detail="Select a project to review its Git changes." />;
   }
 
-  const repoRoot = status?.repositoryRoot ?? cwd;
+  const repoRoot = status?.repositoryRoot ?? repositoryCwd ?? cwd;
   const showAheadBehind = status?.upstream != null;
   const canPublish = Boolean(status?.branch && !status.upstream && (status.remotes?.length ?? 0) > 0);
 
@@ -314,6 +374,24 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
         <div title={repoRoot} style={{ marginTop: 4, color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {repoRoot}
         </div>
+        {repositories.length > 1 && (
+          <label style={{ marginTop: 9, display: "flex", alignItems: "center", gap: 8, color: "var(--text-muted)", fontSize: 11 }}>
+            <span style={{ flexShrink: 0 }}>Repository</span>
+            <select
+              aria-label="Git repository"
+              value={repositoryCwd ?? ""}
+              onChange={(event) => {
+                setSelectedRepositoryPath(event.target.value);
+                setSelected(null);
+                setDiff(null);
+                setActionError(null);
+              }}
+              style={{ minWidth: 0, flex: 1, height: 27, padding: "0 7px", border: "1px solid var(--border)", borderRadius: 5, outline: 0, background: "var(--bg)", color: "var(--text)", font: "11px/1 var(--font-mono)" }}
+            >
+              {repositories.map((repository) => <option key={repository.path} value={repository.path}>{repository.label}</option>)}
+            </select>
+          </label>
+        )}
         <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
           <Badge label={status?.branch ?? "Detached HEAD"} />
           {showAheadBehind && <Badge label={`↔ ${status?.upstream}`} title="Tracked remote branch" />}
@@ -350,14 +428,20 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
         </div>
       </header>
 
-      {error ? (
+      {repositoriesError ? (
+        <EmptyState title="Unable to discover Git repositories" detail={repositoriesError} />
+      ) : repositoriesLoading ? (
+        <EmptyState title="Finding Git repositories…" />
+      ) : repositories.length === 0 ? (
+        <EmptyState title="No Git repositories found" detail={cwd} />
+      ) : error ? (
         <EmptyState title="Unable to load Git status" detail={error} action={refresh} />
       ) : status && !status.isGitRepository ? (
-        <EmptyState title="This folder is not a Git repository" detail={cwd} />
+        <EmptyState title="This folder is not a Git repository" detail={repositoryCwd ?? cwd} />
       ) : tab === "history" ? (
-        <HistoryView cwd={cwd} refreshToken={refreshKey + nonce} />
+        <HistoryView cwd={repositoryCwd!} refreshToken={refreshKey + nonce} />
       ) : tab === "branch" ? (
-        <BranchView cwd={cwd} refreshToken={refreshKey + nonce} onChanged={refresh} hasUncommittedChanges={(status?.files.length ?? 0) > 0} />
+        <BranchView cwd={repositoryCwd!} refreshToken={refreshKey + nonce} onChanged={refresh} hasUncommittedChanges={(status?.files.length ?? 0) > 0} />
       ) : !status ? (
         <EmptyState title="Loading Git changes…" />
       ) : (

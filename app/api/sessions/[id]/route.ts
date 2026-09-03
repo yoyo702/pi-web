@@ -8,6 +8,7 @@ import {
   invalidateSessionPathCache,
   invalidateSessionListCache,
   buildSessionContext,
+  paginateSessionContext,
   readSessionHeader,
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
@@ -135,7 +136,11 @@ export async function GET(
     const tree = projectTreeForResponse(sm.getTree());
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
-    const context = buildSessionContext(entries, leafId, { deferThinking, deferToolResultImages });
+    const limit = Number.parseInt(searchParams.get("limit") ?? "", 10);
+    const fullContext = buildSessionContext(entries, leafId, { deferThinking, deferToolResultImages });
+    const context = Number.isFinite(limit) && limit > 0
+      ? paginateSessionContext(fullContext, limit)
+      : fullContext;
 
     const header = sm.getHeader();
     let modified = header?.timestamp ?? new Date().toISOString();
@@ -150,10 +155,10 @@ export async function GET(
       name: sm.getSessionName(),
       created: header.timestamp,
       modified,
-      messageCount: context.messages.length,
-      firstMessage: context.messages.find((m) => m.role === "user")
+      messageCount: fullContext.messages.length,
+      firstMessage: fullContext.messages.find((m) => m.role === "user")
         ? (() => {
-            const msg = context.messages.find((m) => m.role === "user")!;
+            const msg = fullContext.messages.find((m) => m.role === "user")!;
             const c = (msg as { content: unknown }).content;
             return typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "") || "(no messages)";
           })()
@@ -164,6 +169,7 @@ export async function GET(
     return NextResponse.json({
       sessionId: id,
       filePath,
+      modified,
       info,
       leafId,
       tree,

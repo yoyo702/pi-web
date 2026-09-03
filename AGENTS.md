@@ -1,4 +1,4 @@
-# Pi Web - Development Notes
+# TianForge pi - Development Notes
 
 ## Quick Start
 
@@ -19,7 +19,7 @@ Browser                Next.js Server              AgentSession (in-process)
   │                        │                               │
   ├─ GET /api/sessions ────▶ reads ~/.pi/agent/sessions/   │
   ├─ GET /api/sessions/[id] reads .jsonl file directly     │
-  ├─ GET /api/agent/running/events ───▶ running id SSE     │
+  ├─ GET /api/agent/running/events ───▶ running ids + bounded background events
   │                        │                               │
   ├─ send message ─────────▶ POST /api/agent/[id]          │
   │                        │   startRpcSession() ─────────▶│ createAgentSession()
@@ -40,14 +40,14 @@ Browser                Next.js Server              AgentSession (in-process)
 ```
 app/api/
   sessions/route.ts               GET  list all sessions
-  sessions/[id]/route.ts          GET/PATCH/DELETE session
-  sessions/[id]/context/route.ts  GET ?leafId= — context for a specific leaf
+  sessions/[id]/route.ts          GET/PATCH/DELETE session; GET supports paged context
+  sessions/[id]/context/route.ts  GET ?leafId=&limit=&beforeEntryId= — paged branch context
   sessions/[id]/meta/route.ts     GET cheap stat() probe { modified, size }
   sessions/[id]/export/route.ts   GET exported HTML for a session
   agent/new/route.ts              POST { cwd, message, toolNames?, provider?, modelId? }
   agent/[id]/route.ts             GET state | POST any command
-  agent/[id]/events/route.ts      GET SSE stream
-  agent/running/events/route.ts   GET SSE stream of currently-running session ids
+  agent/[id]/events/route.ts      GET dedicated SSE stream with coalesced message updates
+  agent/running/events/route.ts   GET running ids + bounded background session events
   auth/all-providers/route.ts     GET API-key provider list
   auth/api-key/[provider]/route.ts GET/POST/DELETE provider API key status/storage
   auth/login/[provider]/route.ts  GET OAuth/device-code SSE | POST manual code
@@ -56,6 +56,7 @@ app/api/
   cwd/validate/route.ts           POST validate/select a cwd
   default-cwd/route.ts            POST create ~/pi-cwd-YYYYMMDD
   files/[...path]/route.ts        GET file contents for viewer
+  git/repositories/route.ts       GET Git repositories found under a workspace
   home/route.ts                   GET user home directory
   models/route.ts                 GET { models, modelList, defaultModel }
   models-config/route.ts          GET/PUT — read/write ~/.pi/agent/models.json
@@ -76,6 +77,10 @@ lib/
   pi-types.ts          local structural types for pi SDK objects
   rpc-manager.ts      AgentSessionWrapper + registry + startRpcSession
   session-reader.ts   SessionManager wrappers + path cache + buildSessionContext adapter
+  session-snapshot-cache.ts bounded recent-session memory + IndexedDB cache
+  session-background-sync.ts reduces background events into cached snapshots
+  background-session-event.ts bounds events broadcast to inactive sessions
+  git-repositories.ts discovers nested Git repositories within an allowed workspace
   tool-presets.ts     PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts            shared TypeScript types
   normalize.ts        normalizeToolCalls() — field name mismatch between file format and our types
@@ -87,6 +92,7 @@ components/
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
   MessageView.tsx     renders one message (user/assistant/toolCall/toolResult)
+  ProductBrand.tsx    TianForge wordmark with smaller pi foundation mark
   BranchNavigator.tsx in-session branch switcher
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
@@ -142,7 +148,7 @@ On `ChatWindow` mount, `GET /api/agent/[id]` is called. If `state.isStreaming ==
 ### Compaction SSE events
 Newer pi emits `compaction_start` / `compaction_end`; older versions emitted `auto_compaction_start` / `auto_compaction_end`. `handleAgentEvent` accepts both sets to keep `isCompacting` in sync. Manual compact is a blocking POST — the button stays disabled until the response returns.
 
-### Cross-process session sync (terminal `pi` ↔ Pi Web)
+### Cross-process session sync (terminal `pi` ↔ TianForge pi)
 The same `.jsonl` can be edited by the terminal `pi` while it sits idle in the browser. There is no shared live channel, so:
 - **Read**: when the tab regains focus/visibility *and* on a low-frequency poll (`IDLE_SESSION_POLL_MS`, visible + idle only), `useAgentSession` hits `GET /api/sessions/[id]/meta` (a single `stat()`, no parse). Only if `modified` differs from the last-loaded value does it do a full `loadSession` to the current tip. This keeps refreshes flicker-free when nothing changed. `lastLoadedModifiedRef` tracks the loaded mtime; `loadSession` sets it from the `modified` field the detail route already returns.
 - **AppShell external refresh**: git panel + file tree + open-file diffs (`explorerRefreshKey`) and the session list (`refreshKey`) are bumped on tab focus and on a 20s visible-only poll, throttled to 1.5s. The file-content viewer already live-syncs via its own `fs.watch` SSE, so it is excluded.
@@ -153,9 +159,20 @@ The same `.jsonl` can be edited by the terminal `pi` while it sits idle in the b
 Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's `handleRunFailure` emits a normal assistant message with empty content, `stopReason: "error"`, and `errorMessage`, then resolves — so `rpc-manager` emits `prompt_done`, never `prompt_error`. The error lives on the message. `MessageView` renders a red "Request failed" banner (via `formatErrorMessage()`), and both the `blocks.length === 0` null-guard and `ChatWindow`'s group/final-answer split are relaxed so an empty-content error message is never folded away.
 
 ### Running state SSE + reconciliation
-- The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` in `lib/rpc-manager.ts`, so running badges update without polling.
+- The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` and `subscribeRpcSessionEvents()` in `lib/rpc-manager.ts`, so running badges and inactive-session snapshots update without polling.
 - `useAgentSession` still treats per-session SSE as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
+
+### Bounded streaming and background session snapshots
+- Dedicated `/api/agent/[id]/events` streams coalesce `message_update` frames to at most one every 75ms and keep only the latest pending frame under backpressure. State transitions clear superseded progress frames; completion events remain lossless.
+- The app-wide running stream sends only events projected by `projectBackgroundSessionEvent()`. It never broadcasts token-level updates. Completed messages larger than 128 KiB become `session_refresh` hints so a slow browser cannot accumulate unbounded serialized responses.
+- `lib/session-snapshot-cache.ts` retains an LRU of 5 desktop or 3 mobile sessions in memory and IndexedDB. Persisted snapshots are trimmed to 160/80 recent messages; reopening always reconciles with live state and disk.
+- `SessionSidebar` applies background events even when a project's chat component is unmounted. This keeps running work warm without mounting every conversation and duplicating its full resources.
+
+### Paginated session context
+- Session detail/context routes accept `limit` and `beforeEntryId`. Initial loads request 80 messages on desktop and 40 on mobile; scrolling to the top prepends older pages while preserving scroll position.
+- `SessionContext.page` carries `{ hasMore, beforeEntryId, totalMessages }`, while `SessionContext.stats` covers the full session so UI totals do not shrink to the rendered page.
+- Thinking and media-heavy blocks can stay deferred on paged reads. Do not restore eager full-file context loading in the client; large linear JSONL files previously pushed the dev server past the V8 heap limit.
 
 ### Worktrees and project grouping
 - `lib/worktree.ts` resolves linked worktree top-levels back to the main repo `projectRoot`; `listAllSessions()` attaches that to each `SessionInfo` so all worktrees for one repo are grouped together in the sidebar.
@@ -168,6 +185,12 @@ Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's
 - `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/pi-cwd-*`, and roots explicitly added with `allowFileRoot()`.
 - Explicit roots are persisted in `~/.pi-web/allowed-roots.json`, not only held in `globalThis`: Next.js route handlers can execute in separate workers, and restored workspaces must remain authorized across workers and server restarts.
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.
+- Project restoration and rail polling revalidate saved roots before protected File/Git requests. Do not treat a browser-side "authorized" flag as durable proof: the Next.js worker may have restarted.
+
+### Explorer, tabs, and nested repositories
+- Explorer hides dotfiles plus generated/dependency directories by default. Its visibility toggle reveals these entries and includes them in non-Git walking search; `.git`, `node_modules`, and macOS `._*` metadata remain bounded/filtered as appropriate.
+- File tabs support wheel-to-horizontal scrolling and a context menu for reveal, path copy, lock/unlock, and close-left/right/others/all. Locked tabs survive bulk-close actions and are persisted with the project panel state.
+- `GET /api/git/repositories` discovers a root repository and nested repositories under the allowed workspace. `GitReviewPanel` scopes all status/diff/history/write operations to the selected repository and persists that choice per workspace.
 
 ### Plugins and skills
 - `/api/plugins` uses pi's `SettingsManager` + `DefaultPackageManager` for global/project package install, remove, update, enable, and disable. Disabling writes empty `extensions/skills/prompts/themes` arrays for that package entry.

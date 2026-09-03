@@ -27,13 +27,16 @@ import {
 } from "@/lib/file-upload";
 import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 
-const IGNORED_NAMES = new Set([
+// These are hidden from directory listings by default because they are usually
+// generated or dependency-heavy. `hideHidden=1` controls this whole default
+// filter so the Explorer's visibility toggle can reveal them when requested.
+const DEFAULT_HIDDEN_NAMES = new Set([
   "node_modules", ".git", ".next", "dist", "build", "__pycache__",
   ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor", ".DS_Store", ".git",
+  "target", "vendor", ".DS_Store",
 ]);
 
-const IGNORED_SUFFIXES = [".pyc"];
+const DEFAULT_HIDDEN_SUFFIXES = [".pyc"];
 
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
@@ -613,7 +616,13 @@ export async function GET(
     const hideHidden = request.nextUrl.searchParams.get("hideHidden") === "1";
     const dirents = fs.readdirSync(filePath, { withFileTypes: true });
     const entries = dirents
-      .filter((d) => (!hideHidden || !d.name.startsWith(".")) && !IGNORED_NAMES.has(d.name) && !IGNORED_SUFFIXES.some((s) => d.name.endsWith(s)))
+      .filter((d) => !d.name.startsWith("._") && (
+        !hideHidden || (
+          !d.name.startsWith(".")
+          && !DEFAULT_HIDDEN_NAMES.has(d.name)
+          && !DEFAULT_HIDDEN_SUFFIXES.some((suffix) => d.name.endsWith(suffix))
+        )
+      ))
       .flatMap((d) => {
         const isDir = resolveDirentIsDirectory(d, path.join(filePath, d.name));
         return isDir === null
