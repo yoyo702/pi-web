@@ -24,13 +24,18 @@ const tls = process.env.PI_WEB_HTTPS_CERT && process.env.PI_WEB_HTTPS_KEY ? { ce
 // can call the terminal owner without exposing an unauthenticated web route.
 process.env.PI_WEB_INTERNAL_TERMINAL_TOKEN ||= crypto.randomBytes(32).toString("base64url");
 process.env.PI_WEB_INTERNAL_PORT = String(port);
+// Expose only non-secret runtime binding metadata to Next route workers. The
+// access-link dialog uses this to avoid claiming an address is reachable when
+// the server is bound to loopback only.
+process.env.PI_WEB_RUNTIME_HOST = hostname;
+process.env.PI_WEB_RUNTIME_PORT = String(port);
+process.env.PI_WEB_RUNTIME_PROTOCOL = tls ? "https" : "http";
 if (!isLoopback && !auth.configured()) {
   console.error("PI_WEB_PASSWORD must be set when TianForge pi listens on a non-loopback host.");
   process.exit(1);
 }
 
 let handle;
-let nextUpgradeHandler;
 
 function writeJson(res, status, body, headers = {}) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", ...headers });
@@ -41,6 +46,13 @@ function writeLoginPage(res, status = 200, errorMessage = "") {
   const error = errorMessage ? `<p role="alert" class="error">${String(errorMessage).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</p>` : "";
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><title>Sign in to TianForge pi</title><style>:root{color-scheme:dark;--bg:#111318;--panel:#191c22;--border:#30343d;--text:#f2f3f5;--muted:#a6acb8;--accent:#2563eb}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif}main{min-height:100vh;min-height:100dvh;display:grid;place-items:center;padding:20px}form{width:min(100%,360px);padding:24px;border:1px solid var(--border);border-radius:10px;background:var(--panel);box-shadow:0 14px 40px #0003}h1{margin:0;font-size:18px}h1 small{margin-left:.32em;color:var(--muted);font-size:.56em;font-weight:650;letter-spacing:.02em}p{margin:8px 0 20px;color:var(--muted);font-size:13px;line-height:1.5}label{display:grid;gap:7px;color:var(--muted);font-size:12px}input{width:100%;padding:10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font:inherit}button{width:100%;margin-top:18px;padding:10px 12px;border:0;border-radius:6px;background:var(--accent);color:#fff;font-weight:600}.error{margin:12px 0 0;color:#f87171;font-size:12px}</style></head><body><main><form action="/login" method="post"><h1>Sign in to TianForge<small>pi</small></h1><p>This TianForge instance is password protected. Signing in grants access to local projects and terminal sessions.</p><label>Password<input autofocus name="password" type="password" autocomplete="current-password" required></label>${error}<button type="submit">Sign in</button></form></main></body></html>`;
   res.writeHead(status, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Length": Buffer.byteLength(html), "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'", "X-Content-Type-Options": "nosniff" });
+  res.end(html);
+}
+
+function writePairingErrorPage(res, message) {
+  const safeMessage = String(message).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark light"><title>TianForge pairing</title><style>:root{color-scheme:dark;--bg:#111318;--panel:#191c22;--border:#30343d;--text:#f2f3f5;--muted:#a6acb8;--accent:#2563eb}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif}main{min-height:100vh;min-height:100dvh;display:grid;place-items:center;padding:20px}section{width:min(100%,360px);padding:24px;border:1px solid var(--border);border-radius:10px;background:var(--panel);box-shadow:0 14px 40px #0003}h1{margin:0;font-size:18px}h1 small{margin-left:.32em;color:var(--muted);font-size:.56em}p{margin:10px 0 18px;color:var(--muted);font-size:13px;line-height:1.5}a{display:block;padding:10px 12px;border-radius:6px;background:var(--accent);color:#fff;text-align:center;text-decoration:none;font-weight:600}</style></head><body><main><section><h1>TianForge<small>pi</small></h1><p>${safeMessage}</p><a href="/login">Use password instead</a></section></main></body></html>`;
+  res.writeHead(401, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Length": Buffer.byteLength(html), "Referrer-Policy": "no-referrer", "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; navigate-to 'self'; base-uri 'none'; frame-ancestors 'none'", "X-Content-Type-Options": "nosniff" });
   res.end(html);
 }
 
@@ -87,6 +99,25 @@ function isOpaqueLoginForm(req) {
 }
 
 async function handleAuthRequest(req, res, url) {
+  if (url.pathname === "/pair" && req.method === "GET") {
+    if (!auth.configured()) {
+      res.writeHead(303, { Location: "/", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
+      res.end();
+      return;
+    }
+    const session = auth.redeemPairingToken(url.searchParams.get("token"));
+    if (!session) return writePairingErrorPage(res, "This sign-in QR code has expired or was already used. Generate a new one from your computer.");
+    res.writeHead(303, { Location: "/", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "Set-Cookie": auth.cookieValue(session.token, session.expiresAt, url.protocol === "https:") });
+    res.end();
+    return;
+  }
+  if (url.pathname === "/api/auth/pair" && req.method === "POST") {
+    if (!auth.configured()) return writeJson(res, 200, { passwordRequired: false });
+    if (!auth.getSessionFromRequest(req)) return writeJson(res, 401, { error: "authentication required" });
+    if (!auth.isSameOrigin(req)) return writeJson(res, 403, { error: "cross-origin request rejected" });
+    const pairing = auth.createPairingToken();
+    return writeJson(res, 200, { passwordRequired: true, ...pairing });
+  }
   if (url.pathname === "/login" && req.method === "GET") {
     if (url.searchParams.has("password")) {
       res.writeHead(303, { Location: "/login", "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" });
@@ -157,13 +188,13 @@ const server = (tls ? https : http).createServer(tls || undefined, (req, res) =>
   if (url.pathname === "/api/client-error" && req.method === "POST") {
     if (auth.configured() && !auth.getSessionFromRequest(req)) return writeJson(res, 401, { error: "authentication required" });
     void readJson(req).then((body) => {
-      const diagnostic = { type: String(body?.type || "error").slice(0, 40), message: String(body?.message || "Unknown client error").slice(0, 500), file: String(body?.file || "").slice(0, 300), line: Number(body?.line) || 0, column: Number(body?.column) || 0 };
+      const diagnostic = { type: String(body?.type || "error").slice(0, 40), message: String(body?.message || "Unknown client error").slice(0, 500), file: String(body?.file || "").slice(0, 300), line: Number(body?.line) || 0, column: Number(body?.column) || 0, userAgent: String(body?.userAgent || req.headers["user-agent"] || "").slice(0, 300) };
       console.warn("[pi-web client error]", diagnostic);
       writeJson(res, 204, {});
     }).catch(() => writeJson(res, 400, { error: "invalid diagnostic" }));
     return;
   }
-  const isPiWebAuthRoute = url.pathname === "/api/auth/session" || url.pathname === "/api/auth/login" || url.pathname === "/api/auth/logout" || url.pathname === "/login";
+  const isPiWebAuthRoute = url.pathname === "/api/auth/session" || url.pathname === "/api/auth/login" || url.pathname === "/api/auth/logout" || url.pathname === "/api/auth/pair" || url.pathname === "/login" || url.pathname === "/pair";
   if (isPiWebAuthRoute) {
     void handleAuthRequest(req, res, url);
     return;
@@ -179,7 +210,12 @@ const server = (tls ? https : http).createServer(tls || undefined, (req, res) =>
   const publicPath = url.pathname === "/login"
     || isPiWebAuthRoute
     || url.pathname.startsWith("/_next/")
-    || url.pathname === "/favicon.ico";
+    || url.pathname === "/favicon.ico"
+    || url.pathname === "/manifest.webmanifest"
+    || url.pathname === "/sw.js"
+    || url.pathname === "/icon-192.png"
+    || url.pathname === "/icon-512.png"
+    || url.pathname === "/apple-touch-icon.png";
   const session = auth.getSessionFromRequest(req);
 
   if (auth.configured() && !publicPath && !session) {
@@ -211,12 +247,10 @@ const server = (tls ? https : http).createServer(tls || undefined, (req, res) =>
   handle(req, res);
 });
 
-// Keep WebSocket ownership explicit. Passing `httpServer` here makes Next add
-// its own upgrade listener lazily, alongside the terminal listener below. In
-// development that race can leave the HMR socket with an invalid response and
-// prevent the client bundle from hydrating. Route each upgrade through one
-// listener instead: terminal streams stay local and everything else goes to
-// Next (including /_next/webpack-hmr).
+// Next lazily installs its own upgrade listener when the first page request is
+// handled. This listener only claims Next HMR sockets and deliberately leaves
+// unknown WebSocket paths alone, so TianForge can independently own terminal
+// streams without dispatching HMR a second time.
 const app = next({ dev, dir: root, hostname, port });
 
 function isTerminalStream(url) {
@@ -225,15 +259,7 @@ function isTerminalStream(url) {
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || hostname}`);
-  if (!isTerminalStream(url)) {
-    if (nextUpgradeHandler) {
-      void nextUpgradeHandler(req, socket, head);
-    } else {
-      socket.write("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n");
-      socket.destroy();
-    }
-    return;
-  }
+  if (!isTerminalStream(url)) return;
 
   if (auth.configured() && !auth.getSessionFromRequest(req)) {
     socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
@@ -258,7 +284,6 @@ server.on("upgrade", (req, socket, head) => {
 
 app.prepare().then(() => {
   handle = app.getRequestHandler();
-  nextUpgradeHandler = app.getUpgradeHandler();
   server.listen(port, hostname, () => {
     const authStatus = auth.configured() ? "password authentication enabled" : "no password configured (loopback only)";
     console.log(`Ready on ${tls ? "https" : "http"}://${hostname}:${port} (${authStatus})`);

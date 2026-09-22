@@ -11,6 +11,7 @@ import { GitReviewPanel } from "./GitReviewPanel";
 import { AgentTerminalPanel } from "./agents/AgentTerminalPanel";
 import { CodexChatPanel } from "./agents/codex/CodexChatPanel";
 import { NewAgentDialog } from "./agents/NewAgentDialog";
+import { MobileAccessDialog } from "./MobileAccessDialog";
 import { TabBar, type Tab } from "./TabBar";
 import { getMissingSplitTerminalTabs } from "@/lib/terminal-restore";
 import { ModelsConfig } from "./ModelsConfig";
@@ -29,8 +30,8 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
 import type { TerminalConnectionState } from "@/hooks/useTerminalSocket";
 import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
-import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PanelsTopLeft, Plus, TerminalSquare } from "lucide-react";
-import { PROJECT_WORKSPACES_STORAGE_KEY, RECENT_PROJECTS_STORAGE_KEY, parseProjectWorkspaceSnapshot, parseRecentProjects, projectLabel, updateRecentProjects, upsertProjectWorkspace, type ProjectWorkspace } from "@/lib/project-workspaces";
+import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PanelsTopLeft, Plus, QrCode, TerminalSquare } from "lucide-react";
+import { PROJECT_WORKSPACES_STORAGE_KEY, RECENT_PROJECTS_STORAGE_KEY, parseProjectWorkspaceSnapshot, parseRecentProjects, projectLabel, recoverProjectWorkspaceSnapshot, updateRecentProjects, upsertProjectWorkspace, type ProjectWorkspace } from "@/lib/project-workspaces";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -54,6 +55,7 @@ export function AppShell() {
   const [projectWorkspaces, setProjectWorkspaces] = useState<ProjectWorkspace[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [projectWorkspacesHydrated, setProjectWorkspacesHydrated] = useState(false);
+  const [projectWorkspacesPersistenceEnabled, setProjectWorkspacesPersistenceEnabled] = useState(false);
   const [projectSelectionDismissed, setProjectSelectionDismissed] = useState(false);
   const [sidebarCwdResetKey, setSidebarCwdResetKey] = useState(0);
   const { isDark, toggleTheme } = useTheme();
@@ -72,6 +74,7 @@ export function AppShell() {
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
   const [pluginsConfigOpen, setPluginsConfigOpen] = useState(false);
+  const [mobileAccessOpen, setMobileAccessOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const [mobileSidebarModule, setMobileSidebarModule] = useState<"sessions" | "agents" | "explorer">("sessions");
@@ -86,15 +89,43 @@ export function AppShell() {
     setMobileSidebarReady(true);
   }, []);
   useEffect(() => {
-    const restored = parseProjectWorkspaceSnapshot(localStorage.getItem(PROJECT_WORKSPACES_STORAGE_KEY));
-    setProjectWorkspaces(restored.workspaces);
-    setActiveProjectId(restored.activeId);
-    setProjectWorkspacesHydrated(true);
+    const stored = localStorage.getItem(PROJECT_WORKSPACES_STORAGE_KEY);
+    const restored = parseProjectWorkspaceSnapshot(stored);
+    if (restored.workspaces.length > 0) {
+      setProjectWorkspaces(restored.workspaces);
+      setActiveProjectId(restored.activeId);
+      setProjectWorkspacesPersistenceEnabled(true);
+      setProjectWorkspacesHydrated(true);
+      return;
+    }
+
+    // A different protocol/host is a new browser origin, so its localStorage
+    // starts empty even though it talks to the same TianForge server. Seed the
+    // rail from durable Pi sessions instead of presenting an empty product.
+    const controller = new AbortController();
+    void fetch("/api/sessions", { cache: "no-store", signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json() as { sessions?: SessionInfo[] };
+        const recovered = recoverProjectWorkspaceSnapshot(data.sessions ?? []);
+        setProjectWorkspaces(recovered.workspaces);
+        setActiveProjectId(recovered.activeId);
+        setProjectWorkspacesPersistenceEnabled(true);
+      })
+      .catch(() => {
+        // Keep the app usable when the first request is temporarily offline.
+        // We deliberately do not create the storage key in this case so the
+        // next page load can attempt recovery again.
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setProjectWorkspacesHydrated(true);
+      });
+    return () => controller.abort();
   }, []);
   useEffect(() => {
-    if (!projectWorkspacesHydrated) return;
+    if (!projectWorkspacesHydrated || !projectWorkspacesPersistenceEnabled) return;
     try { localStorage.setItem(PROJECT_WORKSPACES_STORAGE_KEY, JSON.stringify({ workspaces: projectWorkspaces, activeId: activeProjectId })); } catch { /* storage may be unavailable */ }
-  }, [activeProjectId, projectWorkspaces, projectWorkspacesHydrated]);
+  }, [activeProjectId, projectWorkspaces, projectWorkspacesHydrated, projectWorkspacesPersistenceEnabled]);
   const chatInputRef = useRef<ChatInputHandle | null>(null);
   const topBarRef = useRef<HTMLDivElement>(null);
 
@@ -1194,7 +1225,7 @@ export function AppShell() {
   const approvalCount = activeCodexChats.filter((tab) => tab.status === "approval").length;
   const activityCount = runningTerminals.length + activeCodexChats.length;
   const showWorkspaceTabBar = workspaceTabs.length > 1;
-  const activityControl = <div ref={activityPanelRef} style={{ position: "relative", alignSelf: "stretch", flexShrink: 0, marginLeft: "auto" }}>
+  const activityControl = <div ref={activityPanelRef} style={{ position: "relative", alignSelf: "stretch", flexShrink: 0 }}>
     <button type="button" aria-label="Workspace activity" title="Workspace activity" aria-expanded={activityPanelOpen} onClick={() => setActivityPanelOpen((open) => !open)} style={{ display: "flex", alignItems: "center", gap: 5, height: "100%", padding: "0 10px", border: 0, borderLeft: "1px solid var(--border)", background: activityPanelOpen ? "var(--bg-selected)" : "transparent", color: approvalCount > 0 ? "#f59e0b" : activityCount > 0 ? "var(--accent)" : "var(--text-dim)", cursor: "pointer", font: "10.5px/1 inherit" }}>
       <Activity size={15} /><span>{activityCount}</span>{approvalCount > 0 && <span title={`${approvalCount} approval pending`} style={{ width: 6, height: 6, borderRadius: "50%", background: "#f59e0b" }} />}
     </button>
@@ -1204,6 +1235,19 @@ export function AppShell() {
       {[...runningTasks, ...runningAgents, ...runningShells].map((terminal) => <button key={terminal.id} type="button" onClick={() => { handleTerminalCreated(terminal, terminal.title); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#22c55e", flexShrink: 0 }} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{terminal.title || `${terminal.provider} terminal`}</span><small style={{ color: "var(--text-dim)" }}>{terminal.provider}</small></button>)}
       {activeCodexChats.map((tab) => <button key={tab.id} type="button" onClick={() => { setActiveWorkspaceTabId(tab.id); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: tab.status === "approval" ? "#f59e0b" : "var(--accent)", flexShrink: 0 }} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tab.label}</span><small style={{ color: tab.status === "approval" ? "#f59e0b" : "var(--text-dim)" }}>{tab.status}</small></button>)}
     </div>}
+  </div>;
+  const topRightControls = <div style={{ display: "flex", alignSelf: "stretch", flexShrink: 0, marginLeft: "auto" }}>
+    <button
+      type="button"
+      aria-label="Mobile access"
+      title="Mobile access"
+      aria-pressed={mobileAccessOpen}
+      onClick={() => setMobileAccessOpen(true)}
+      style={{ display: "grid", placeItems: "center", width: 36, height: "100%", padding: 0, border: 0, borderLeft: "1px solid var(--border)", background: mobileAccessOpen ? "var(--bg-selected)" : "transparent", color: mobileAccessOpen ? "var(--accent)" : "var(--text-muted)", cursor: "pointer" }}
+    >
+      <QrCode size={15} />
+    </button>
+    {activityControl}
   </div>;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
   const windowTitle = activeCwdName ? `${activeCwdName} - TianForge pi` : "TianForge pi";
@@ -1486,7 +1530,7 @@ export function AppShell() {
           <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
             <TabBar ariaLabel="Workspace tabs" tabs={workspaceTabs} activeTabId={activeWorkspaceTabId} onSelectTab={handleSelectWorkspaceTab} onCloseTab={handleCloseWorkspaceTab} />
           </div>
-          {showWorkspaceTabBar && activityControl}
+          {showWorkspaceTabBar && topRightControls}
         </div>
         {/* Pi-specific controls are only relevant while the Pi workspace is active. */}
         <div ref={topBarRef} style={{ display: activeWorkspaceTabId === "pi" ? "flex" : "none", alignItems: "center", flexShrink: 0, borderBottom: "1px solid var(--border)", height: 36, background: "var(--bg-panel)" }}>
@@ -1998,7 +2042,7 @@ export function AppShell() {
               )}
             </div>
           )}
-          {!showWorkspaceTabBar && activityControl}
+          {!showWorkspaceTabBar && topRightControls}
 
         </div>
 
@@ -2273,6 +2317,7 @@ export function AppShell() {
         onReloaded={() => setSessionKey((k) => k + 1)}
       />
     )}
+    <MobileAccessDialog open={mobileAccessOpen} onClose={() => setMobileAccessOpen(false)} />
     </>
   );
 }

@@ -85,6 +85,7 @@ npx @agegr/pi-web@latest
 - **数据目录**：默认读取 `~/.pi/agent/sessions` 下的会话文件。可通过环境变量 `PI_CODING_AGENT_DIR` 指定其他 pi agent 目录。
 - **会话文件**：路径形如 `~/.pi/agent/sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`。
 - **模型配置**：Models 面板读写 pi agent 目录下的 `models.json`，模型列表和默认模型由 pi 的配置解析得到。
+- **Bash 防卡死**：模型发起的 Bash 调用默认有 300 秒超时，避免异常子进程永久阻塞会话和 steer 队列。可通过 `TIANFORGE_BASH_TIMEOUT_SECONDS` 设置其他正数，或设为 `0` 恢复 pi 的无限等待；模型显式指定的超时优先。
 - **文件访问**：文件浏览和预览面向当前选择的项目目录，以及会话中已出现过的工作目录。显式添加的根目录保存在 `~/.pi-web/allowed-roots.json`，重启服务后仍有效。
 - **Git worktree**：什么时候显示切换器、新建目录在哪里、删除会影响什么，见 [TianForge pi 里的 Worktree](./docs/worktrees.zh-CN.md)。
 - **Fork 与会话内分支不同**：Fork 会创建新的 `.jsonl` 文件；“Edit from here” 是同一会话文件里的分支。
@@ -98,6 +99,21 @@ npm run dev
 ```
 
 默认开发服务器通过 HTTP 运行在 [http://127.0.0.1:30141](http://127.0.0.1:30141)，仅允许本机访问，不需要密码、证书或 `mkcert`。需要从局域网内的其他设备通过 HTTPS 测试时，请显式运行 `npm run dev:https`。
+
+点击网页右上角的二维码按钮，可以选择当前的局域网或 Tailscale 地址、复制访问链接，或直接用手机扫码。弹窗会识别服务是否仍仅监听本机；如不可访问，使用 `npm run dev:https` 重启即可。二维码不会包含服务密码。
+
+通过 Tailscale 长期访问时，推荐使用 Tailscale Serve 提供浏览器信任的 `*.ts.net` HTTPS 地址，避免 Android 将 `mkcert` 证书视为“不私密”并把 PWA 降级为普通快捷方式。保持 `npm run dev:https` 运行，并只需配置一次：
+
+```bash
+tailscale serve --bg https+insecure://127.0.0.1:30141
+tailscale serve status
+```
+
+之后使用 `serve status` 输出的 `https://<设备名>.<tailnet>.ts.net/`。`--bg` 配置会持久保留，电脑或 Tailscale 重启后无需重复执行；TianForge 服务本身仍需运行。开发模式已允许 `**.ts.net` 来源，保证 Next.js HMR WebSocket 能通过两级 tailnet 域名完成握手。直接访问 `https://100.x.y.z:30141` 仍使用本机 `mkcert` 证书，手机必须另行信任根 CA。
+
+移动端会始终显示 PWA 安装入口：Android 在浏览器提供安装事件时显示“Install app”，iOS 显示“分享 → 添加到主屏幕”的操作说明。浏览器支持 Fullscreen API 时还会另外显示一键全屏按钮；从安装后的 TianForge 图标启动不会显示浏览器地址栏。
+
+开发模式默认把 Turbopack 的内存目标限制为 1536 MB，避免服务连续运行多天、经历大量热更新后耗尽 Node 堆。内存充足或大型项目需要调整时，可在启动前设置 `PI_WEB_TURBOPACK_MEMORY_MB`（最小 512），例如 `PI_WEB_TURBOPACK_MEMORY_MB=2048 npm run dev`。修改后需要重启开发服务器。
 
 交互终端使用原生 `node-pty`。安装时 TianForge pi 会自动检查其 `spawn-helper` 的可执行权限，运行时也会再次自修复；如果包管理器完全阻止原生依赖安装，请在具备原生构建工具链的环境中批准脚本，或运行 `npm exec -- node-gyp rebuild --directory=node_modules/node-pty`。
 

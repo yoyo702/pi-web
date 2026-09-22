@@ -1,9 +1,10 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Noto_Sans_Mono } from "next/font/google";
 import "katex/dist/katex.min.css";
 import "@xterm/xterm/css/xterm.css";
 import "./globals.css";
 import { AgentationDevTools } from "@/components/AgentationDevTools";
+import { MobileFullscreenPrompt } from "@/components/MobileFullscreenPrompt";
 
 const notoSansMono = Noto_Sans_Mono({
   subsets: ["latin", "cyrillic"],
@@ -14,6 +15,29 @@ const notoSansMono = Noto_Sans_Mono({
 export const metadata: Metadata = {
   title: "TianForge pi",
   description: "TianForge, a browser workspace built on the pi coding agent",
+  applicationName: "TianForge pi",
+  manifest: "/manifest.webmanifest",
+  formatDetection: {
+    telephone: false,
+  },
+  appleWebApp: {
+    capable: true,
+    title: "TianForge pi",
+    statusBarStyle: "black-translucent",
+  },
+  icons: {
+    apple: "/apple-touch-icon.png",
+  },
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#ffffff" },
+    { media: "(prefers-color-scheme: dark)", color: "#1a1a1a" },
+  ],
 };
 
 export default function RootLayout({
@@ -27,7 +51,7 @@ export default function RootLayout({
         <meta name="google" content="notranslate" />
         <script
           dangerouslySetInnerHTML={{
-            __html: `(function(){function report(v){try{var x=new XMLHttpRequest();x.open("POST","/api/client-error",true);x.setRequestHeader("Content-Type","application/json");x.send(JSON.stringify(v));}catch(_){}}window.addEventListener("error",function(e){report({type:"error",message:String(e.message||"Script error").slice(0,500),file:String(e.filename||"").slice(0,300),line:e.lineno||0,column:e.colno||0});});window.addEventListener("unhandledrejection",function(e){var r=e.reason;report({type:"rejection",message:String(r&&r.message?r.message:r||"Unhandled rejection").slice(0,500)});});})();`,
+            __html: `(function(){function report(v){try{v.userAgent=String(navigator.userAgent||"").slice(0,300);var x=new XMLHttpRequest();x.open("POST","/api/client-error",true);x.setRequestHeader("Content-Type","application/json");x.send(JSON.stringify(v));}catch(_){}}window.addEventListener("error",function(e){report({type:"error",message:String(e.message||"Script error").slice(0,500),file:String(e.filename||"").slice(0,300),line:e.lineno||0,column:e.colno||0});});window.addEventListener("unhandledrejection",function(e){var r=e.reason;report({type:"rejection",message:String(r&&r.message?r.message:r||"Unhandled rejection").slice(0,500)});});})();`,
           }}
         />
         <script
@@ -38,6 +62,7 @@ export default function RootLayout({
       </head>
       <body translate="no" className="notranslate" style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
         {children}
+        <MobileFullscreenPrompt />
         <AgentationDevTools />
       </body>
     </html>

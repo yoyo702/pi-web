@@ -83,3 +83,10 @@ test("does not normalize escaped delimiters or link destinations", () => {
   assert.equal(normalizeDisplayMath(escaped), escaped);
   assert.equal(normalizeDisplayMath(link), link);
 });
+
+test("normalizes multiple inline math expressions without regex lookbehind", () => {
+  assert.equal(
+    normalizeDisplayMath(String.raw`Values \(x+y\) and \(z\).`),
+    "Values $x+y$ and $z$.",
+  );
+});

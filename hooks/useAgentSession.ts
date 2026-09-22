@@ -20,6 +20,7 @@ import {
   saveSessionSnapshot,
   type SessionSnapshot,
 } from "@/lib/session-snapshot-cache";
+import { readActiveToolCommand, readActiveToolOutput } from "@/lib/tool-progress";
 
 export interface SessionData {
   sessionId: string;
@@ -69,6 +70,16 @@ interface LastAssistantTextResponse {
   text?: string;
 }
 
+export type ActiveToolProgress = {
+  id: string;
+  name: string;
+  startedAt?: number;
+  timeoutSeconds?: number;
+  command?: string;
+  output?: string;
+  updatedAt?: number;
+};
+
 type AgentStateResponse = {
   contextUsage?: { percent: number | null; contextWindow: number; tokens: number | null } | null;
   systemPrompt?: string;
@@ -76,6 +87,7 @@ type AgentStateResponse = {
   isStreaming?: boolean;
   isPromptRunning?: boolean;
   isBashRunning?: boolean;
+  activeTools?: ActiveToolProgress[];
   isCompacting?: boolean;
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
@@ -136,8 +148,20 @@ type NoticeAction =
 export type AgentPhase =
   | { kind: "waiting_model" }
   | { kind: "running_command" }
-  | { kind: "running_tools"; tools: { id: string; name: string }[] }
+  | { kind: "running_tools"; tools: ActiveToolProgress[] }
   | null;
+
+function phaseFromAgentState(state: AgentStateResponse): AgentPhase {
+  if (state.activeTools?.length) {
+    return {
+      kind: "running_tools",
+      tools: state.activeTools.map((tool) => ({ ...tool })),
+    };
+  }
+  if (state.isStreaming) return { kind: "waiting_model" };
+  if (state.isPromptRunning) return { kind: "running_command" };
+  return null;
+}
 
 export interface CompactResultInfo {
   reason: "manual" | "threshold" | "overflow" | "auto" | string;
@@ -1013,6 +1037,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // (wrapper destroyed) means nothing is compacting.
       setIsCompacting(state?.isCompacting ?? false);
       setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
+      if (state) setAgentPhase(phaseFromAgentState(state));
       const busy = data.running && state
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
       if (busy || !agentRunningRef.current) return;
@@ -1205,10 +1230,38 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "tool_execution_start": {
         const id = event.toolCallId as string;
         const name = event.toolName as string;
+        const args = event.args;
+        const command = readActiveToolCommand(name, args);
+        const timeout = args && typeof args === "object"
+          ? (args as { timeout?: unknown }).timeout
+          : undefined;
         setAgentPhase((prev) => {
           const tools = prev?.kind === "running_tools" ? [...prev.tools] : [];
-          if (!tools.some((t) => t.id === id)) tools.push({ id, name });
+          if (!tools.some((t) => t.id === id)) {
+            tools.push({
+              id,
+              name,
+              startedAt: Date.now(),
+              ...(typeof timeout === "number" ? { timeoutSeconds: timeout } : {}),
+              ...(command ? { command } : {}),
+            });
+          }
           return { kind: "running_tools", tools };
+        });
+        break;
+      }
+      case "tool_execution_update": {
+        const id = event.toolCallId as string;
+        const output = readActiveToolOutput(event.partialResult);
+        if (output === undefined) break;
+        setAgentPhase((prev) => {
+          if (prev?.kind !== "running_tools") return prev;
+          return {
+            kind: "running_tools",
+            tools: prev.tools.map((tool) => (
+              tool.id === id ? { ...tool, output, updatedAt: Date.now() } : tool
+            )),
+          };
         });
         break;
       }
@@ -1765,7 +1818,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
             agentRunningRef.current = true;
             setAgentRunning(true);
-            setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
+            setAgentPhase(phaseFromAgentState(agentState.state));
             dispatch({ type: "start" });
             void connectEvents(session.id);
             if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {

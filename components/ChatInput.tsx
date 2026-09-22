@@ -1103,6 +1103,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 </button>
               )}
             </div>
+            {(queuedMessages?.steering.length ?? 0) > 0 && (
+              <div style={{
+                padding: "0 10px 5px",
+                fontSize: 11,
+                color: "var(--text-muted)",
+              }}>
+                Steer waits for the current tool call to finish. Use Stop to interrupt a stuck tool.
+              </div>
+            )}
             {queuedMessages?.steering.map((text, i) => (
               <QueuedMessageRow key={`steer-${i}`} kind="steer" text={text} />
             ))}

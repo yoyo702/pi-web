@@ -1,16 +1,20 @@
-import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, Theme } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, statSync, writeFileSync } from "fs";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
-import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
+import type { SlashCommandInfo, Theme } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
 import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-ui-terminal";
 import { terminalTools } from "./agents/terminal-tools";
 import { projectBackgroundSessionEvent } from "./background-session-event";
+import { createBashWatchdogExtension } from "./bash-watchdog";
+import { readActiveToolCommand, readActiveToolOutput } from "./tool-progress";
+import { createPlainTextTheme } from "./plain-text-theme";
+import { getResourceConfigFingerprint } from "./resource-config-fingerprint";
 
 // ============================================================================
 // Types
@@ -61,34 +65,19 @@ type ExtensionBindingOptions = {
   forceEmptySystemPrompt?: boolean;
 };
 
+type ActiveToolState = {
+  id: string;
+  name: string;
+  startedAt: number;
+  timeoutSeconds?: number;
+  command?: string;
+  output?: string;
+  updatedAt?: number;
+};
+
 const CODING_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
-// Extensions require a complete Theme, while the web UI applies its own styling.
-class PlainTextTheme extends Theme {
-  constructor() {
-    super(
-      { thinkingXhigh: "" } as ConstructorParameters<typeof Theme>[0],
-      {} as ConstructorParameters<typeof Theme>[1],
-      "truecolor",
-    );
-  }
-
-  override fg(...[, text]: Parameters<Theme["fg"]>): string { return text; }
-  override bg(...[, text]: Parameters<Theme["bg"]>): string { return text; }
-  override bold(text: string): string { return text; }
-  override italic(text: string): string { return text; }
-  override underline(text: string): string { return text; }
-  override inverse(text: string): string { return text; }
-  override strikethrough(text: string): string { return text; }
-  override getFgAnsi(): string { return ""; }
-  override getBgAnsi(): string { return ""; }
-  override getThinkingBorderColor(): (text: string) => string {
-    return (text) => text;
-  }
-  override getBashModeBorderColor(): (text: string) => string { return (text) => text; }
-}
-
-const PLAIN_TEXT_THEME = new PlainTextTheme();
+const PLAIN_TEXT_THEME: Theme = createPlainTextTheme();
 const CUSTOM_UI_KEYBINDINGS = new TuiKeybindingsManager(TUI_KEYBINDINGS);
 
 function withExtensionTools(session: AgentSessionLike, toolNames: string[]): string[] {
@@ -115,6 +104,7 @@ export class AgentSessionWrapper {
   private activeCustomUis = new Map<string, ActiveCustomUi>();
   private extensionStatuses = new Map<string, string>();
   private extensionWidgets = new Map<string, ExtensionWidgetItem>();
+  private activeToolCalls = new Map<string, ActiveToolState>();
   private promptRunning = false;
   private extensionsBound = false;
   private extensionBindingPromise: Promise<void> | null = null;
@@ -130,8 +120,12 @@ export class AgentSessionWrapper {
   // stale in-memory tip. Captured after our own writes so they don't count as
   // external edits.
   private lastKnownMtimeMs = 0;
+  private resourceConfigFingerprint: string;
+  private resourceReloadPromise: Promise<void> | null = null;
 
-  constructor(public readonly inner: AgentSessionLike) {}
+  constructor(public readonly inner: AgentSessionLike) {
+    this.resourceConfigFingerprint = getResourceConfigFingerprint(inner.sessionManager.getCwd(), getAgentDir());
+  }
 
   get sessionId(): string {
     return this.inner.sessionId;
@@ -152,8 +146,35 @@ export class AgentSessionWrapper {
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       this.resetIdleTimer();
+      if (event.type === "tool_execution_start") {
+        const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
+        if (id) {
+          const args = event.args && typeof event.args === "object"
+            ? event.args as { command?: unknown; timeout?: unknown }
+            : undefined;
+          const name = typeof event.toolName === "string" ? event.toolName : "tool";
+          const command = readActiveToolCommand(name, args);
+          this.activeToolCalls.set(id, {
+            id,
+            name,
+            startedAt: Date.now(),
+            ...(typeof args?.timeout === "number" ? { timeoutSeconds: args.timeout } : {}),
+            ...(command ? { command } : {}),
+          });
+        }
+      } else if (event.type === "tool_execution_update") {
+        const id = typeof event.toolCallId === "string" ? event.toolCallId : "";
+        const active = this.activeToolCalls.get(id);
+        const output = readActiveToolOutput(event.partialResult);
+        if (active && output !== undefined) {
+          this.activeToolCalls.set(id, { ...active, output, updatedAt: Date.now() });
+        }
+      } else if (event.type === "tool_execution_end") {
+        if (typeof event.toolCallId === "string") this.activeToolCalls.delete(event.toolCallId);
+      }
       if (event.type === "agent_end") {
         this.promptRunning = false;
+        this.activeToolCalls.clear();
         invalidateSessionListCache();
         this.captureFileMtime();
       }
@@ -213,6 +234,20 @@ export class AgentSessionWrapper {
     }
     this.applyForcedEmptySystemPrompt();
     this.captureFileMtime();
+    this.resourceConfigFingerprint = getResourceConfigFingerprint(this.inner.sessionManager.getCwd(), getAgentDir());
+  }
+
+  private async reloadResourcesIfChanged(): Promise<void> {
+    if (this.resourceReloadPromise) return this.resourceReloadPromise;
+    if (this.isRunning()) return;
+
+    const nextFingerprint = getResourceConfigFingerprint(this.inner.sessionManager.getCwd(), getAgentDir());
+    if (nextFingerprint === this.resourceConfigFingerprint) return;
+
+    this.resourceReloadPromise = this.performReload().finally(() => {
+      this.resourceReloadPromise = null;
+    });
+    return this.resourceReloadPromise;
   }
 
   setForceEmptySystemPrompt(force: boolean): void {
@@ -366,6 +401,10 @@ export class AgentSessionWrapper {
     this.resetIdleTimer();
     const type = command.type as string;
     if (this.shouldWaitForExtensions(type)) await this.waitForExtensionsBound();
+    const promptText = typeof command.message === "string" ? command.message.trimStart() : "";
+    if (type === "get_commands" || (type === "prompt" && promptText.startsWith("/"))) {
+      await this.reloadResourcesIfChanged();
+    }
 
     if (type === "prompt" || type === "steer" || type === "follow_up") {
       const imageError = validateAgentImages(command.images);
@@ -432,6 +471,7 @@ export class AgentSessionWrapper {
           isStreaming: this.inner.isStreaming,
           isPromptRunning: this.promptRunning,
           isBashRunning: this.inner.isBashRunning,
+          activeTools: Array.from(this.activeToolCalls.values()),
           isCompacting: this.inner.isCompacting,
           autoCompactionEnabled: this.inner.autoCompactionEnabled,
           autoRetryEnabled: this.inner.autoRetryEnabled,
@@ -460,7 +500,7 @@ export class AgentSessionWrapper {
           model = this.inner.modelRuntime.getModel(provider, modelId);
         }
         if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-        await this.inner.setModel(model);
+        await this.inner.setModel(model, { persist: true });
         invalidateModelsCache();
         invalidateSessionListCache();
         return { id: model.id, provider: model.provider };
@@ -624,6 +664,7 @@ export class AgentSessionWrapper {
       }
 
       case "reload": {
+        if (this.isRunning()) throw new Error("Cannot reload extensions while the session is running");
         await this.performReload();
         return { success: true };
       }
@@ -688,6 +729,7 @@ export class AgentSessionWrapper {
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
+    this.activeToolCalls.clear();
     this.onDestroyCallback?.();
     notifyRunningChange();
   }
@@ -1172,7 +1214,13 @@ export async function startRpcSession(
 
     // Build services first so extension-registered providers are available
     // before the SDK restores the saved model from the session file.
-    const services = await createAgentSessionServices({ cwd, agentDir });
+    const services = await createAgentSessionServices({
+      cwd,
+      agentDir,
+      resourceLoaderOptions: {
+        extensionFactories: [createBashWatchdogExtension()],
+      },
+    });
     const { session: inner } = await createAgentSessionFromServices({
       services,
       sessionManager,

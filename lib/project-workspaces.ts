@@ -22,6 +22,13 @@ export interface ProjectWorkspaceSnapshot {
   activeId: string | null;
 }
 
+export interface RecoverableProjectSession {
+  id: string;
+  cwd: string;
+  modified: string;
+  projectRoot?: string;
+}
+
 export function projectLabel(path: string): string {
   const normalized = path.replace(/[\\/]+$/, "");
   return normalized.split(/[\\/]/).filter(Boolean).pop() || path;
@@ -71,6 +78,35 @@ export function parseProjectWorkspaceSnapshot(raw: string | null): ProjectWorksp
   } catch {
     return { workspaces: [], activeId: null };
   }
+}
+
+/**
+ * Rebuild the project rail when this browser origin has no saved UI state.
+ * HTTP, HTTPS, localhost, LAN IPs, and Tailscale names each get isolated
+ * localStorage, while their Pi sessions still come from the same server.
+ */
+export function recoverProjectWorkspaceSnapshot(sessions: RecoverableProjectSession[]): ProjectWorkspaceSnapshot {
+  const latestByProject = new Map<string, ProjectWorkspace>();
+
+  for (const session of sessions) {
+    if (!session.cwd) continue;
+    const projectRoot = session.projectRoot || session.cwd;
+    const lastActive = Number.isFinite(Date.parse(session.modified)) ? Date.parse(session.modified) : 0;
+    const existing = latestByProject.get(projectRoot);
+    if (existing && existing.lastActive > lastActive) continue;
+    latestByProject.set(projectRoot, {
+      id: projectRoot,
+      projectRoot,
+      cwd: session.cwd,
+      label: projectLabel(projectRoot),
+      sessionId: session.id,
+      lastActive,
+      pinned: false,
+    });
+  }
+
+  const workspaces = [...latestByProject.values()].sort((left, right) => right.lastActive - left.lastActive);
+  return { workspaces, activeId: workspaces[0]?.id ?? null };
 }
 
 export function parseRecentProjects(raw: string | null): RecentProject[] {

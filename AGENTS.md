@@ -56,6 +56,7 @@ app/api/
   cwd/validate/route.ts           POST validate/select a cwd
   default-cwd/route.ts            POST create ~/pi-cwd-YYYYMMDD
   files/[...path]/route.ts        GET file contents for viewer
+  access/route.ts                 GET LAN/Tailscale access origins and reachability
   git/repositories/route.ts       GET Git repositories found under a workspace
   home/route.ts                   GET user home directory
   models/route.ts                 GET { models, modelList, defaultModel }
@@ -68,6 +69,7 @@ app/api/
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
 lib/
+  access-links.ts      classifies and formats LAN/Tailscale addresses
   agent-client.ts      typed fetch helper for /api/agent commands
   draft-store.ts       local draft persistence helpers
   file-access.ts       allowed file roots for /api/files and worktrees
@@ -88,6 +90,7 @@ lib/
 
 components/
   AppShell.tsx        layout + URL state + tab management
+  MobileAccessDialog.tsx LAN/Tailscale URL picker, copy action, and QR code
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
@@ -162,6 +165,12 @@ Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's
 - The sidebar listens to `/api/agent/running/events`, backed by `subscribeRunningSessions()` and `subscribeRpcSessionEvents()` in `lib/rpc-manager.ts`, so running badges and inactive-session snapshots update without polling.
 - `useAgentSession` still treats per-session SSE as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
+- Pi's `isBashRunning` only covers user `!command` execution, not model tool calls. `AgentSessionWrapper` therefore tracks `tool_execution_start`/`tool_execution_update`/`tool_execution_end` and exposes `activeTools` so reopening a running conversation restores the command, bounded output tail, elapsed time, timeout, and last-output activity instead of showing only a generic tool name. Keep command/output snapshots bounded through `lib/tool-progress.ts`.
+
+### Model Bash watchdog
+- Pi's built-in Bash schema accepts an optional timeout but intentionally has no default. TianForge injects the hidden inline extension from `lib/bash-watchdog.ts`, which fills in a 300-second timeout only when the model omitted one.
+- The built-in Pi Bash backend remains responsible for aborting and killing the detached process group. Explicit model timeouts win. `TIANFORGE_BASH_TIMEOUT_SECONDS=<seconds>` changes the default; `0` disables the host safeguard.
+- Steering remains Pi-native: a steer waits until the current assistant turn finishes its tool calls. The queue UI must explain this and point users to Stop when a tool is stuck.
 
 ### Bounded streaming and background session snapshots
 - Dedicated `/api/agent/[id]/events` streams coalesce `message_update` frames to at most one every 75ms and keep only the latest pending frame under backpressure. State transitions clear superseded progress frames; completion events remain lossless.
@@ -196,8 +205,20 @@ Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's
 - `node-pty` launches Unix terminals through its packaged `spawn-helper`. Some npm/package extraction paths leave that Mach-O/ELF helper at mode `0644`, which surfaces only as `posix_spawnp failed` even when the configured shell and cwd are valid.
 - The package `postinstall` and `getPty()` both call `ensureNodePtySpawnHelper()` to restore execute bits on the exact regular helper file. Keep the runtime check: it repairs existing installations without requiring a reinstall.
 
+### Mobile access links
+- The QR button in the top-right opens `MobileAccessDialog`, which loads `/api/access` and lists current LAN/Tailscale addresses without exposing `PI_WEB_PASSWORD`.
+- For password-protected servers, authenticated desktop browsers `POST /api/auth/pair` to create a five-minute, single-use bearer token. The QR targets `/pair?token=...`; redemption deletes the token before issuing the normal signed session cookie. Password login remains the fallback.
+- `server/pi-web-server.js` passes its actual bind host, port, and protocol to the route through `PI_WEB_RUNTIME_*`; addresses remain visible while a loopback bind is clearly marked as requiring restart.
+- `npm run dev:https` regenerates its mkcert certificate when a newly assigned IPv4 address is missing from the SAN list. `next.config.ts` also allows the machine's current interface addresses for development HMR.
+- For Android/PWA access over Tailscale, prefer persistent Tailscale Serve: `tailscale serve --bg https+insecure://127.0.0.1:30141`. Direct `100.x` access still presents the local mkcert certificate. Next development origins must use `**.ts.net`; `*.ts.net` does not match `<device>.<tailnet>.ts.net`.
+- Next's lazy upgrade listener owns `/_next/webpack-hmr`; TianForge's server listener must return immediately for non-terminal upgrade paths and only own `/api/terminals/:id/stream`. Manually forwarding HMR through `app.getUpgradeHandler()` duplicates the handshake after Next installs its own listener, while suppressing Next's listener prevents hydration entirely.
+- Client bundles target Safari/iOS 14 and newer through `package.json#browserslist`. `server/patch-mobile-compat.cjs` replaces the current GFM email-autolink lookbehind during `postinstall`; keep this check because unsupported regex literals prevent older Safari from parsing the entire chunk before React starts.
+- `MobileFullscreenPrompt` always exposes the PWA installation path on mobile: Android uses the captured `beforeinstallprompt` event when available, while iOS shows Share → Add to Home Screen instructions. `requestFullscreen()` is a separate optional action when supported, never a replacement for the install prompt.
+- The manifest, service worker, and PWA icons are public authentication-layer assets only. Project pages, APIs, sessions, and terminals remain protected.
+
 ### Plugins and skills
 - `/api/plugins` uses pi's `SettingsManager` + `DefaultPackageManager` for global/project package install, remove, update, enable, and disable. Disabling writes empty `extensions/skills/prompts/themes` arrays for that package entry.
+- Long-lived AgentSessions fingerprint global/project Pi settings, npm package locks, and resource directories. Opening the slash palette or sending a slash command reloads changed resources while idle, so packages installed after the web server started become available without restarting active work.
 - `/api/skills` uses `DefaultResourceLoader` so settings paths, package skills, and project `.agents/skills` are listed the same way the runtime sees them.
 - Skill toggling edits only the `disable-model-invocation` frontmatter key on the target `SKILL.md`; keep that surgical so user formatting survives.
 - `/api/skills/install` shells through `npx skills add ... --agent pi`; project installs run with the selected cwd.

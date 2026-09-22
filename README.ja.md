@@ -80,6 +80,7 @@ npx @agegr/pi-web@latest
 - **データディレクトリ**：TianForge pi はデフォルトで `~/.pi/agent/sessions` を読み込みます。別の pi エージェントディレクトリを指定するには `PI_CODING_AGENT_DIR` を設定してください。
 - **セッションファイル**：ファイルは `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl` に保存されます。
 - **モデル設定**：Models パネルは pi エージェントディレクトリ内の `models.json` を読み書きします。モデルの一覧とデフォルト値は pi の設定から取得されます。
+- **Bash ウォッチドッグ**：モデルが開始した Bash 呼び出しには既定で 300 秒のタイムアウトが付き、停止した子プロセスがセッションと steer キューを永久に塞ぐのを防ぎます。`TIANFORGE_BASH_TIMEOUT_SECONDS` で別の正数を指定でき、`0` で pi の無制限待機に戻せます。モデルが明示したタイムアウトが優先されます。
 - **ファイルアクセス**：ファイルの閲覧とプレビューは、選択したプロジェクトディレクトリとセッションに含まれる作業ディレクトリに限定されます。
 - **Git worktree**：切り替え機能が表示される条件、新しい worktree の作成方法、削除時の動作については、[TianForge pi の Worktree](./docs/worktrees.md) を参照してください。
 - **Fork とセッション内ブランチの違い**：Fork は新しい `.jsonl` ファイルを作成します。"Edit from here" は同じセッションファイル内に別のブランチを作成します。
@@ -93,6 +94,19 @@ npm run dev
 ```
 
 既定の開発サーバーは HTTP の [http://127.0.0.1:30141](http://127.0.0.1:30141) で起動し、ローカルホストからのみアクセスできます。パスワード、証明書、`mkcert` は不要です。LAN 内の別デバイスから HTTPS でテストする場合は、`npm run dev:https` を明示的に実行してください。
+
+Tailscale 経由で継続的に利用する場合は、ローカルの `mkcert` 証明書ではなくブラウザが信頼する `*.ts.net` 証明書を使える Tailscale Serve を推奨します。`npm run dev:https` を起動したまま、次を一度だけ設定します。
+
+```bash
+tailscale serve --bg https+insecure://127.0.0.1:30141
+tailscale serve status
+```
+
+以後は `serve status` に表示される `https://<device>.<tailnet>.ts.net/` を開きます。`--bg` の設定は Tailscale や Mac の再起動後も保持され、TianForge サーバーだけを起動すれば利用できます。開発モードでは二階層の tailnet ホスト名を通した Next.js HMR WebSocket のために `**.ts.net` を許可しています。`https://100.x.y.z:30141` への直接アクセスでは引き続き `mkcert` のルート CA をスマートフォン側で信頼する必要があります。
+
+モバイルでは PWA のインストール案内を常に表示します。Android は利用可能な場合にブラウザのインストール操作を表示し、iOS は「共有 → ホーム画面に追加」を案内します。Fullscreen API に対応するブラウザでは、別途ワンタップの全画面ボタンも表示します。インストールした TianForge のアイコンから起動するとアドレスバーは表示されません。
+
+開発モードでは、数日間の連続稼働と多数のホットリロードで Node のヒープを使い切らないよう、Turbopack のメモリ目標を既定で 1536 MB に制限します。調整する場合は起動前に `PI_WEB_TURBOPACK_MEMORY_MB`（最小 512）を設定してください（例: `PI_WEB_TURBOPACK_MEMORY_MB=2048 npm run dev`）。変更後は開発サーバーの再起動が必要です。
 
 よく使うチェック：
 

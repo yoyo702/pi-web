@@ -155,8 +155,8 @@ function normalizeInlineLatexMath(line: string): string {
   }
 
   return line.replace(
-    /(?<!\\)\\\(([^`\r\n$]+?)(?<!\\)\\\)/g,
-    (match, math: string) => (math.trim() ? `$${math}$` : match),
+    /(^|[^\\])\\\(([^`\r\n$]*?[^\\`\r\n$])\\\)/g,
+    (match, prefix: string, math: string) => (math.trim() ? `${prefix}$${math}$` : match),
   );
 }
 

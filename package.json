@@ -14,6 +14,21 @@
   "engines": {
     "node": ">=22.19.0"
   },
+  "browserslist": {
+    "production": [
+      "chrome >= 100",
+      "edge >= 100",
+      "firefox >= 100",
+      "safari >= 14",
+      "ios_saf >= 14"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "safari >= 14",
+      "ios_saf >= 14"
+    ]
+  },
   "bin": {
     "pi-web": "bin/pi-web.js"
   },
@@ -37,7 +52,7 @@
     "start": "node server/pi-web-server.js start -H 127.0.0.1 -p 30141",
     "start:lan": "node server/pi-web-server.js start -H 0.0.0.0 -p 30141",
     "lint": "eslint .",
-    "postinstall": "node server/agents/ensure-node-pty-helper.cjs",
+    "postinstall": "node server/agents/ensure-node-pty-helper.cjs && node server/patch-mobile-compat.cjs",
     "test": "node --test server/agents/*.test.cjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
@@ -46,10 +61,11 @@
   "dependencies": {
     "@assistant-ui/react": "^0.14.28",
     "@assistant-ui/react-markdown": "^0.14.7",
-    "@earendil-works/pi-agent-core": "0.82.1",
-    "@earendil-works/pi-ai": "0.82.1",
-    "@earendil-works/pi-coding-agent": "0.82.1",
-    "@earendil-works/pi-tui": "0.82.1",
+    "@earendil-works/pi-agent-core": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-tui": "0.85.1",
+    "@rc-component/qrcode": "1.1.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/xterm": "^6.0.0",

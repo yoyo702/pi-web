@@ -37,7 +37,14 @@ function developmentPassword() {
 const ips = Object.values(os.networkInterfaces()).flat().filter((entry) => entry && entry.family === "IPv4" && !entry.internal).map((entry) => entry.address);
 if (!ips.length) throw new Error("No LAN IPv4 address was found");
 fs.mkdirSync(certDir, { recursive: true, mode: 0o700 });
-if (!fs.existsSync(cert) || !fs.existsSync(key)) {
+function certificateCoversCurrentAddresses() {
+  if (!fs.existsSync(cert) || !fs.existsSync(key)) return false;
+  const inspected = spawnSync("openssl", ["x509", "-in", cert, "-noout", "-checkend", "86400", "-ext", "subjectAltName"], { encoding: "utf8" });
+  if (inspected.status !== 0) return false;
+  const details = `${inspected.stdout || ""}\n${inspected.stderr || ""}`;
+  return ips.every((ip) => details.includes(`IP Address:${ip}`));
+}
+if (!certificateCoversCurrentAddresses()) {
   const install = spawnSync("mkcert", ["-install"], { stdio: "inherit" });
   if (install.status !== 0) throw new Error("mkcert -install failed");
   const generated = spawnSync("mkcert", ["-cert-file", cert, "-key-file", key, "localhost", "127.0.0.1", "::1", ...ips], { stdio: "inherit" });

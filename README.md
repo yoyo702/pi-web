@@ -89,6 +89,7 @@ npx @agegr/pi-web@latest
 - **Data directory**: TianForge pi reads `~/.pi/agent/sessions` by default. Set `PI_CODING_AGENT_DIR` to point at another pi agent directory.
 - **Session files**: files are stored as `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`.
 - **Model config**: the Models panel reads and writes `models.json` in the pi agent directory. Model lists and defaults come from pi's config.
+- **Bash watchdog**: model-initiated Bash calls default to a 300-second timeout so a stalled child process cannot block the session and its steer queue forever. Set `TIANFORGE_BASH_TIMEOUT_SECONDS` to another positive number, or `0` to restore pi's unlimited behavior. A timeout explicitly supplied by the model takes precedence.
 - **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions. Explicit roots persist in `~/.pi-web/allowed-roots.json`, including across server restarts.
 - **Git worktrees**: see [Worktrees in TianForge pi](./docs/worktrees.md) for when the switcher appears, how new worktrees are created, and what removal does.
 - **Forks vs in-session branches**: Fork creates a new `.jsonl` file. "Edit from here" creates another branch inside the same session file.
@@ -102,6 +103,23 @@ npm run dev
 ```
 
 The default dev server runs over HTTP at [http://127.0.0.1:30141](http://127.0.0.1:30141). It is loopback-only and requires no password, certificate, or `mkcert`. For HTTPS access from another device on your LAN, run `npm run dev:https` explicitly.
+
+Mobile browser bundles target Safari/iOS 14 and newer. The install step also applies a compatibility-safe GFM autolink expression so an older Safari engine can parse the initial JavaScript bundle.
+
+Use the QR button in the top-right to choose a current LAN or Tailscale address, copy its access link, or scan it from a phone. When password protection is enabled, an already signed-in browser puts a five-minute, single-use pairing token in the QR code so the phone can sign in without typing the server password. The password itself is never included. The dialog reports when the server is still loopback-only; restart with `npm run dev:https` to make those addresses reachable.
+
+For durable access through Tailscale, prefer Tailscale Serve so the phone receives a browser-trusted `*.ts.net` certificate instead of the local `mkcert` certificate. Keep `npm run dev:https` running and configure the proxy once:
+
+```bash
+tailscale serve --bg https+insecure://127.0.0.1:30141
+tailscale serve status
+```
+
+Open the `https://<device>.<tailnet>.ts.net/` URL printed by `serve status`. The `--bg` configuration persists across Tailscale and machine restarts; only the TianForge server still needs to be running. Development mode allows `**.ts.net` origins so the Next.js HMR WebSocket works through the two-label tailnet hostname. Direct access to `https://100.x.y.z:30141` still presents the local `mkcert` certificate and requires installing that CA on the phone.
+
+On mobile, TianForge always shows how to install the PWA: Android uses the browser install prompt when available, while iOS shows Share → Add to Home Screen instructions. A separate one-tap full-screen action is also shown when the browser supports the Fullscreen API. Launching the installed app removes the browser address bar.
+
+Development mode targets a maximum of 1536 MB for Turbopack's in-memory cache so a server kept alive through days of hot reloads does not exhaust Node's heap. Set `PI_WEB_TURBOPACK_MEMORY_MB` before startup to tune it (minimum 512), for example `PI_WEB_TURBOPACK_MEMORY_MB=2048 npm run dev`. Restart the development server after changing it.
 
 Interactive terminals use the native `node-pty` module. TianForge pi verifies the executable permission of its `spawn-helper` after installation and repairs it again at runtime. If your package manager blocks native dependency installation entirely, approve the install script or run `npm exec -- node-gyp rebuild --directory=node_modules/node-pty` with a working native build toolchain.
 

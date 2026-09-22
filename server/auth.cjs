@@ -5,6 +5,8 @@ const crypto = require("node:crypto");
 
 const COOKIE_NAME = "pi_web_session";
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24;
+const PAIRING_TTL_MS = 1000 * 60 * 5;
+const MAX_PAIRING_TOKENS = 32;
 const LOGIN_WINDOW_MS = 1000 * 60 * 15;
 const MAX_LOGIN_FAILURES = 8;
 
@@ -14,6 +16,7 @@ const state = global.__piWebAuthState || {
 };
 global.__piWebAuthState = state;
 state.revoked ||= new Map();
+state.pairings ||= new Map();
 
 function configured() {
   return Boolean(process.env.PI_WEB_PASSWORD);
@@ -114,6 +117,37 @@ function createSession() {
   return { token, expiresAt };
 }
 
+function purgePairingTokens(now = Date.now()) {
+  for (const [token, pairing] of state.pairings) {
+    if (pairing.expiresAt <= now) state.pairings.delete(token);
+  }
+  while (state.pairings.size >= MAX_PAIRING_TOKENS) {
+    const oldest = state.pairings.keys().next().value;
+    if (!oldest) break;
+    state.pairings.delete(oldest);
+  }
+}
+
+/** Issue a short-lived bearer token for transferring login to another device. */
+function createPairingToken() {
+  const now = Date.now();
+  purgePairingTokens(now);
+  const token = crypto.randomBytes(24).toString("base64url");
+  const expiresAt = now + PAIRING_TTL_MS;
+  state.pairings.set(token, { expiresAt });
+  return { token, expiresAt };
+}
+
+/** Redeem a pairing token exactly once and return a normal authenticated session. */
+function redeemPairingToken(token) {
+  if (typeof token !== "string" || !/^[A-Za-z0-9_-]{32}$/.test(token)) return null;
+  const pairing = state.pairings.get(token);
+  if (!pairing) return null;
+  state.pairings.delete(token);
+  if (pairing.expiresAt <= Date.now()) return null;
+  return createSession();
+}
+
 function revokeSessionFromRequest(req) {
   const token = parseCookies(req.headers?.cookie)[COOKIE_NAME];
   if (!token) return;
@@ -163,6 +197,8 @@ module.exports = {
   clearFailures,
   verifyPassword,
   createSession,
+  createPairingToken,
+  redeemPairingToken,
   getSessionFromRequest,
   revokeSessionFromRequest,
   isSameOrigin,

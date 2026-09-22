@@ -8,7 +8,7 @@ import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistant
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
-import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
+import { useAgentSession, type ActiveToolProgress, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -48,9 +48,71 @@ function phaseLabel(phase: AgentPhase): string {
   return "Thinking...";
 }
 
+function formatRunDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes}m ${seconds}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function RunningToolsStatus({ tools }: { tools: ActiveToolProgress[] }) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  return (
+    <div className="my-2 space-y-2" aria-live="polite">
+      {tools.map((tool) => {
+        const startedAt = tool.startedAt ?? now;
+        const elapsedMs = Math.max(0, now - startedAt);
+        const timeoutMs = typeof tool.timeoutSeconds === "number" ? tool.timeoutSeconds * 1000 : null;
+        const remainingMs = timeoutMs === null ? null : Math.max(0, timeoutMs - elapsedMs);
+        const idleMs = tool.updatedAt ? Math.max(0, now - tool.updatedAt) : elapsedMs;
+
+        return (
+          <div key={tool.id} className="overflow-hidden rounded-md border border-border bg-tool-bg text-[12px]">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-border px-3 py-2 text-text-muted">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+              <span className="font-medium text-text">Running {tool.name}</span>
+              <span>Elapsed {formatRunDuration(elapsedMs)}</span>
+              {remainingMs !== null && (
+                <span className={remainingMs === 0 ? "text-accent" : ""}>
+                  {remainingMs === 0
+                    ? "Timeout reached"
+                    : `Timeout in ${formatRunDuration(remainingMs)}`}
+                </span>
+              )}
+            </div>
+            {tool.command && (
+              <pre className="max-h-24 overflow-auto whitespace-pre-wrap break-words border-b border-border px-3 py-2 font-mono text-text">
+                <span className="select-none text-text-dim">$ </span>{tool.command}
+              </pre>
+            )}
+            <pre className="max-h-36 overflow-auto whitespace-pre-wrap break-words px-3 py-2 font-mono text-text-muted">
+              {tool.output || "Waiting for output…"}
+            </pre>
+            <div className="border-t border-border px-3 py-1.5 text-[11px] text-text-dim">
+              {tool.output
+                ? `Last output ${formatRunDuration(idleMs)} ago`
+                : `No output for ${formatRunDuration(idleMs)}`}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 const CHAT_MINIMAP_WIDTH = 36;
 const CHAT_COLUMN_PADDING = 16;
 const CHAT_INPUT_RIGHT_PADDING = CHAT_COLUMN_PADDING + CHAT_MINIMAP_WIDTH;
+const COMPOSITION_END_ENTER_GRACE_MS = 150;
 
 function hasFinalAssistantAnswer(message: AgentMessage): boolean {
   if (message.role !== "assistant") return false;
@@ -216,6 +278,45 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsPanelOpen,
   });
+  const [extensionSelectReference, setExtensionSelectReference] = useState<{
+    title: string;
+    options: string[];
+  } | null>(null);
+  const extensionSelectReferenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleExtensionDialogResponse = useCallback((
+    request: ExtensionDialogRequest,
+    response: { value: string } | { confirmed: boolean } | { cancelled: true },
+  ) => {
+    if (extensionSelectReferenceTimerRef.current) {
+      clearTimeout(extensionSelectReferenceTimerRef.current);
+      extensionSelectReferenceTimerRef.current = null;
+    }
+    if (request.method === "select" && "value" in response) {
+      setExtensionSelectReference({
+        title: request.title,
+        options: [...request.options],
+      });
+      extensionSelectReferenceTimerRef.current = setTimeout(() => {
+        setExtensionSelectReference(null);
+        extensionSelectReferenceTimerRef.current = null;
+      }, 5_000);
+    } else if (request.method === "input" || "cancelled" in response) {
+      setExtensionSelectReference(null);
+    }
+    respondToExtensionUi(request, response);
+  }, [respondToExtensionUi]);
+
+  useEffect(() => () => {
+    if (extensionSelectReferenceTimerRef.current) clearTimeout(extensionSelectReferenceTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (extensionDialog?.method === "input" && extensionSelectReferenceTimerRef.current) {
+      clearTimeout(extensionSelectReferenceTimerRef.current);
+      extensionSelectReferenceTimerRef.current = null;
+    }
+  }, [extensionDialog]);
   const sessionBusy = agentRunning || bashRunning;
 
   // Register the abort handler for the global Esc shortcut
@@ -433,7 +534,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       {extensionDialog && (
         <ExtensionDialog
           request={extensionDialog}
-          onRespond={respondToExtensionUi}
+          reference={extensionDialog.method === "input"
+            && extensionSelectReference
+            ? extensionSelectReference
+            : undefined}
+          onRespond={handleExtensionDialogResponse}
         />
       )}
 
@@ -680,7 +785,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} />
             )}
 
-            {agentRunning && !streamState.streamingMessage && (
+            {agentRunning && !streamState.streamingMessage && agentPhase?.kind === "running_tools" && (
+              <RunningToolsStatus tools={agentPhase.tools} />
+            )}
+
+            {agentRunning && !streamState.streamingMessage && agentPhase?.kind !== "running_tools" && (
               <div className="py-2 text-[13px] text-text-muted">
                 <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase)}</span>
               </div>
@@ -868,12 +977,16 @@ type ExtensionDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "
 
 function ExtensionDialog({
   request,
+  reference,
   onRespond,
 }: {
   request: ExtensionDialogRequest;
+  reference?: { title: string; options: string[] };
   onRespond: (request: ExtensionDialogRequest, response: { value: string } | { confirmed: boolean } | { cancelled: true }) => void;
 }) {
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
+  const composingRef = useRef(false);
+  const lastCompositionEndAtRef = useRef(0);
 
   useEffect(() => {
     setValue(request.method === "editor" ? request.prefill ?? "" : "");
@@ -945,26 +1058,51 @@ function ExtensionDialog({
             </div>
           )}
           {request.method === "input" && (
-            <input
-              autoFocus
-              value={value}
-              placeholder={request.placeholder}
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitValue();
-                if (e.key === "Escape") onRespond(request, { cancelled: true });
-              }}
-              style={{
-                width: "100%",
-                padding: "9px 10px",
-                borderRadius: 7,
-                border: "1px solid var(--border)",
-                background: "var(--bg-panel)",
-                color: "var(--text)",
-                outline: "none",
-                fontSize: 13,
-              }}
-            />
+            <div style={{ display: "grid", gap: 10 }}>
+              {reference && (
+                <div style={{ maxHeight: 240, overflow: "auto", padding: 10, border: "1px solid var(--border)", borderRadius: 7, background: "var(--bg-panel)" }}>
+                  <div style={{ marginBottom: 8, color: "var(--text-muted)", fontSize: 12, whiteSpace: "pre-wrap" }}>{reference.title}</div>
+                  <div style={{ display: "grid", gap: 5 }}>
+                    {reference.options.map((option) => (
+                      <div key={option} style={{ color: "var(--text)", fontSize: 12, lineHeight: 1.45 }}>{option}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <input
+                autoFocus
+                value={value}
+                placeholder={request.placeholder}
+                onChange={(e) => setValue(e.target.value)}
+                onCompositionStart={() => { composingRef.current = true; }}
+                onCompositionEnd={() => {
+                  composingRef.current = false;
+                  lastCompositionEndAtRef.current = Date.now();
+                }}
+                onKeyDown={(e) => {
+                  const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
+                  const isComposing = composingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
+                  if (e.key === "Enter") {
+                    if (isComposing) return;
+                    e.preventDefault();
+                    if (!recentlyComposed && (e.metaKey || e.ctrlKey)) submitValue();
+                    return;
+                  }
+                  if (e.key === "Escape" && !isComposing) onRespond(request, { cancelled: true });
+                }}
+                style={{
+                  width: "100%",
+                  padding: "9px 10px",
+                  borderRadius: 7,
+                  border: "1px solid var(--border)",
+                  background: "var(--bg-panel)",
+                  color: "var(--text)",
+                  outline: "none",
+                  fontSize: 13,
+                }}
+              />
+              <div style={{ color: "var(--text-dim)", fontSize: 11 }}>Enter confirms IME text · Ctrl/⌘+Enter submits</div>
+            </div>
           )}
           {request.method === "editor" && (
             <textarea
@@ -1061,6 +1199,7 @@ function ExtensionCustomPanel({
 }) {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
+  const lastCompositionEndAtRef = useRef(0);
   const displayLines = normalizeCustomPanelLines(request.lines);
 
   useEffect(() => {
@@ -1106,7 +1245,14 @@ function ExtensionCustomPanel({
           autoCorrect="off"
           spellCheck={false}
           onKeyDown={(event) => {
-            if (composingRef.current || event.nativeEvent.isComposing) return;
+            const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
+            const isComposing = composingRef.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229;
+            if (isComposing) return;
+            if (event.key === "Enter" && recentlyComposed) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
             const data = toTerminalKeyData(event);
             if (!data) return;
             event.preventDefault();
@@ -1124,6 +1270,7 @@ function ExtensionCustomPanel({
           }}
           onCompositionEnd={(event) => {
             composingRef.current = false;
+            lastCompositionEndAtRef.current = Date.now();
             const input = event.currentTarget;
             queueMicrotask(() => {
               const text = input.value;
