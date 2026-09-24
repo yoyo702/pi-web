@@ -54,7 +54,7 @@ snapshot(kind)                        // 未注册的 kind 返回空快照
 - 模块未加载时（从未创建终端 / Codex 会话），快照为空，与实际状态一致。
 
 提供方：
-- `terminal-manager.cjs` 注册 `terminals` 提供方：`{ terminals: listTerminals(), stats: terminalStats() }`（全部目录）。在创建、退出、停止、重命名、删除、清理记录时 `notify("terminals")`；输出追加时 `notify("terminals", { throttled: true })`。
+- `terminal-manager.cjs` 注册 `terminals` 提供方：`{ terminals: listTerminals(), limits: terminalStats().limits }`（全部目录；各目录与全局统计由前端从终端列表计算）。在创建、退出、停止、重命名、删除、清理记录时 `notify("terminals")`；输出追加时 `notify("terminals", { throttled: true })`。
 - `codex-app-server.cjs` 注册 `codex_runtimes` 提供方：`{ runtimes: listRuntimes() }`。在会话启动/停止、`turn/started`、`turn/completed`、审批请求到达/解决时 `notify("codex_runtimes")`。
 
 ### SSE：扩展 `/api/agent/running/events`
@@ -65,7 +65,7 @@ snapshot(kind)                        // 未注册的 kind 返回空快照
 | --- | --- |
 | `running`（已有） | `runningSessionIds` |
 | `session_event`（已有） | 后台会话的有界事件 |
-| `terminals`（新增） | 全部终端的元数据（`TerminalSession[]`）与全局统计 |
+| `terminals`（新增） | 全部终端的元数据（`TerminalSession[]`）与数量上限 `limits` |
 | `codex_runtimes`（新增） | `listRuntimes()` 结果 |
 
 连接建立时先订阅、再发送三类快照，保证订阅与快照之间不漏变化（与现有 `running` 的做法相同）。重连即得到完整快照，断线期间的变化自动补齐。
@@ -77,7 +77,7 @@ snapshot(kind)                        // 未注册的 kind 返回空快照
 
 迁移：
 - `SessionSidebar` 现有的 `running/events` 连接改为使用共享连接（`running`、`session_event` 行为不变）。
-- `useWorkspaceTerminals(cwd)`：终端列表与统计来自存储；保留 `update()`（本地乐观更新，下次推送覆盖）和 `refresh()`（主动请求 `/api/terminals?cwd=` 并写回存储）；删除 5 秒轮询。
+- `useWorkspaceTerminals(cwd)`：终端列表与统计来自存储（`/api/terminals?cwd=` 返回规范化后的 `cwd`，前端据此过滤推送的终端，避免 `/tmp` 与 `/private/tmp` 这类符号链接对不上）；保留 `update()`（本地乐观更新，下次推送覆盖）和 `refresh()`（主动请求 `/api/terminals?cwd=` 并写回存储）；删除 5 秒轮询。
 - `ProjectRail`：运行角标与活动状态由存储计算；删除 5 秒轮询。Pi 会话的项目归属仍按现有方式（缓存的会话列表，节流刷新）。
 - `AgentsPanel`：Codex 会话目录轮询改为 30 秒，并在 `terminals` 或 `codex_runtimes` 变化时立即刷新一次（防抖）。
 
