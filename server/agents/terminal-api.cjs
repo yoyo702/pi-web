@@ -24,7 +24,7 @@ function errorResponse(res, error) {
 function readJson(req) {
   return readJsonBody(req, 65536);
 }
-function addRoot(root) { state.roots.add(path.resolve(root)); }
+function addRoot(root) { state.roots.add(path.resolve(root)); resolvedRootsCache = null; }
 function registerCwd(cwd) {
   if (typeof cwd !== "string" || !cwd) throw Object.assign(new Error("Path is required"), { code: "invalid_cwd" });
   let canonical;
@@ -80,9 +80,9 @@ function sessionHeaderRoots() {
 function grantedRoots() {
   const roots = new Set(state.roots);
   // /api/cwd/validate is handled by the Next route, which persists grants for
-  // Files, Git, Worktrees, and terminals in one shared file. Reload it for
-  // every authorization check so this long-lived proxy process sees grants
-  // created by a Next worker without needing a second registration endpoint.
+  // Files, Git, Worktrees, and terminals in one shared file. This long-lived
+  // proxy process reads it (see resolvedGrantedRoots for caching) so it sees
+  // grants created by a Next worker without a second registration endpoint.
   try {
     const persisted = JSON.parse(fs.readFileSync(allowedRootsFile, "utf8"));
     if (Array.isArray(persisted)) {
@@ -94,22 +94,58 @@ function grantedRoots() {
   } catch { /* ignore */ }
   return roots;
 }
+// Authorization runs on every terminal/Codex request, and realpath on a root
+// on a sleeping or unplugged external drive can stall this whole process. Keep
+// the realpath'd granted roots, keyed on the grants file's identity (so a
+// revocation stops authorizing as soon as the file changes) and bounded by a
+// short TTL for the ~/pi-cwd-* scan and realpath results. addRoot() clears it.
+const RESOLVED_ROOTS_TTL_MS = 5_000;
+let resolvedRootsCache = null; // { key, expiresAt, roots: string[] }
+function allowedRootsFileKey() {
+  try {
+    const stat = fs.statSync(allowedRootsFile);
+    return `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+  } catch {
+    return "missing";
+  }
+}
+function resolvedGrantedRoots({ fresh = false } = {}) {
+  const key = allowedRootsFileKey();
+  const now = Date.now();
+  if (!fresh && resolvedRootsCache && resolvedRootsCache.key === key && now < resolvedRootsCache.expiresAt) return resolvedRootsCache.roots;
+  const roots = [];
+  for (const root of grantedRoots()) {
+    try { roots.push(fs.realpathSync(root)); } catch { /* root no longer exists */ }
+  }
+  resolvedRootsCache = { key, expiresAt: now + RESOLVED_ROOTS_TTL_MS, roots };
+  return roots;
+}
+function isWithinResolvedRoot(target, root) {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
 function isWithinAnyRoot(target, roots) {
   for (const root of roots) {
     try {
-      const relative = path.relative(fs.realpathSync(root), target);
-      if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..")) return true;
+      if (isWithinResolvedRoot(target, fs.realpathSync(root))) return true;
     } catch { /* root no longer exists */ }
   }
   return false;
+}
+function isAuthorizedTarget(target) {
+  if (resolvedGrantedRoots().some((root) => isWithinResolvedRoot(target, root))) return true;
+  // Explicit grants cover almost every request; scan session headers only
+  // when they miss.
+  if (isWithinAnyRoot(target, sessionHeaderRoots())) return true;
+  // Fail closed but fresh: a root granted (or created) since the cache was
+  // filled must work immediately, so recheck uncached before denying.
+  return resolvedGrantedRoots({ fresh: true }).some((root) => isWithinResolvedRoot(target, root));
 }
 function authorizedCwd(cwd) {
   if (typeof cwd !== "string" || !cwd) throw Object.assign(new Error("cwd is required"), { code: "invalid_cwd" });
   let target;
   try { target = fs.realpathSync(path.resolve(cwd)); } catch { throw Object.assign(new Error("terminal working directory does not exist"), { code: "invalid_cwd" }); }
-  // Explicit grants cover almost every request; scan session headers only
-  // when they miss.
-  if (!isWithinAnyRoot(target, grantedRoots()) && !isWithinAnyRoot(target, sessionHeaderRoots())) {
+  if (!isAuthorizedTarget(target)) {
     throw Object.assign(new Error("terminal working directory is not an authorized workspace"), { code: "forbidden_cwd" });
   }
   return target;

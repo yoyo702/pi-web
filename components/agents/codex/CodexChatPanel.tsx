@@ -5,6 +5,7 @@ import type { TerminalSession } from "@/lib/agents/terminal";
 import { CodexAssistantThread } from "./CodexAssistantThread";
 import { reduceCodexEvent, type CodexConversationItem } from "@/lib/agents/codex-conversation";
 import type { ChatDraftImage } from "@/lib/draft-store";
+import { useWorkspaceStatusSelector } from "@/hooks/useWorkspaceStatus";
 
 type HistoryMessage = { role: "user" | "assistant"; text: string };
 type ModelOption = { id: string; label: string; provider?: string; defaultReasoningEffort?: string; reasoningEfforts?: { id: string; description?: string }[]; defaultServiceTier?: string; serviceTiers?: { id: string; label: string; description?: string }[] };
@@ -40,6 +41,8 @@ function tokenUsageFromEvent(event: AppEvent): { used: number; limit?: number } 
   if (typeof used !== "number") return null;
   return { used, limit: event.params.modelContextWindow ?? usage.modelContextWindow };
 }
+/** Fallback reconcile while working; pushed runtime status is the fast path. Matches Pi's AGENT_STATE_RECONCILE_MS. */
+const CODEX_RECONCILE_FALLBACK_MS = 15_000;
 type ThreadRead = {
   name?: string;
   title?: string;
@@ -159,6 +162,14 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
     return () => { closed = true; source?.close(); };
   }, [terminal.approvalPolicy, terminal.model, terminal.serviceTier, terminal.sessionName, threadId]);
 
+  // This thread's pushed runtime state as a primitive, so the panel re-renders
+  // (and the reconcile trigger below fires) only when it actually changes.
+  const pushedRuntimeState = useWorkspaceStatusSelector((status) => {
+    if (!threadId || status.codexRuntimes === null) return "unknown";
+    return status.codexRuntimes.find((runtime) => runtime.threadId === threadId)?.state ?? "absent";
+  });
+  const reconcileRef = useRef<(() => void) | null>(null);
+
   useEffect(() => {
     if (!threadId || runState !== "working") return;
     const reconcile = async () => {
@@ -179,12 +190,37 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
           setRunState("idle");
           setCurrentActivity("");
         }
-      } catch { /* SSE remains primary; try again on the next interval */ }
+      } catch { /* SSE remains primary; try again on the next trigger */ }
     };
+    // SSE is primary. Reconcile once now, again whenever the pushed runtime
+    // status for this thread changes (below), when the page becomes visible or
+    // the network returns, and on a slow fallback interval.
+    reconcileRef.current = () => void reconcile();
     void reconcile();
-    const timer = window.setInterval(() => void reconcile(), 3_000);
-    return () => window.clearInterval(timer);
+    const timer = window.setInterval(() => void reconcile(), CODEX_RECONCILE_FALLBACK_MS);
+    const onVisible = () => { if (document.visibilityState === "visible") void reconcile(); };
+    const onOnline = () => void reconcile();
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("online", onOnline);
+    return () => {
+      reconcileRef.current = null;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("online", onOnline);
+    };
   }, [runState, terminal.approvalPolicy, terminal.model, threadId]);
+
+  // A pushed turn end / approval / runtime exit while the panel still thinks
+  // it's working means the SSE end-of-turn may have been missed. Only react to
+  // a turn that was seen running: a first send registers the runtime as idle
+  // before turn/start, and reconciling then would replace the optimistic
+  // user message with the persisted (still idle) thread.
+  const previousPushedStateRef = useRef(pushedRuntimeState);
+  useEffect(() => {
+    const previous = previousPushedStateRef.current;
+    previousPushedStateRef.current = pushedRuntimeState;
+    if ((previous === "running" || previous === "approval") && pushedRuntimeState !== previous) reconcileRef.current?.();
+  }, [pushedRuntimeState]);
 
   useEffect(() => {
     if (!threadId || modelOptions.length) return;

@@ -76,6 +76,20 @@ export function useWorkspaceStatus(): WorkspaceStatusSnapshot {
   );
 }
 
+/**
+ * Like useWorkspaceStatus, but re-renders only when `select` returns a
+ * different value (compare with Object.is — return primitives or stable refs).
+ */
+export function useWorkspaceStatusSelector<T>(select: (snapshot: WorkspaceStatusSnapshot) => T): T {
+  useEffect(() => {
+    retain();
+    return release;
+  }, []);
+
+  const getSelected = () => select(workspaceStatusStore.getSnapshot());
+  return useSyncExternalStore(workspaceStatusStore.subscribe, getSelected, getSelected);
+}
+
 /** Receive every raw SSE message (e.g. session_event) while mounted; also keeps the connection open. */
 export function useWorkspaceStatusMessages(listener: (message: StatusMessage) => void): void {
   const listenerRef = useRef(listener);
