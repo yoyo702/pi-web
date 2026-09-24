@@ -842,6 +842,52 @@ test("opens the specific terminal behind a project rail activity item", async ({
   await expect(page.getByText("Terminal process is unavailable")).toHaveCount(0);
 });
 
+test("opens the Pi session behind a rail activity item with a fresh session lookup", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop project rail test");
+  const cwd = "/tmp/pi-web-rail-pi";
+  await page.addInitScript((snapshot) => {
+    if (!localStorage.getItem("pi-web:project-workspaces:v1")) localStorage.setItem("pi-web:project-workspaces:v1", JSON.stringify(snapshot));
+  }, { activeId: cwd, workspaces: [{ id: cwd, projectRoot: cwd, cwd, label: "rail-pi", sessionId: null, lastActive: 1 }] });
+  const session = { id: "rail-pi-session", name: "Rail Pi session", path: `${cwd}/s.jsonl`, cwd, projectRoot: cwd, created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:01:00.000Z", messageCount: 1, firstMessage: "Rail prompt" };
+  let sessionListRequests = 0;
+  let failSessionList = false;
+  await page.route("**/api/sessions", async (route) => {
+    sessionListRequests += 1;
+    if (failSessionList) return route.fulfill({ status: 500, json: { error: "unavailable" } });
+    return route.fulfill({ json: { sessions: [session], runningSessionIds: [session.id] } });
+  });
+  await page.route(`**/api/sessions/${session.id}?*`, async (route) => route.fulfill({ json: {
+    sessionId: session.id, filePath: session.path, modified: session.modified, info: session, leafId: "rail-tip", tree: [],
+    context: { messages: [{ role: "user", content: "Rail prompt", timestamp: 1 }], entryIds: ["rail-tip"], thinkingLevel: "medium", model: { provider: "openai-codex", modelId: "gpt-5.6-sol" }, page: { hasMore: false, beforeEntryId: null, totalMessages: 1 } },
+  } }));
+  await page.route(`**/api/sessions/${session.id}/state`, async (route) => route.fulfill({ json: { running: true, state: { isStreaming: true, isPromptRunning: true, isBashRunning: false, isCompacting: false } } }));
+  await page.route(`**/api/agent/${session.id}/events`, async (route) => route.fulfill({
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+    body: `data: ${JSON.stringify({ type: "connected", sessionId: session.id })}\n\n`,
+  }));
+  await page.route(`**/api/agent/${session.id}`, async (route) => route.fulfill({ json: { running: true, state: { isStreaming: true, isPromptRunning: true } } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd } }));
+  await page.route("**/api/git/status?*", async (route) => route.fulfill({ json: { isGitRepository: false, files: [] } }));
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [session.id] },
+    { type: "terminals", terminals: [], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
+
+  await page.goto("/");
+  const rail = page.getByRole("navigation", { name: "Project workspaces" });
+  await rail.getByTitle(cwd).getByLabel("Running: 1 working").click();
+  const item = page.getByRole("dialog", { name: "rail-pi activity" }).getByRole("button", { name: /^Rail Pi session · / });
+  await expect(item).toBeVisible();
+  // The lookup made on open fails; the item still opens its cached record.
+  failSessionList = true;
+  const requestsBeforeOpen = sessionListRequests;
+  await item.click();
+  await expect(page).toHaveURL(new RegExp(`[?&]session=${session.id}`));
+  await expect(page.getByText("Rail prompt", { exact: true }).first()).toBeVisible();
+  expect(sessionListRequests).toBeGreaterThan(requestsBeforeOpen);
+});
+
 test("shows terminal touch keys on a landscape tablet wider than the mobile breakpoint", async ({ browser }, testInfo) => {
   test.skip(testInfo.project.name.startsWith("mobile"), "touch tablet emulation runs once, from the desktop project");
   const context = await browser.newContext({ baseURL: testInfo.project.use.baseURL, viewport: { width: 1024, height: 768 }, hasTouch: true, isMobile: true });

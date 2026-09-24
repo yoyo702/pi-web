@@ -182,6 +182,27 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
     void compute();
     return () => { cancelled = true; if (expiryTimer) clearTimeout(expiryTimer); };
   }, [workspaceStatus.terminals, workspaceStatus.runningSessionIds, workspaceStatus.codexRuntimes, workspaces, tick]);
+  // Pi item labels come from the session list fetched when a session first
+  // runs, so a later rename would never show. Refresh it (same 30 s throttle)
+  // when the user opens an activity list that has Pi items — not on a poll.
+  const activityListOpen = activityCenterOpen || activityMenu !== null;
+  useEffect(() => {
+    if (!activityListOpen || Date.now() - sessionRootsFetchedAtRef.current < 30_000) return;
+    const hasPiItems = [...(previousRunningRef.current?.values() ?? [])].some((item) => item.kind === "pi")
+      || [...completedRef.current.values()].some((entry) => entry.item.kind === "pi");
+    if (!hasPiItems) return;
+    sessionRootsFetchedAtRef.current = Date.now();
+    // Not cancelled when the list closes: opening an item closes it, and the
+    // result still applies.
+    void fetch("/api/sessions", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() as Promise<{ sessions?: SessionInfo[] }> : null)
+      .then((sessionData) => {
+        if (!sessionData?.sessions) return;
+        sessionsByIdRef.current = new Map(sessionData.sessions.map((session) => [session.id, session]));
+        setTick((current) => current + 1);
+      })
+      .catch(() => { /* keep the cached labels */ });
+  }, [activityListOpen]);
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {

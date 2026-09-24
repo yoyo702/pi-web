@@ -46,6 +46,20 @@ const rightPanelHeaderButtonStyle: React.CSSProperties = { width: 36, height: 36
 const rightPanelToolMenuStyle: React.CSSProperties = { position: "absolute", zIndex: 500, top: 38, right: 2, width: 190, display: "grid", gap: 2, padding: 5, border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", boxShadow: "0 14px 36px rgba(0,0,0,.26)" };
 const rightPanelToolItemStyle: React.CSSProperties = { minHeight: 32, display: "flex", alignItems: "center", gap: 8, padding: "0 9px", border: 0, borderRadius: 5, background: "transparent", color: "var(--text)", cursor: "pointer", font: "12px/1.2 inherit", textAlign: "left" };
 
+
+/** Current SessionInfo for a session (the list is cached server-side); `cached` on any failure. */
+async function fetchFreshSessionInfo(cached: SessionInfo): Promise<SessionInfo> {
+  try {
+    // Bounded: a slow cold scan must not leave the click doing nothing.
+    const response = await fetch("/api/sessions", { cache: "no-store", signal: AbortSignal.timeout(2_000) });
+    if (!response.ok) return cached;
+    const data = await response.json() as { sessions?: SessionInfo[] };
+    return data.sessions?.find((session) => session.id === cached.id) ?? cached;
+  } catch {
+    return cached;
+  }
+}
+
 export function AppShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -808,8 +822,14 @@ export function AppShell() {
   // so the cwd to wait for comes from the activation itself.
   const [activityOpenIntent, setActivityOpenIntent] = useState<{ seq: number; item: RailActivityItem; token: number | null; cwd: string | null } | null>(null);
   const activityOpenSeqRef = useRef(0);
+  // A Pi item carries the SessionInfo the rail cached when the session started
+  // running, so its name can be stale. Look up the current record as soon as
+  // the item is clicked (in parallel with any project activation) and open with
+  // that, falling back to the cached record.
+  const activityFreshSessionRef = useRef<{ seq: number; session: Promise<SessionInfo> } | null>(null);
   const handleOpenActivityItem = useCallback((workspace: ProjectWorkspace, item: RailActivityItem) => {
     const seq = ++activityOpenSeqRef.current;
+    activityFreshSessionRef.current = item.kind === "pi" ? { seq, session: fetchFreshSessionInfo(item.session) } : null;
     // Terminals are grouped under a workspace by cwd or project root, but the
     // center only loads the active cwd's terminals. A terminal in another
     // directory of the project (e.g. the main checkout while a worktree is
@@ -862,8 +882,16 @@ export function AppShell() {
     if (isMobile) closeMobileOverlays();
     if (item.kind === "pi") {
       // Supersede the activation's pending restore of the project's last session.
-      projectSwitchTokenRef.current += 1;
-      handleSelectSession(item.session);
+      const token = ++projectSwitchTokenRef.current;
+      const selectedAtOpen = selectedSessionIdRef.current;
+      const pending = activityFreshSessionRef.current?.seq === intent.seq ? activityFreshSessionRef.current.session : Promise.resolve(item.session);
+      activityFreshSessionRef.current = null;
+      void pending.then((session) => {
+        // Superseded while the lookup was in flight: another project switch,
+        // another activity item, or the user picked a session themselves.
+        if (token !== projectSwitchTokenRef.current || intent.seq !== activityOpenSeqRef.current || selectedSessionIdRef.current !== selectedAtOpen) return;
+        handleSelectSession(session);
+      });
     } else {
       const threadId = item.id;
       const existing = workspaceTabs.find((tab) => tab.kind === "codex-chat" && (tab.id === codexChatTabId(threadId) || tab.sourceSessionId === threadId));
