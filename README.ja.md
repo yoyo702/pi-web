@@ -95,7 +95,7 @@ npx @agegr/pi-web@latest
 - **セッションファイル**：ファイルは `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl` に保存されます。
 - **モデル設定**：Models パネルは pi エージェントディレクトリ内の `models.json` を読み書きします。モデルの一覧とデフォルト値は pi の設定から取得されます。
 - **Bash ウォッチドッグ**：モデルが開始した Bash 呼び出しには既定で 300 秒のタイムアウトが付き、停止した子プロセスがセッションと steer キューを永久に塞ぐのを防ぎます。`TIANFORGE_BASH_TIMEOUT_SECONDS` で別の正数を指定でき、`0` で pi の無制限待機に戻せます。モデルが明示したタイムアウトが優先されます。
-- **ファイルアクセス**：ファイルの閲覧とプレビューは、選択したプロジェクトディレクトリとセッションに含まれる作業ディレクトリに限定されます。
+- **ファイルアクセス**：ファイルの閲覧とプレビューは、選択したプロジェクトディレクトリとセッションに含まれる作業ディレクトリに限定されます。明示的に追加したルートは `~/.pi-web/allowed-roots.json` に保存され、サーバー再起動後も有効です。この範囲制限はファイルと Git の表示をプロジェクトに絞るためのもので、セキュリティ境界ではありません。ログイン済みのブラウザはターミナルやエージェントを通じてサーバーユーザーの権限で任意の操作を実行できるため、ホームフォルダーなど広いディレクトリを選ぶと、その配下すべてを閲覧できるようになるだけです。
 - **Git worktree**：切り替え機能が表示される条件、新しい worktree の作成方法、削除時の動作については、[TianForge pi の Worktree](./docs/worktrees.md) を参照してください。
 - **Fork とセッション内ブランチの違い**：Fork は新しい `.jsonl` ファイルを作成します。"Edit from here" は同じセッションファイル内に別のブランチを作成します。
 - **同期について**：TianForge pi とターミナルの `pi` は同じセッションファイルを共有します。バックグラウンド更新、キャッシュ、ページング、同時書き込みの制約については [Staying in Sync](./docs/sync.md) を参照してください。
@@ -147,7 +147,8 @@ app/
     sessions/       # セッションの読み込み、名前変更、削除、コンテキスト、HTML エクスポート
     skills/         # スキルの一覧、検索、インストール、有効化／無効化
 components/
-  AppShell.tsx        # メインレイアウト、URL 状態、上部パネル、ファイルタブ
+  AppShell.tsx        # ワークスペースの組み立て、プロジェクト切り替え、セッション選択、URL 状態
+  workspace/          # 中央／右パネルのコンテナ、タブ種別ごとのビュー、オープン操作、Pi トップバー
   SessionSidebar.tsx  # プロジェクト選択、セッションツリー、Explorer
   ChatWindow.tsx      # メッセージ、SSE、画像のドラッグ＆ドロップ、ミニマップ
   ChatInput.tsx       # 入力欄、モデル／ツール／思考／コンパクション／スラッシュコントロール
@@ -157,6 +158,7 @@ components/
   FileExplorer.tsx    # ファイルツリー
   FileViewer.tsx      # ソース、差分、画像、音声、PDF、DOCX のプレビュー
 lib/
+  workspace/          # タブ型、タブ種別レジストリ、パネル reducer、旧形式互換のパネル保存
   http-dispatcher.ts  # サーバー側 fetch の HTTP(S) プロキシ設定
   rpc-manager.ts      # AgentSessionWrapper のライフサイクルとグローバルレジストリ
   session-reader.ts   # .jsonl セッションファイルとブランチコンテキストの解析
@@ -170,6 +172,9 @@ hooks/
   useAudio.ts         # 完了通知音
   useDragDrop.ts      # 画像のドラッグ＆ドロップ
   useTheme.ts         # テーマの切り替え
+  usePanelResize.ts   # サイドバー／右パネルの幅調整
+  useProjectWorkspaces.ts # プロジェクトレールの一覧と保存
+  useSessionMeta.ts   # トップバーのセッション統計、コンテキスト使用量、自動命名
 bin/
   pi-web.js           # npm CLI エントリポイント
 instrumentation.ts    # サーバー HTTP ディスパッチャーの初期化

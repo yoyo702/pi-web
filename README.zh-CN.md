@@ -100,7 +100,7 @@ npx @agegr/pi-web@latest
 - **会话文件**：路径形如 `~/.pi/agent/sessions/<编码后的工作目录>/<时间戳>_<uuid>.jsonl`。
 - **模型配置**：Models 面板读写 pi agent 目录下的 `models.json`，模型列表和默认模型由 pi 的配置解析得到。
 - **Bash 防卡死**：模型发起的 Bash 调用默认有 300 秒超时，避免异常子进程永久阻塞会话和 steer 队列。可通过 `TIANFORGE_BASH_TIMEOUT_SECONDS` 设置其他正数，或设为 `0` 恢复 pi 的无限等待；模型显式指定的超时优先。
-- **文件访问**：文件浏览和预览面向当前选择的项目目录，以及会话中已出现过的工作目录。显式添加的根目录保存在 `~/.pi-web/allowed-roots.json`，重启服务后仍有效。
+- **文件访问**：文件浏览和预览面向当前选择的项目目录，以及会话中已出现过的工作目录。显式添加的根目录保存在 `~/.pi-web/allowed-roots.json`，重启服务后仍有效。这个范围限制是为了让文件和 Git 视图聚焦在项目上，并不是安全边界：登录后的浏览器本来就能通过终端和 Agent 以服务用户的权限执行任意操作，所以选择家目录这类大范围目录，只是意味着其下所有内容都可以浏览。
 - **Git worktree**：什么时候显示切换器、新建目录在哪里、删除会影响什么，见 [TianForge pi 里的 Worktree](./docs/worktrees.zh-CN.md)。
 - **Fork 与会话内分支不同**：Fork 会创建新的 `.jsonl` 文件；“Edit from here” 是同一会话文件里的分支。
 - **消息同步**：TianForge pi 和终端 `pi` 共用同一批会话文件。后台任务、浏览器缓存、分页加载和并发写入边界见 [TianForge pi 里的消息同步](./docs/sync.zh-CN.md)。
@@ -158,7 +158,8 @@ app/
     sessions/       # 会话读取、重命名、删除、上下文、HTML 导出
     skills/         # skills 列表、搜索、安装、启停
 components/
-  AppShell.tsx        # 主布局、URL 状态、顶部面板、文件标签
+  AppShell.tsx        # 组装工作区；项目激活、会话选择、URL 状态
+  workspace/          # 中间/右侧面板容器、各类标签视图、打开操作、Pi 顶栏
   ProductBrand.tsx    # TianForge 主品牌与小号 pi 字标
   SessionSidebar.tsx  # 项目选择、会话树、Explorer
   DirectoryPicker.tsx # 支持浏览和路径输入的工作目录选择器
@@ -170,6 +171,7 @@ components/
   FileExplorer.tsx    # 文件树
   FileViewer.tsx      # 源码、diff、图片、音频、PDF、DOCX 预览
 lib/
+  workspace/          # 标签类型、标签注册表、面板 reducer、兼容旧格式的面板存储
   directory-browser.ts # 目录规范化和安全枚举工具
   http-dispatcher.ts  # 服务端 fetch 的 HTTP(S) 代理配置
   rpc-manager.ts      # AgentSessionWrapper 生命周期和全局 registry
@@ -187,6 +189,9 @@ hooks/
   useAudio.ts         # 完成提示音
   useDragDrop.ts      # 图片拖拽
   useTheme.ts         # 主题切换
+  usePanelResize.ts   # 侧栏/右侧面板宽度拖动
+  useProjectWorkspaces.ts # 项目栏列表与持久化
+  useSessionMeta.ts   # 顶栏会话统计、上下文用量、自动命名
 bin/
   pi-web.js           # npm CLI 入口
 instrumentation.ts    # 初始化服务端 HTTP dispatcher

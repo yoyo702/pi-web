@@ -104,7 +104,7 @@ npx @agegr/pi-web@latest
 - **Session files**: files are stored as `~/.pi/agent/sessions/<encoded-cwd>/<timestamp>_<uuid>.jsonl`.
 - **Model config**: the Models panel reads and writes `models.json` in the pi agent directory. Model lists and defaults come from pi's config.
 - **Bash watchdog**: model-initiated Bash calls default to a 300-second timeout so a stalled child process cannot block the session and its steer queue forever. Set `TIANFORGE_BASH_TIMEOUT_SECONDS` to another positive number, or `0` to restore pi's unlimited behavior. A timeout explicitly supplied by the model takes precedence.
-- **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions. Explicit roots persist in `~/.pi-web/allowed-roots.json`, including across server restarts.
+- **File access**: file browsing and preview are scoped to the selected project directory and working directories that appear in sessions. Explicit roots persist in `~/.pi-web/allowed-roots.json`, including across server restarts. This scoping keeps the Explorer and Git views focused; it is not a security boundary. A signed-in browser can already run anything through the terminal and agents with the server user's permissions, so choosing a broad directory such as your home folder simply makes all of it browsable.
 - **Git worktrees**: see [Worktrees in TianForge pi](./docs/worktrees.md) for when the switcher appears, how new worktrees are created, and what removal does.
 - **Forks vs in-session branches**: Fork creates a new `.jsonl` file. "Edit from here" creates another branch inside the same session file.
 - **Staying in sync**: TianForge pi and the terminal `pi` share the same session files. See [Staying in Sync](./docs/sync.md) for background updates, browser caching, pagination, and the concurrent-write boundary.
@@ -164,7 +164,8 @@ app/
     sessions/       # session reads, rename, delete, context, HTML export
     skills/         # skill listing, search, install, enable/disable
 components/
-  AppShell.tsx        # main layout, URL state, top panels, file tabs
+  AppShell.tsx        # composes the workspace; project activation, session selection, URL state
+  workspace/          # center/right panel containers, per-kind tab views, open actions, Pi top bar
   ProductBrand.tsx    # TianForge wordmark with the smaller pi foundation mark
   SessionSidebar.tsx  # project selector, session tree, Explorer
   DirectoryPicker.tsx # browsable and editable working-directory picker
@@ -176,6 +177,7 @@ components/
   FileExplorer.tsx    # file tree
   FileViewer.tsx      # source, diff, image, audio, PDF, DOCX preview
 lib/
+  workspace/          # tab types, tab kind registry, panel reducers, legacy-compatible panel storage
   directory-browser.ts # directory normalization and safe listing helpers
   http-dispatcher.ts  # HTTP(S) proxy setup for server-side fetch
   rpc-manager.ts      # AgentSessionWrapper lifecycle and global registry
@@ -193,6 +195,9 @@ hooks/
   useAudio.ts         # completion sound
   useDragDrop.ts      # image drag/drop
   useTheme.ts         # theme switching
+  usePanelResize.ts   # resizable sidebar/right panel widths
+  useProjectWorkspaces.ts # project rail list and persistence
+  useSessionMeta.ts   # top-bar session stats, context usage, auto-name
 bin/
   pi-web.js           # npm CLI entrypoint
 instrumentation.ts    # initializes the server HTTP dispatcher

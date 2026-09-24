@@ -224,6 +224,7 @@ Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's
 - Status explanations live under `Settings → Status & indicators`; do not add isolated help/legend buttons to individual modules. Color remains supplemental to visible text, accessible labels, or tooltips.
 
 ### File access allow-list
+- The allow-list is a UX scope, not an isolation boundary: an authenticated user already has the server user's full access through terminals and agents. Do not rely on it to protect data, and do not add friction (e.g. refusing `/` or `$HOME`) in its name without a matching boundary on terminals and agents.
 - `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/pi-cwd-*`, and roots explicitly added with `allowFileRoot()`.
 - Explicit roots are persisted in `~/.pi-web/allowed-roots.json`, not only held in `globalThis`: Next.js route handlers can execute in separate workers, and restored workspaces must remain authorized across workers and server restarts.
 - `/api/cwd/validate`, `/api/default-cwd`, and `/api/worktrees` call `allowFileRoot()` when they make a new location browsable.

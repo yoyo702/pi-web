@@ -22,6 +22,12 @@ TianForge pi 会暴露本机项目文件、Session 和 Terminal。局域网访�
 - API 未认证返回 401，页面请求跳转登录页。
 - 修改请求执行同源校验；Terminal WebSocket 同样校验认证与 Origin。
 - Next.js 自带的 upgrade listener 只处理 HMR；TianForge 的 listener 只处理 Terminal WebSocket。不要再把 HMR 手工转发给 `app.getUpgradeHandler()`，否则同一握手会被处理两次并在 Tailscale Serve 下表现为 502。
+- 所有 HTTP 请求和 WebSocket 升级都校验 `Host`，只接受本机名称、本机网卡地址和 `PI_WEB_ALLOWED_HOSTS`（默认 `*.ts.net`），其他返回 421，防御 DNS rebinding。
+- 密码和内部 Terminal 令牌启动后即从 `process.env` 移除，Agent 的 bash 工具和子进程读不到；会话 Cookie 使用由密码派生的独立签名密钥。
+- 登出记录（仅存 Token 哈希，权限 0600）持久化到 `~/.pi-web/revoked-sessions.json`，服务重启后已登出的 Cookie 仍然无效。
+- 登录限流按连接地址计数，不信任客户端可伪造的 `X-Forwarded-For`；认证前的请求体有大小上限。
+- 未登录时只开放 `/_next/static/`；绑定到非本机地址且未启用 TLS 时启动日志给出警告。
+- `/api/models-config` 返回前隐藏 API Key；工作区文件和会话导出页以 CSP sandbox 返回，恶意 SVG/HTML 无法在应用源内执行脚本。
 - Next.js 开发来源使用 `**.ts.net` 匹配 `<设备名>.<tailnet>.ts.net`。`*.ts.net` 只匹配单层子域，不能覆盖实际的两层 Tailscale Serve 主机名。
 
 ## 安全原则
@@ -29,7 +35,8 @@ TianForge pi 会暴露本机项目文件、Session 和 Terminal。局域网访�
 - 密码、API Key 和 OAuth Token 不返回给状态接口。
 - 登录失败限流，错误信息不泄露内部配置。
 - HTTPS 证书必须覆盖当前局域网 IP；设备端需要信任对应根证书。
-- 认证只授予当前 TianForge pi 实例能力，不扩大文件访问白名单。
+- 认证只授予当前 TianForge pi 实例能力，不扩大文件访问白名单。文件访问白名单只用于让文件和 Git 视图聚焦项目，不是隔离边界：登录后已可通过终端和 Agent 以服务用户权限执行任意操作。
+- 通过未登记的地址（自定义域名、反向代理）访问时，必须显式配置 `PI_WEB_ALLOWED_HOSTS`。
 - 不因开发便利而允许无密码绑定 `0.0.0.0`。
 
 ## 验收标准
@@ -39,6 +46,7 @@ TianForge pi 会暴露本机项目文件、Session 和 Terminal。局域网访�
 - 支持 Fullscreen API 的手机可一键隐藏标签页浏览器栏；不支持时可从主屏幕图标以无地址栏模式启动。
 - 未登录设备不能直接读取页面数据或连接 Terminal。
 - 密码不会出现在 GET 请求、URL 或服务日志中。
+- 伪造 `Host` 的请求返回 421；服务重启后已登出的 Cookie 返回 401。
 - HMR 失败不会造成生产模式问题；开发模式下页面可正常 Hydration。
 
 ## Tailscale Serve 排障记录

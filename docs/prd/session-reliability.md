@@ -11,7 +11,11 @@ TianForge pi、终端 Pi、Codex Chat 和 Agent Terminal 可能同时观察同�
 - 浏览 Session 时只读文件，不创建 AgentSession。
 - 发送消息时按 Session ID 复用进程内 AgentSessionWrapper。
 - 热更新后通过 `globalThis` 保持注册表。
-- Fork 后立即销毁旧 wrapper，避免 parentSession 链污染。
+- Fork 在独立的 SessionManager 上创建分支，不修改源会话；源会话空闲时随即释放，运行中则等运行结束后由空闲计时器释放。
+- 释放会话时调用 SDK 的 `dispose()` 中止进行中的任务，并通过 `session_closed` 通知 SSE 关闭，避免孤儿 Agent 在会话删除后重新写回文件。
+- 删除会话时只读取文件头来查找子会话，并以“临时文件 + rename”原子改写其父链接；运行中的子会话会跳过并返回失败列表。
+- 会话列表按目录缓存解析结果，只重新解析文件有变化的目录。
+- pi 0.86+ 写入会话记录的 system 消息（system prompt 与工具声明）只属于模型上下文，不进入聊天记录、分支树和实时事件；System prompt 面板按需启动会话读取实际生效的 prompt。
 - 页面重新获得焦点和低频轮询时检查文件 mtime；变化后才重载。
 - Prompt 前检测外部写入并重载，降低旧内存 Tip 造成分支的风险。
 - 运行状态使用 SSE，并通过周期状态核对修复漏失事件。
@@ -43,6 +47,7 @@ TianForge pi、终端 Pi、Codex Chat 和 Agent Terminal 可能同时观察同�
 - UTF-8 字符跨读取块边界时不会破坏 JSONL 解析。
 - 慢连接或超长回复不会让 SSE 队列和 Node.js 堆内存无限增长。
 - 切回后台运行的项目时立即显示缓存状态，并最终与会话文件一致。
+- 新会话的第一条消息只显示一次；删除正在运行的会话后，文件不会被重新写回。
 
 ## 后续计划
 
