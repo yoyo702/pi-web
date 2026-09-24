@@ -1321,7 +1321,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
       {/* Optional external agents — separate from the Pi session browser and file explorer. */}
       {sidebarMode === "agents" && (selectedCwdProp || selectedCwd) && onNewAgent && <>
-        <AgentsPanel cwd={(selectedCwdProp || selectedCwd)!} refreshKey={agentsRefreshKey} style={agentsExpanded && explorerOpen ? { flex: `0 1 ${sessionPane.size}px`, height: sessionPane.size, minHeight: 90 } : agentsExpanded ? { flex: "1 1 0", minHeight: 90 } : { flex: "0 0 auto" }} onExpandedChange={setAgentsExpanded} onNewAgent={onNewAgent} onOpenCodexSession={actions.openCodexChat} onOpenTerminal={actions.openTerminal} onTerminalRemoved={onAgentTerminalRemoved} onCodexSessionChanged={onCodexSessionChanged} />
+        <AgentsPanel cwd={(selectedCwdProp || selectedCwd)!} refreshKey={agentsRefreshKey} style={agentsExpanded && explorerOpen ? { flex: `0 1 ${sessionPane.size}px`, height: sessionPane.size, minHeight: 90 } : agentsExpanded ? { flex: "1 1 0", minHeight: 90 } : { flex: "0 0 auto" }} onExpandedChange={setAgentsExpanded} onNewAgent={onNewAgent} onOpenCodexSession={actions.openCodexChat} onNewCodexChat={actions.newCodexChat} onOpenTerminal={actions.openTerminal} onTerminalRemoved={onAgentTerminalRemoved} onCodexSessionChanged={onCodexSessionChanged} />
       </>}
 
       {/* Shared file explorer — remains mounted below either Pi or Agents. */}

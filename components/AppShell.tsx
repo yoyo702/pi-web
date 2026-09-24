@@ -9,7 +9,7 @@ import { ProjectRail } from "./ProjectRail";
 import { ChatWindow } from "./ChatWindow";
 import { NewAgentDialog } from "./agents/NewAgentDialog";
 import { TabBar } from "./TabBar";
-import { codexChatTabId, terminalTabId, GIT_REVIEW_TAB_ID, type TabStatus, type TerminalTab } from "@/lib/workspace/tabs";
+import { codexChatTabId, terminalTabId, GIT_REVIEW_TAB_ID, type CenterTab, type TabStatus, type TerminalTab } from "@/lib/workspace/tabs";
 import { centerReducer, sideReducer, initialCenterState, initialSideState, type TerminalSplit } from "@/lib/workspace/panel-state";
 import { loadCenterState, saveCenterState, loadSideState, saveSideState, type SideSnapshotCache } from "@/lib/workspace/panel-storage";
 import { getMissingSplitTerminalTabs } from "@/lib/terminal-restore";
@@ -26,6 +26,7 @@ import { ProductStatusDot } from "./ProductStatus";
 import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { getFileName } from "@/lib/file-paths";
+import { randomId } from "@/lib/random-id";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
@@ -202,6 +203,8 @@ export function AppShell() {
     dispatchCenter({ type: "hydrate", state: activeCwd ? loadCenterState(localStorage, activeCwd) : initialCenterState() });
     setCenterHydratedCwd(activeCwd);
   }, [activeCwd]);
+  const centerHydratedCwdRef = useRef(centerHydratedCwd);
+  useEffect(() => { centerHydratedCwdRef.current = centerHydratedCwd; }, [centerHydratedCwd]);
   useEffect(() => {
     if (activeCwd && centerHydratedCwd === activeCwd) saveCenterState(localStorage, activeCwd, center);
   }, [activeCwd, center, centerHydratedCwd]);
@@ -776,9 +779,25 @@ export function AppShell() {
   }, []);
 
   const handleOpenCodexSessionChat = useCallback((target: CodexChatTarget) => {
-    // An empty name falls back to the panel's own title and the thread's name.
-    const fields = { label: target.sessionName || "Codex Chat", sessionName: target.sessionName || undefined, cwd: target.cwd, model: target.model, reasoningEffort: target.reasoningEffort, serviceTier: target.serviceTier, approvalPolicy: target.approvalPolicy };
-    dispatchCenter({ type: "open", tab: { id: codexChatTabId(target.sessionId), kind: "codex-chat", sourceSessionId: target.sessionId, ...fields }, mergeExisting: fields });
+    const settings = { sessionName: target.sessionName || undefined, cwd: target.cwd, model: target.model, reasoningEffort: target.reasoningEffort, serviceTier: target.serviceTier, approvalPolicy: target.approvalPolicy };
+    // An empty name falls back to the panel's own title and the thread's name;
+    // an open tab keeps its label then (e.g. the first message of a new chat).
+    const fields = { label: target.sessionName || "Codex Chat", ...settings };
+    dispatchCenter({ type: "open", tab: { id: codexChatTabId(target.sessionId), kind: "codex-chat", sourceSessionId: target.sessionId, ...fields }, mergeExisting: target.sessionName ? fields : settings });
+  }, []);
+
+  const handleNewCodexChat = useCallback((cwd: string) => {
+    dispatchCenter({ type: "open", tab: { id: codexChatTabId(`new-${randomId()}`), label: "New Codex chat", kind: "codex-chat", cwd, newChat: true, approvalPolicy: "untrusted" } });
+  }, []);
+
+  const handleCodexChatCreated = useCallback((tabId: string, cwd: string, threadId: string, title: string) => {
+    const update = (tab: CenterTab): CenterTab => tab.id === tabId && tab.kind === "codex-chat" ? { ...tab, sourceSessionId: threadId, newChat: false, label: title || tab.label } : tab;
+    dispatchCenter({ type: "update", update });
+    // The project was switched while Codex started the chat: fix its saved tab, or going back would start a second chat.
+    if (cwd !== centerHydratedCwdRef.current) {
+      const saved = loadCenterState(localStorage, cwd);
+      saveCenterState(localStorage, cwd, { ...saved, tabs: saved.tabs.map(update) });
+    }
   }, []);
 
   const handleTerminalChanged = useCallback((terminal: TerminalSession) => {
@@ -911,6 +930,7 @@ export function AppShell() {
     toggleGitReview: handleOpenGitReview,
     openTerminal: handleTerminalCreated,
     openCodexChat: handleOpenCodexSessionChat,
+    newCodexChat: handleNewCodexChat,
     closeTab: (tabId) => (fileTabs.some((tab) => tab.id === tabId) ? handleCloseFileTab(tabId) : handleCloseWorkspaceTab(tabId)),
     revealInExplorer: handleRevealFileInExplorer,
   };
@@ -921,6 +941,7 @@ export function AppShell() {
     toggleGitReview: () => workspaceActionsRef.current.toggleGitReview(),
     openTerminal: (terminal, label) => workspaceActionsRef.current.openTerminal(terminal, label),
     openCodexChat: (target) => workspaceActionsRef.current.openCodexChat(target),
+    newCodexChat: (cwd) => workspaceActionsRef.current.newCodexChat(cwd),
     closeTab: (tabId) => workspaceActionsRef.current.closeTab(tabId),
     revealInExplorer: (filePath) => workspaceActionsRef.current.revealInExplorer(filePath),
   }), []);
@@ -1273,8 +1294,8 @@ export function AppShell() {
           </div>
           <CenterWorkspace state={center} renderTab={(tab) => {
             const terminal = tab.terminalId ? terminals[tab.terminalId] ?? null : null;
-            return tab.kind === "codex-chat" && (terminal || tab.sourceSessionId)
-              ? <CodexChatTabView tab={tab} terminal={terminal} activeCwd={activeCwd} onStatusChange={handleCodexTabStatus} onConfigurationChange={handleCodexTabConfiguration} />
+            return tab.kind === "codex-chat" && (terminal || tab.sourceSessionId || tab.newChat)
+              ? <CodexChatTabView tab={tab} terminal={terminal} activeCwd={activeCwd} onStatusChange={handleCodexTabStatus} onConfigurationChange={handleCodexTabConfiguration} onCreated={handleCodexChatCreated} />
               : <TerminalTabView tab={tab} terminals={terminals} split={terminalSplit} workspaceTabs={workspaceTabs} isMobile={isMobile} activeTerminalPaneId={activeTerminalPaneId} onActivatePane={setActiveTerminalPaneId} terminalRestartingId={terminalRestartingId} terminalRestartError={terminalRestartError} terminalRestoreErrors={terminalRestoreErrors} isActive={activeWorkspaceTabId === tab.id} onConnectionChange={handleTerminalConnection} onSetSplit={setTerminalSplit} onActivateTab={activateWorkspaceTab} onRestart={(target) => void restartUnavailableTerminal(target)} onTerminalChange={handleTerminalChanged} onTerminalStarted={handleTerminalCreated} onOpenCodexChat={handleOpenCodexChat} onBeginSplitResize={beginTerminalSplitResize} />;
           }} />
         </div>

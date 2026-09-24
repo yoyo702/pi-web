@@ -40,6 +40,9 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 
 - 每个会话一个 `codex app-server` 运行时进程（`server/agents/codex-app-server.cjs`），所有浏览器共用。没有页面在看、也没有进行中的一轮和未决审批时，30 秒后关闭；有进行中的一轮或等待审批时一直保留，一轮结束（或审批回复）后再开始空闲计时。因此在手机上发起一轮后锁屏或关闭标签，这一轮会继续跑完，在电脑上打开同一会话可继续看到。
 - 运行时每次启动有新的 `runtimeId`；SSE 事件 id 为 `runtimeId:seq`。运行时重启后，浏览器按新运行时从头重放事件，不会因序号重置而漏事件。运行时退出时推送 `codex/closed`，聊天显示 “Reconnecting”；事件流在运行时就绪（`thread/resume` 成功）后才建立；新运行时无法恢复会话（如 `writer_conflict`）时直接返回 JSON 错误，浏览器不再反复重连，显示 “Codex chat disconnected.” 与 “Reconnect” 按钮，点击后显示具体原因。
+- 新建聊天：Agents 面板 Codex 行的聊天按钮（“New Codex chat”）在当前项目打开空白聊天标签（标题 “Codex Chat · New chat”），此时不启动 Codex、不建会话。第一条消息调用 `POST /api/codex/chat`（`{cwd, text, images, model, effort, serviceTier, approvalPolicy}`，目录须是已授权的项目，否则 403），服务端启动运行时、`thread/start` 建会话并发出这条消息，返回 201 `{threadId, turn}`；之后与打开已有会话相同。标签名改为第一条消息（前 60 字），默认审批策略 `untrusted`。建会话或第一轮失败时不留运行时，消息留在输入框，重试会新建会话。建会话期间切换项目，切回后标签已指向新会话。第一条消息之前不能用 `/compact`、`/review`、Fork。
+  - 新会话刚建好时 Codex 列表可能还没有它：只要它的运行时在，打开聊天仍可用（历史为空）。
+  - 之后从 Agents 面板再次打开同一会话，复用这个标签，不另开；会话还没有名字时保留标签原名（第一条消息），不改回 “Codex Chat”。
 - 只发图片（无文字）也可以发送。
 - Codex 请求的处理（服务端 `server/agents/codex-requests.cjs` 按类型校验回答）：
   - 命令审批：Allow once / Allow for session / Deny / Deny and stop；Codex 建议了命令规则时多一个 “Always allow `<命令前缀>`”，建议了网络规则时按主机显示 “Always allow/block <host>”（规则内容取自请求，浏览器只传选择）。

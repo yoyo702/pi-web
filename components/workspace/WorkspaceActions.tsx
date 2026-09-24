@@ -24,6 +24,8 @@ export interface WorkspaceActions {
   toggleGitReview(): void;
   openTerminal(terminal: TerminalSession, label?: string): void;
   openCodexChat(target: CodexChatTarget): void;
+  /** Opens an empty Codex chat in `cwd`; its first message creates the session. */
+  newCodexChat(cwd: string): void;
   closeTab(tabId: string): void;
   revealInExplorer(filePath: string): void;
 }

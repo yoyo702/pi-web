@@ -37,12 +37,14 @@ interface Props {
   onExpandedChange?: (expanded: boolean) => void;
   onNewAgent?: (provider: TerminalProvider) => void;
   onOpenCodexSession?: (target: CodexSessionTarget) => void;
+  /** Opens an empty Codex chat in the folder. */
+  onNewCodexChat?: (cwd: string) => void;
   onOpenTerminal?: (terminal: TerminalSession, label?: string) => void;
   onTerminalRemoved?: (terminalId: string) => void;
   onCodexSessionChanged?: (change: { id: string; action: "rename" | "archive" | "unarchive" | "delete"; name?: string }) => void;
 }
 
-export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAgent, onOpenCodexSession, onOpenTerminal, onTerminalRemoved, onCodexSessionChanged }: Props) {
+export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAgent, onOpenCodexSession, onNewCodexChat, onOpenTerminal, onTerminalRemoved, onCodexSessionChanged }: Props) {
   const [open, setOpen] = useState(true);
   const [shellOpen, setShellOpen] = useState(false);
   const [codexOpen, setCodexOpen] = useState(false);
@@ -530,7 +532,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
         {manualShellTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "shell", count: shellTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
         {manualShellTerminals.length === 0 && projectScripts.length === 0 ? <InlineMessage>No workspace terminals</InlineMessage> : manualShellTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
       </div>}
-      <ProviderRow provider="codex" label="Codex" badge="C" badgeColor="var(--accent)" open={codexOpen} count={codexTerminals.length + codexHistory.length} running={codexTerminals.filter((terminal) => terminal.state === "running").length + sessions.filter((session) => session.runtime?.state === "running" || session.runtime?.state === "approval").length} onToggle={() => setCodexOpen((value) => !value)} onNewAgent={onNewAgent} />
+      <ProviderRow provider="codex" label="Codex" badge="C" badgeColor="var(--accent)" open={codexOpen} count={codexTerminals.length + codexHistory.length} running={codexTerminals.filter((terminal) => terminal.state === "running").length + sessions.filter((session) => session.runtime?.state === "running" || session.runtime?.state === "approval").length} onToggle={() => setCodexOpen((value) => !value)} onNewAgent={onNewAgent} onNewChat={onNewCodexChat ? () => onNewCodexChat(cwd) : undefined} />
       {codexOpen && <div style={sessionListStyle}>
         <div style={sessionToolsStyle}>
           <label style={searchStyle}>
@@ -792,7 +794,7 @@ function TerminalRow({ terminal, preferredLabel, onOpen, onStop, onRemove }: { t
   </div>;
 }
 
-function ProviderRow({ provider, label, badge, badgeColor, open, count, running, onToggle, onNewAgent }: { provider: TerminalProvider; label: string; badge: string; badgeColor: string; open: boolean; count: number; running: number; onToggle: () => void; onNewAgent?: (provider: TerminalProvider) => void }) {
+function ProviderRow({ provider, label, badge, badgeColor, open, count, running, onToggle, onNewAgent, onNewChat }: { provider: TerminalProvider; label: string; badge: string; badgeColor: string; open: boolean; count: number; running: number; onToggle: () => void; onNewAgent?: (provider: TerminalProvider) => void; onNewChat?: () => void }) {
   return <div style={providerStyle}>
     <button type="button" onClick={onToggle} aria-expanded={open} style={providerToggleStyle}>
       <Chevron open={open} />
@@ -801,8 +803,13 @@ function ProviderRow({ provider, label, badge, badgeColor, open, count, running,
       {running > 0 && <span title={`${running} running`} aria-label={`${running} running`} style={providerRunningStyle}><StatusDot state="running" />{running}</span>}
       <span title={`${count} ${label} items`} style={providerCountStyle}>{count}</span>
     </button>
+    {onNewChat && <button type="button" onClick={onNewChat} title={`New ${label} chat`} aria-label={`New ${label} chat`} style={addStyle}><ChatIcon /></button>}
     {onNewAgent && <button type="button" onClick={() => onNewAgent(provider)} title={`New ${label} terminal`} aria-label={`New ${label} terminal`} style={addStyle}>＋</button>}
   </div>;
+}
+
+function ChatIcon() {
+  return <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round"><path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" /></svg>;
 }
 
 function Chevron({ open }: { open: boolean }) {

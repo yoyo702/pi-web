@@ -6,7 +6,7 @@
 // ({ threads: [...] }, each with an `archived` flag, and `writer: true` when
 // another client holds it); every request is appended to FAKE_CODEX_LOG.
 // FAKE_CODEX_INIT_ERROR makes `initialize` fail.
-// Runtime: `turn/start` starts a turn that runs until `turn/interrupt`; a
+// Runtime: `thread/start` adds a thread to the state file (reading its turns fails until its first `turn/start`, as in Codex); `turn/start` starts a turn that runs until `turn/interrupt`; a
 // prompt containing "approve" also asks for an approval, "question" asks the
 // user a question, and answering either ends the turn. "tool call" sends an
 // `item/tool/call` request (which pi-web refuses). `turn/steer` checks
@@ -24,7 +24,7 @@ const fail = (id, message, data) => process.stdout.write(`${JSON.stringify({ jso
 const notify = (method, params, id) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...(id == null ? {} : { id }), method, params })}\n`);
 let activeTurn = null;
 let reviewTurn = false;
-const publicThread = (thread) => { const result = { ...thread, turns: [] }; delete result.archived; return result; };
+const publicThread = (thread) => { const result = { ...thread, turns: [] }; delete result.archived; delete result.unmaterialized; return result; };
 
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const { id, method, params = {}, result, error } = JSON.parse(line);
@@ -52,11 +52,17 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       const end = start + params.limit;
       return reply(id, { data: matching.slice(start, end).map(publicThread), nextCursor: end < matching.length ? String(end) : null });
     }
+    case "thread/start": {
+      const created = { id: require("node:crypto").randomUUID(), cwd: params.cwd, name: null, preview: "", updatedAt: Math.floor(Date.now() / 1000), archived: false, unmaterialized: true, path: `/fake/sessions/${Date.now()}.jsonl` };
+      state.threads.push(created); save(state);
+      return reply(id, { thread: publicThread(created) });
+    }
     case "thread/resume":
       if (!thread) return fail(id, `no rollout found for thread id ${params.threadId}`);
       if (thread.writer) return fail(id, `thread ${params.threadId} already has an active writer`);
       return reply(id, { thread: publicThread(thread) });
     case "turn/start": {
+      if (thread?.unmaterialized) { delete thread.unmaterialized; save(state); }
       activeTurn = `turn-${Date.now()}`;
       reply(id, { turn: { id: activeTurn } });
       notify("turn/started", { turn: { id: activeTurn } });
@@ -77,7 +83,9 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       notify("turn/completed", { turn: { id: params.turnId, status: "interrupted", error: null } });
       activeTurn = null;
       return undefined;
-    case "thread/read": return thread ? reply(id, { thread: publicThread(thread) }) : fail(id, `thread not loaded: ${params.threadId}`);
+    case "thread/read":
+      if (thread?.unmaterialized && params.includeTurns) return fail(id, `thread ${thread.id} is not materialized yet; includeTurns is unavailable before first user message`);
+      return thread ? reply(id, { thread: publicThread(thread) }) : fail(id, `thread not loaded: ${params.threadId}`);
     case "thread/name/set":
       if (!thread) return fail(id, `no rollout found for thread id ${params.threadId}`);
       thread.name = params.name; save(state); return reply(id, {});

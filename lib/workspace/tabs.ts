@@ -38,6 +38,8 @@ export interface CodexChatTab extends TabBase {
   serviceTier?: string;
   approvalPolicy?: CodexApprovalPolicy;
   sessionName?: string;
+  /** A chat whose thread is created by its first message; `sourceSessionId` is set once it exists. */
+  newChat?: boolean;
 }
 
 export interface FileTab extends TabBase { kind: "file"; filePath: string; sourceSessionId?: string | null }

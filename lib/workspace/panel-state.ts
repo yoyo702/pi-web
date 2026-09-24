@@ -53,6 +53,13 @@ export function centerReducer(state: CenterState, action: CenterAction): CenterS
     case "hydrate":
       return mount({ ...action.state, mountedIds: [PI_TAB.id] });
     case "open": {
+      // A session chat opened again (e.g. one started here as a new chat) reuses its tab.
+      const opened = action.tab;
+      // A tab with the exact id wins, so two tabs of one session cannot point at each other.
+      const sameSession = opened.kind === "codex-chat" && opened.sourceSessionId && !opened.terminalId && !state.tabs.some((tab) => tab.id === opened.id)
+        ? state.tabs.find((tab) => tab.kind === "codex-chat" && !tab.terminalId && tab.sourceSessionId === opened.sourceSessionId && tab.id !== opened.id)
+        : undefined;
+      if (sameSession) return centerReducer(state, { ...action, tab: { ...opened, id: sameSession.id } });
       const exists = state.tabs.some((tab) => tab.id === action.tab.id);
       const tabs = !exists
         ? [...state.tabs, action.tab]

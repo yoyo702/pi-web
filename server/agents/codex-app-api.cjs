@@ -8,7 +8,7 @@ const terminalManager = require("./terminal-manager.cjs");
 const { readBody } = require("../http-body.cjs");
 
 const MAX_BODY_BYTES = 20 * 1024 * 1024;
-function isPath(pathname) { return pathname === "/api/codex/models" || /^\/api\/codex\/chat\/[0-9a-f-]+(?:\/(?:events|approve|command|interrupt|fork|claim|steer))?$/i.test(pathname); }
+function isPath(pathname) { return pathname === "/api/codex/models" || pathname === "/api/codex/chat" || /^\/api\/codex\/chat\/[0-9a-f-]+(?:\/(?:events|approve|command|interrupt|fork|claim|steer))?$/i.test(pathname); }
 function requestError(message, code = "invalid_request") { return Object.assign(new Error(message), { code }); }
 async function read(req) {
   let text;
@@ -33,7 +33,13 @@ function withoutPath(result) {
   return { ...result, thread };
 }
 async function sessionFor(id) {
-  const session = await catalog.requireSession(id);
+  let session;
+  try { session = await catalog.requireSession(id); } catch (error) {
+    // A chat just created here may not be in Codex's session files yet.
+    const created = error?.code === "not_found" && appServer.listRuntimes().find((runtime) => runtime.threadId === id);
+    if (!created) throw error;
+    return { id, cwd: terminals.authorizedCwd(created.cwd), archived: false, created: true };
+  }
   // Resuming would write to a rollout that archive has moved away (an open
   // chat tab keeps polling after its session is archived elsewhere).
   if (session.archived) throw requestError("This Codex session is archived. Restore it to continue.", "session_archived");
@@ -62,6 +68,21 @@ async function claim(session, terminalsChoice) {
   // A loaded runtime has not seen turns the terminal added; reload it.
   if (stopped && appServer.runtimeForSession(session.id)?.state === "idle") await appServer.stopAndWait(session.id);
 }
+function messageInput(body) {
+  const images = imageInputs(body.images);
+  const text = typeof body.text === "string" ? body.text.trim() : "";
+  if (body.text != null && typeof body.text !== "string") throw requestError("text must be a string");
+  if (!text && !images.length) throw requestError("text or an image is required");
+  if (body.clientMessageId != null && (typeof body.clientMessageId !== "string" || !/^[A-Za-z0-9._:-]{1,120}$/.test(body.clientMessageId))) throw requestError("invalid client message id");
+  return { text, images, clientMessageId: body.clientMessageId || null };
+}
+function turnOptions(body) {
+  if (body.model != null && (typeof body.model !== "string" || !/^[A-Za-z0-9._:/-]+$/.test(body.model))) throw requestError("invalid model");
+  if (body.effort != null && (typeof body.effort !== "string" || !["low", "medium", "high", "xhigh", "max", "ultra"].includes(body.effort))) throw requestError("invalid reasoning effort");
+  if (body.serviceTier != null && (typeof body.serviceTier !== "string" || !/^[A-Za-z0-9._-]+$/.test(body.serviceTier))) throw requestError("invalid service tier");
+  if (body.approvalPolicy != null && !["untrusted", "on-request", "never"].includes(body.approvalPolicy)) throw requestError("invalid approval policy");
+  return { model: body.model || null, effort: body.effort || null, serviceTier: body.serviceTier || null, approvalPolicy: body.approvalPolicy || null };
+}
 function afterSeq(req, url, thread) {
   // Event ids are "<runtimeId>:<seq>"; a different runtime replays from the start.
   const [runtimeId, seq] = String(req.headers["last-event-id"] || url.searchParams.get("after") || "").split(":");
@@ -87,13 +108,26 @@ async function handle(req, res, url) {
       const cwd = terminals.authorizedCwd(url.searchParams.get("cwd"));
       return send(res, 200, { result: await appServer.listModels(cwd) });
     }
+    if (url.pathname === "/api/codex/chat") {
+      // A new chat: Codex starts a thread and its first turn in one request.
+      if (req.method !== "POST") return send(res, 405, { error: "method not allowed" });
+      const body = await read(req);
+      const cwd = terminals.authorizedCwd(body.cwd);
+      const { text, images, clientMessageId } = messageInput(body);
+      const options = turnOptions(body);
+      const thread = await appServer.create({ cwd, model: options.model, serviceTier: options.serviceTier, approvalPolicy: options.approvalPolicy || "untrusted" });
+      let turn;
+      // Without a first turn nobody can find this thread again; a retry starts a new one.
+      try { turn = await appServer.prompt(thread, text, options.model, options.approvalPolicy, images, clientMessageId, options.effort, options.serviceTier); } catch (error) { appServer.stop(thread.threadId); throw error; }
+      return send(res, 201, { threadId: thread.threadId, turn });
+    }
     const [, , , , id, action] = url.pathname.split("/");
     if (!id) return send(res, 404, { error: "not found" });
     const session = await sessionFor(id);
     if (req.method === "GET") {
       if (action && action !== "events") return send(res, 405, { error: "method not allowed" });
       const thread = runtime(session, url);
-      if (!action) return send(res, 200, { thread: withoutPath(await appServer.readThread(thread)), history: (await catalog.getSessionPreview(id)).recentMessages, events: appServer.snapshot(thread) });
+      if (!action) return send(res, 200, { thread: withoutPath(await appServer.readThread(thread)), history: session.created ? [] : (await catalog.getSessionPreview(id)).recentMessages, events: appServer.snapshot(thread) });
       // A runtime that cannot resume (e.g. writer_conflict) answers with a JSON
       // error; an opened stream would end and the browser would retry forever.
       await thread.ready;
@@ -128,25 +162,18 @@ async function handle(req, res, url) {
       return send(res, 204, {});
     }
     if (!action || action === "steer") {
-      const images = imageInputs(body.images);
-      const text = typeof body.text === "string" ? body.text.trim() : "";
-      if (body.text != null && typeof body.text !== "string") throw requestError("text must be a string");
-      if (!text && !images.length) throw requestError("text or an image is required");
-      if (body.clientMessageId != null && (typeof body.clientMessageId !== "string" || !/^[A-Za-z0-9._:-]{1,120}$/.test(body.clientMessageId))) throw requestError("invalid client message id");
+      const { text, images, clientMessageId } = messageInput(body);
       if (action === "steer") {
         // Only a turn this chat is running can take more input; never start a runtime for it.
         if (!appServer.isClaimed(id)) throw requestError("No active turn to add this message to", "no_active_turn");
         await claim(session, "ignore");
         // The runtime may have closed while claiming; do not start a new one for it.
         if (!appServer.isClaimed(id)) throw requestError("No active turn to add this message to", "no_active_turn");
-        return send(res, 202, { turn: await appServer.steer(runtime(session, url), text, images, body.clientMessageId || null) });
+        return send(res, 202, { turn: await appServer.steer(runtime(session, url), text, images, clientMessageId) });
       }
-      if (body.model != null && (typeof body.model !== "string" || !/^[A-Za-z0-9._:/-]+$/.test(body.model))) throw requestError("invalid model");
-      if (body.effort != null && (typeof body.effort !== "string" || !["low", "medium", "high", "xhigh", "max", "ultra"].includes(body.effort))) throw requestError("invalid reasoning effort");
-      if (body.serviceTier != null && (typeof body.serviceTier !== "string" || !/^[A-Za-z0-9._-]+$/.test(body.serviceTier))) throw requestError("invalid service tier");
-      if (body.approvalPolicy != null && !["untrusted", "on-request", "never"].includes(body.approvalPolicy)) throw requestError("invalid approval policy");
+      const options = turnOptions(body);
       await claim(session, body.terminals);
-      return send(res, 202, { turn: await appServer.prompt(runtime(session, url), text, body.model || null, body.approvalPolicy || null, images, body.clientMessageId || null, body.effort || null, body.serviceTier || null) });
+      return send(res, 202, { turn: await appServer.prompt(runtime(session, url), text, options.model, options.approvalPolicy, images, clientMessageId, options.effort, options.serviceTier) });
     }
     return send(res, 405, { error: "method not allowed" });
   } catch (error) {

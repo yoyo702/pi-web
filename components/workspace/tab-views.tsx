@@ -80,26 +80,30 @@ export function TerminalTabView({
   );
 }
 
-/** Codex chat tab body. Renders nothing when neither a live terminal nor a resumable source session exists — the caller falls through to TerminalTabView's unavailable view in that case. */
+/** Codex chat tab body. Renders nothing when neither a live terminal, a resumable source session, nor a new chat exists — the caller falls through to TerminalTabView's unavailable view in that case. */
 export function CodexChatTabView({
   tab,
   terminal,
   activeCwd,
   onStatusChange,
   onConfigurationChange,
+  onCreated,
 }: {
   tab: CodexChatTab;
   terminal: TerminalSession | null;
   activeCwd: string | null;
   onStatusChange: (tabId: string, status: "idle" | "running" | "approval") => void;
   onConfigurationChange: (tabId: string, configuration: { model?: string; reasoningEffort?: string; serviceTier?: string; approvalPolicy?: CodexApprovalPolicy }) => void;
+  onCreated?: (tabId: string, cwd: string, threadId: string, title: string) => void;
 }) {
   const actions = useWorkspaceActions();
-  if (!terminal && !tab.sourceSessionId) return null;
+  if (!terminal && !tab.sourceSessionId && !tab.newChat) return null;
   return (
     <CodexChatPanel
       terminal={terminal ? { ...terminal, model: tab.model ?? terminal.model, reasoningEffort: tab.reasoningEffort, serviceTier: tab.serviceTier, approvalPolicy: tab.approvalPolicy, sessionName: tab.sessionName } : { cwd: tab.cwd ?? activeCwd ?? "", model: tab.model, sourceSessionId: tab.sourceSessionId, reasoningEffort: tab.reasoningEffort, serviceTier: tab.serviceTier, approvalPolicy: tab.approvalPolicy, sessionName: tab.sessionName }}
       workspaceTabId={tab.id}
+      newChat={!terminal && tab.newChat}
+      onCreated={onCreated}
       onStatusChange={onStatusChange}
       onConfigurationChange={onConfigurationChange}
       onOpenFile={(filePath) => {

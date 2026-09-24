@@ -1069,10 +1069,8 @@ test("pages Codex sessions and shows fork source, model and busy errors", async 
   await expect(page.getByText("Parent work", { exact: true })).toBeVisible();
 });
 
-test("shows Codex chat retries, turn failures, the terminal conflict prompt, question cards and steering", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
-  const id = "33333333-3333-3333-3333-333333333333";
-  // The chat's event stream is driven from the test through window.__codexStreams.
+// Codex chat event streams are driven from the test through window.__codexStreams.
+async function fakeCodexStreams(page: Page) {
   await page.addInitScript(() => {
     const RealEventSource = window.EventSource;
     class FakeEventSource extends EventTarget {
@@ -1095,6 +1093,18 @@ test("shows Codex chat retries, turn failures, the terminal conflict prompt, que
     } as unknown as typeof EventSource;
     Object.assign(window.EventSource, { CONNECTING: 0, OPEN: 1, CLOSED: 2 });
   });
+}
+async function emitCodexEvent(page: Page, event: Record<string, unknown>) {
+  await page.evaluate((data) => {
+    const streams = (window as unknown as { __codexStreams: Array<{ emit(data: unknown): void }> }).__codexStreams;
+    streams.at(-1)?.emit(data);
+  }, event);
+}
+
+test("shows Codex chat retries, turn failures, the terminal conflict prompt, question cards and steering", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const id = "33333333-3333-3333-3333-333333333333";
+  await fakeCodexStreams(page);
   await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
     id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
     created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
@@ -1148,10 +1158,7 @@ test("shows Codex chat retries, turn failures, the terminal conflict prompt, que
   const composer = chat.getByPlaceholder("Message… Type / for commands", { exact: true });
   await expect(composer).toBeVisible();
 
-  const emit = (event: Record<string, unknown>) => page.evaluate((data) => {
-    const streams = (window as unknown as { __codexStreams: Array<{ emit(data: unknown): void }> }).__codexStreams;
-    streams.at(-1)?.emit(data);
-  }, event);
+  const emit = (event: Record<string, unknown>) => emitCodexEvent(page, event);
   await expect.poll(() => page.evaluate(() => (window as unknown as { __codexStreams?: unknown[] }).__codexStreams?.length ?? 0)).toBeGreaterThan(0);
   await emit({ method: "turn/started", params: { turn: { id: "turn-1" } }, piSeq: 1, piRuntime: "run1" });
   await emit({ method: "error", params: { error: { message: "stream disconnected" }, willRetry: true }, piSeq: 2, piRuntime: "run1" });
@@ -1199,6 +1206,67 @@ test("shows Codex chat retries, turn failures, the terminal conflict prompt, que
   await emit({ method: "turn/completed", params: { turn: { id: "turn-2", status: "completed", error: null } }, piSeq: 7, piRuntime: "run1" });
   await expect.poll(() => sent.length).toBe(3);
   expect(sent[2]).toMatchObject({ text: "then summarize", terminals: "ignore" });
+});
+
+test("starts a new Codex chat whose first message creates the session", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const id = "44444444-4444-4444-4444-444444444444";
+  await fakeCodexStreams(page);
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
+    id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
+    created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
+  }], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
+  await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: { cwd: "/tmp/pi-web-e2e", terminals: [], stats: null } }));
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals: [], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
+  await page.route("**/api/project-scripts?*", async (route) => route.fulfill({ json: { scripts: [], runner: "npm" } }));
+  await page.route("**/api/codex/models?*", async (route) => route.fulfill({ json: { result: { data: [] } } }));
+  let listed = false;
+  await page.route("**/api/codex/sessions?*", async (route) => route.fulfill({ json: { sessions: listed ? [{
+    id, name: "", cwd: "/tmp/pi-web-e2e", updatedAt: "2026-08-03T00:00:00.000Z", lastUserMessage: "fix the flaky test", archived: false, runtime: null,
+  }] : [], nextCursor: null } }));
+  const created: Array<Record<string, unknown>> = [];
+  await page.route("**/api/codex/chat", async (route) => {
+    created.push(route.request().postDataJSON() as Record<string, unknown>);
+    listed = true;
+    return route.fulfill({ status: 201, json: { threadId: id, turn: { turn: { id: "turn-1" } } } });
+  });
+  let loads = 0;
+  await page.route(`**/api/codex/chat/${id}*`, async (route) => { loads += 1; return route.fulfill({ json: { thread: { thread: { id, turns: [] } }, history: [], events: [] } }); });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.getByRole("button", { name: "New Codex chat" }).click();
+  const chat = page.locator("section").filter({ hasText: "Codex Chat · New chat" });
+  await expect(chat).toBeVisible();
+  // Nothing exists yet: no history request, no event stream.
+  expect(loads).toBe(0);
+  const composer = chat.getByPlaceholder("Message… Type / for commands", { exact: true });
+  await composer.fill("fix the flaky test");
+  await composer.press("Enter");
+  await expect.poll(() => created.length).toBe(1);
+  expect(created[0]).toMatchObject({ cwd: "/tmp/pi-web-e2e", text: "fix the flaky test", approvalPolicy: "untrusted" });
+  await expect.poll(() => page.evaluate((threadId) => (window as unknown as { __codexStreams?: { url: string }[] }).__codexStreams?.some((stream) => stream.url.includes(threadId)) ?? false, id)).toBe(true);
+  await expect(page.getByText("fix the flaky test").first()).toBeVisible();
+  const tab = page.getByRole("tab", { name: /fix the flaky test/ });
+  await expect(tab).toHaveCount(1);
+
+  // After a reload the tab still belongs to the session, and opening the session from the list goes back to it.
+  await page.reload();
+  const codexGroup = page.locator("button[aria-expanded]").filter({ hasText: "Codex" }).last();
+  if (await codexGroup.getAttribute("aria-expanded") !== "true") await codexGroup.click();
+  const manage = page.getByRole("button", { name: "Manage", exact: true });
+  await manage.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(300);
+  await manage.click();
+  await page.getByRole("menuitem", { name: "Open in Chat…" }).click();
+  await page.getByRole("button", { name: "Resume in Chat" }).click();
+  await expect(page.getByRole("tab", { name: /fix the flaky test/ })).toHaveCount(1);
+  await expect(page.getByRole("tab", { name: /Codex Chat/ })).toHaveCount(0);
 });
 
 test("searches and manages files from Explorer", async ({ page }, testInfo) => {

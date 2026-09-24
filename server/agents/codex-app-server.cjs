@@ -111,24 +111,49 @@ function failState(state, error) {
   state.pending.clear();
   for (const listener of state.listeners) listener({ method: "codex/closed", params: { error: failure.message } });
 }
-function start({ threadId, cwd, model, serviceTier, approvalPolicy = "untrusted" }) {
-  if (sessions.has(threadId)) { const existing = sessions.get(threadId); if (existing.loaded) { cancelIdleShutdown(existing); scheduleIdleShutdown(existing); } return existing; }
-  if (removing.has(threadId)) throw Object.assign(new Error("This Codex session is being archived or deleted"), { code: "session_busy" });
+// The process for one thread; the caller registers it in `sessions` once it knows the thread id.
+function spawnRuntime(threadId, cwd) {
   const child = spawn(runtimeOptions.command, runtimeOptions.args, { cwd, env: runtimeOptions.env, stdio: ["pipe", "pipe", "pipe"] });
   // Event sequence numbers restart with each process; runtimeId lets a
   // reconnecting client tell a new process from the one it last saw.
   const state = { child, threadId, cwd, runtimeId: crypto.randomUUID().slice(0, 8), nextId: 1, nextEventSeq: 1, activeTurnId: null, pending: new Map(), incoming: new Map(), listeners: new Set(), buffer: "", stderrTail: "", failure: null, events: [], idleTimer: null, loaded: false };
-  sessions.set(threadId, state); workspaceStatus.notify("codex_runtimes"); child.stdout.setEncoding("utf8");
+  child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => { state.buffer += chunk; let index; while ((index = state.buffer.indexOf("\n")) >= 0) { const line = state.buffer.slice(0, index); state.buffer = state.buffer.slice(index + 1); try { handleProtocolMessage(state, JSON.parse(line)); } catch {} } });
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => { state.stderrTail = `${state.stderrTail}${chunk}`.slice(-16_384); });
   child.on("error", (error) => failState(state, new Error(`Unable to start Codex app-server: ${error.message}`)));
   child.on("exit", () => failState(state, new Error("Codex app-server exited")));
   state.request = (method, params) => new Promise((resolve, reject) => { if (state.failure) { reject(state.failure); return; } const id = state.nextId++; const timer = setTimeout(() => { if (state.pending.delete(id)) reject(Object.assign(new Error(`Codex did not answer ${method} in time`), { code: "runtime_timeout" })); }, 60_000); state.pending.set(id, { resolve, reject, timer }); state.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`, (error) => { if (error) failState(state, error); }); });
-  state.ready = state.request("initialize", { clientInfo: { name: "pi-web", version: "0.8.1" }, capabilities: {} }).then(() => state.request("thread/resume", { threadId, cwd, model: model || null, serviceTier: serviceTier || null, approvalPolicy }));
+  return state;
+}
+const INITIALIZE = { clientInfo: { name: "pi-web", version: "0.8.1" }, capabilities: {} };
+function start({ threadId, cwd, model, serviceTier, approvalPolicy = "untrusted" }) {
+  if (sessions.has(threadId)) { const existing = sessions.get(threadId); if (existing.loaded) { cancelIdleShutdown(existing); scheduleIdleShutdown(existing); } return existing; }
+  if (removing.has(threadId)) throw Object.assign(new Error("This Codex session is being archived or deleted"), { code: "session_busy" });
+  const state = spawnRuntime(threadId, cwd);
+  sessions.set(threadId, state); workspaceStatus.notify("codex_runtimes");
+  state.ready = state.request("initialize", INITIALIZE).then(() => state.request("thread/resume", { threadId, cwd, model: model || null, serviceTier: serviceTier || null, approvalPolicy }));
   // A runtime that never resumed is useless; drop it so the next request retries.
   // The idle clock starts once the thread is loaded, not while it is loading.
   state.ready.then(() => { state.loaded = true; if (!state.idleTimer) scheduleIdleShutdown(state); }, () => { if (sessions.get(threadId) === state) stop(threadId); });
+  return state;
+}
+/** Starts a new thread in `cwd`; its runtime is registered under the id Codex gives it. */
+async function create({ cwd, model, serviceTier, approvalPolicy = "untrusted" }) {
+  const state = spawnRuntime(null, cwd);
+  try {
+    await state.request("initialize", INITIALIZE);
+    const result = await state.request("thread/start", { cwd, model: model || null, serviceTier: serviceTier || null, approvalPolicy });
+    if (typeof result?.thread?.id !== "string") throw Object.assign(new Error("Codex did not return a thread id"), { code: "runtime_unavailable" });
+    state.threadId = result.thread.id;
+  } catch (error) {
+    try { state.child.kill(); } catch { /* process already exited */ }
+    throw error;
+  }
+  state.ready = Promise.resolve();
+  state.loaded = true;
+  sessions.set(state.threadId, state); workspaceStatus.notify("codex_runtimes");
+  scheduleIdleShutdown(state);
   return state;
 }
 async function prompt(state, text, model = null, approvalPolicy = null, images = [], clientUserMessageId = null, effort = null, serviceTier = null) { await state.ready; const result = await state.request("turn/start", { threadId: state.threadId, cwd: state.cwd, input: [...(text ? [{ type: "text", text }] : []), ...images.map((url) => ({ type: "image", url }))], clientUserMessageId, approvalPolicy, model, effort, serviceTier, summary: "auto" }); state.activeTurnId = result?.turn?.id || result?.id || state.activeTurnId; if (state.activeTurnId) cancelIdleShutdown(state); workspaceStatus.notify("codex_runtimes"); return result; }
@@ -145,7 +170,15 @@ async function steer(state, text, images = [], clientUserMessageId = null) {
     throw error;
   }
 }
-async function readThread(state) { await state.ready; return state.request("thread/read", { threadId: state.threadId, includeTurns: true }); }
+// A thread just started here has no turns on disk until Codex writes the first
+// message; the event replay has the running turn meanwhile.
+async function readThread(state) {
+  await state.ready;
+  try { return await state.request("thread/read", { threadId: state.threadId, includeTurns: true }); } catch (error) {
+    if (!/not materialized/i.test(error?.message ?? "")) throw error;
+    return state.request("thread/read", { threadId: state.threadId, includeTurns: false });
+  }
+}
 async function command(state, name) { await state.ready; if (name === "compact") return state.request("thread/compact/start", { threadId: state.threadId }); if (name === "review") return state.request("review/start", { threadId: state.threadId, target: { type: "uncommittedChanges" }, delivery: "inline" }); if (name === "models") return state.request("model/list", { cursor: null, includeHidden: false, limit: 100 }); throw Object.assign(new Error(`Unsupported Codex command: /${name}`), { code: "invalid_request" }); }
 // `answer` is the browser's reply; codex-requests turns it into the protocol result.
 function respond(state, requestId, answer) {
@@ -240,6 +273,6 @@ async function listModels(cwd) {
   modelCatalogCache.set(cwd, { promise, expiresAt: 0 });
   return promise;
 }
-module.exports = { configure, withRemovalLock, isRemoving, start, stop, stopAndWait, prompt, steer, readThread, command, respond, fork, interrupt, subscribe, isClaimed, isAttached, snapshot, runtimeForSession, listRuntimes, listModels, handleProtocolMessage, failState };
+module.exports = { configure, withRemovalLock, isRemoving, start, create, stop, stopAndWait, prompt, steer, readThread, command, respond, fork, interrupt, subscribe, isClaimed, isAttached, snapshot, runtimeForSession, listRuntimes, listModels, handleProtocolMessage, failState };
 
 workspaceStatus.registerProvider("codex_runtimes", () => ({ runtimes: listRuntimes() }));

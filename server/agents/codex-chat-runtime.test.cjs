@@ -105,6 +105,31 @@ test("steering adds input to the running turn and fails once it has ended", asyn
   await assert.rejects(appServer.steer(runtime, "late"), (error) => error.code === "no_active_turn");
 });
 
+test("a new chat starts a thread in the folder and runs under the id Codex gives it", async (t) => {
+  const { dir, methods } = useFakeRuntime(t);
+  const runtime = await appServer.create({ cwd: dir, model: "gpt-test", approvalPolicy: "on-request" });
+  t.after(() => appServer.stopAndWait(runtime.threadId));
+  assert.notEqual(runtime.threadId, ID);
+  assert.equal(appServer.isClaimed(runtime.threadId), true);
+  assert.deepEqual(methods().find((entry) => entry.method === "thread/start").params, { cwd: dir, model: "gpt-test", serviceTier: null, approvalPolicy: "on-request" });
+  // Before its first message Codex has no turns to read; the thread itself is still returned.
+  assert.equal((await appServer.readThread(runtime)).thread.id, runtime.threadId);
+  const { turn } = await appServer.prompt(runtime, "hello");
+  assert.equal((await appServer.readThread(runtime)).thread.id, runtime.threadId);
+  assert.equal(methods().filter((entry) => entry.method === "thread/read").at(-1).params.includeTurns, true);
+  assert.equal(methods().find((entry) => entry.method === "turn/start").params.threadId, runtime.threadId);
+  assert.equal(appServer.runtimeForSession(runtime.threadId).state, "running");
+  await appServer.interrupt(runtime);
+  assert.ok(turn.id);
+});
+
+test("a new chat that Codex cannot start leaves no runtime behind", async (t) => {
+  const { dir } = useFakeRuntime(t);
+  appServer.configure({ command: process.execPath, args: [FAKE_SERVER], env: { ...process.env, FAKE_CODEX_STATE: path.join(dir, "state.json"), FAKE_CODEX_INIT_ERROR: "1" }, idleMs: IDLE_MS });
+  await assert.rejects(appServer.create({ cwd: dir }), /bad config/);
+  assert.deepEqual(appServer.listRuntimes(), []);
+});
+
 test("a turn Codex will not steer is reported as no_active_turn", async (t) => {
   const { dir } = useFakeRuntime(t);
   const runtime = appServer.start({ threadId: ID, cwd: dir });
@@ -235,6 +260,45 @@ test("steering needs a turn this chat is running and never starts a runtime", as
   assert.equal(accepted.status, 202);
   assert.deepEqual(accepted.body, { turn: { turnId: "turn-1" } });
   assert.deepEqual(calls.at(-1), ["steer", "more", "m1"]);
+});
+
+test("a new chat is created in an authorized folder with its first message", async (t) => {
+  const calls = setupApi(t);
+  const runtime = { threadId: "22222222-2222-2222-2222-222222222222" };
+  stub(t, terminalApi, "authorizedCwd", (cwd) => { if (cwd !== "/workspace") throw Object.assign(new Error("no"), { code: "forbidden_cwd" }); return cwd; });
+  stub(t, appServer, "create", async (options) => { calls.push(["create", options]); return runtime; });
+  const created = await request("POST", "/api/codex/chat", { cwd: "/workspace", text: "hello", model: "gpt-test", effort: "high" });
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.body, { threadId: runtime.threadId, turn: { turn: { id: "turn-1" } } });
+  assert.deepEqual(calls, [["create", { cwd: "/workspace", model: "gpt-test", serviceTier: null, approvalPolicy: "untrusted" }], ["prompt", "hello", []]]);
+  assert.equal((await request("POST", "/api/codex/chat", { cwd: "/elsewhere", text: "hello" })).status, 403);
+  assert.equal((await request("POST", "/api/codex/chat", { cwd: "/workspace", text: " " })).status, 400);
+  assert.equal((await request("GET", "/api/codex/chat")).status, 405);
+  assert.equal(calls.length, 2);
+});
+
+test("a new chat whose first message fails stops the thread's runtime", async (t) => {
+  setupApi(t);
+  const runtime = { threadId: "22222222-2222-2222-2222-222222222222" };
+  const stopped = [];
+  stub(t, appServer, "create", async () => runtime);
+  stub(t, appServer, "prompt", async () => { throw Object.assign(new Error("model not supported"), { code: "invalid_request" }); });
+  stub(t, appServer, "stop", (threadId) => stopped.push(threadId));
+  assert.equal((await request("POST", "/api/codex/chat", { cwd: "/workspace", text: "hello" })).status, 400);
+  assert.deepEqual(stopped, [runtime.threadId]);
+});
+
+test("a chat just created here opens before Codex lists it", async (t) => {
+  setupApi(t);
+  stub(t, catalog, "requireSession", async () => { throw Object.assign(new Error("gone"), { code: "not_found" }); });
+  stub(t, catalog, "getSessionPreview", async () => { throw new Error("must not read files for a new chat"); });
+  let runtimes = [{ threadId: ID, cwd: "/workspace", state: "running" }];
+  stub(t, appServer, "listRuntimes", () => runtimes);
+  const response = await request("GET", `/api/codex/chat/${ID}`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.history, []);
+  runtimes = [];
+  assert.equal((await request("GET", `/api/codex/chat/${ID}`)).status, 404);
 });
 
 test("an answer is passed through for the request type to validate", async (t) => {

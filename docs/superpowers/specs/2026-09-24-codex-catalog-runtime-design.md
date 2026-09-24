@@ -1,7 +1,7 @@
 # Codex 会话目录与运行时修复设计
 
 日期：2026-09-24
-状态：第 1、2、3 批已实施
+状态：第 1–4 批已实施
 
 ## 背景
 
@@ -58,9 +58,16 @@
    - 其他请求（`item/tool/call`、ChatGPT token 刷新、attestation、旧版 `applyPatchApproval`/`execCommandApproval`）立即回 JSON-RPC 错误（-32601），聊天显示“Codex asked for …, which Codex Chat does not support; it was declined.”，这一轮不会一直等待。
 2. 运行中插话：Codex 在跑时，按 Enter 或“Steer”调用 `POST /api/codex/chat/:id/steer`（app-server `turn/steer`，带 `expectedTurnId`），消息加入当前这一轮；“Queue”按钮排到下一轮。斜杠命令在运行中总是排队。这一轮已结束或不能插话（如 review、compact）时返回 409 `no_active_turn`，前端自动改为排队，这一轮结束后发送。判断依据：JSON-RPC `error.data` 里的 `activeTurnNotSteerable`（`protocolError` 保留为 `rpcData`），或错误文字 “no active turn” / “expected active turn id”。插话只作用于本聊天已在运行的一轮，不会启动运行时（接管后再检查一次运行时仍在）。插话请求失败时，消息放回输入框，排在期间新输入内容的前面。
 
+第 4 批（新建 Codex 聊天）：
+1. Agents 面板 Codex 行增加 “New Codex chat” 按钮，打开 `newChat: true` 的聊天标签（id `codex-chat:new-<随机 id>`，无 `sourceSessionId`）。不预先建会话，避免产生空会话。
+2. 第一条消息 `POST /api/codex/chat`：`authorizedCwd(body.cwd)` 校验目录（未授权 403），与发送消息相同的输入校验（400），只接受 POST（405）。`codex-app-server.cjs` 的 `create` 启动新运行时，`initialize` 后 `thread/start`（`{cwd, model, serviceTier, approvalPolicy}`），用返回的 `thread.id` 登记运行时，然后按普通发送开始这一轮，返回 201 `{threadId, turn}`。新会话没有其他写入者，不做接管检查。`thread/start` 失败或没有返回 id 时结束子进程、不登记。第一轮开始失败（如模型不支持）时关闭该运行时，避免浏览器不知道 id 的会话留在运行时里；重试会新建会话（Codex 在第一条消息前不写入会话文件）。
+3. `codex-app-api.cjs` 的 `sessionFor`：目录服务报 not_found 但该 id 有运行时（刚建、还没被列出）时，按新会话处理（目录仍经 `authorizedCwd` 校验），GET 返回空历史；运行时关闭后恢复为 404。Codex 在第一条消息写入前对 `thread/read` 的 `includeTurns: true` 报 “not materialized yet”，此时 `readThread` 改为不带历史读取，进行中的一轮由事件重放提供。
+4. 前端：发送成功后面板改用返回的 `threadId`（事件流、草稿键随之切换），`onCreated` 把标签的 `sourceSessionId` 设为新 id、`newChat` 置为 false、标签名改为第一条消息。`centerReducer` 打开聊天时，若已有同一 `sourceSessionId`（非终端）的聊天标签则复用它；从面板打开未命名会话时不覆盖已有标签名。已有两个同会话标签时（例如创建期间从 Activity 打开了它）以 id 完全相同的标签为准，不会互相跳转。建会话期间切换了项目时，`onCreated` 同时改写该项目已保存的标签，切回后不会再建一个会话。
+5. 浏览器生成 id 用 `lib/random-id.ts`：`crypto.randomUUID` 只在安全上下文存在，手机通过 http 访问时退回随机字符串（此前聊天发送在这种情况下会报错）。
+
 ## 非目标
 
-- 新建 Codex 聊天、改动/待办展示、从消息分叉（后续批次）。
+- 改动/待办展示、从消息分叉（后续批次）。
 - 终端内启动 Codex 的方式不变。
 - 会话数据只存于 `~/.codex`，本项目不另存副本。
 
@@ -79,11 +86,13 @@
 ### 前端
 
 - `components/agents/AgentsPanel.tsx`：列表分页（“加载更多”）、显示预览/模型/分叉来源；删除/归档运行中会话时显示服务端错误。
-- `components/agents/codex/CodexChatPanel.tsx`：重试中状态、失败原因、只发图片、写冲突提示与确认；第 3 批：按类型的请求卡片（`CodexRequestCard.tsx`）、插话与排队。
+- `components/agents/codex/CodexChatPanel.tsx`：重试中状态、失败原因、只发图片、写冲突提示与确认；第 3 批：按类型的请求卡片（`CodexRequestCard.tsx`）、插话与排队；第 4 批：`newChat` 模式与 `onCreated`。
+- 第 4 批：`AgentsPanel.tsx` 的 “New Codex chat” 按钮；`AppShell.tsx` 的 `newCodexChat` 动作与标签更新；`lib/workspace/panel-state.ts` 的同会话标签复用。
 
 ## 测试
 
 - 服务端单元测试使用假的 app-server（可执行脚本或注入的传输层）与临时目录，不读写真实 `~/.codex`：分页与去重、过滤、回退到文件扫描、运行中拒绝删除、空闲关闭不打断进行中的一轮、写操作才接管、未知会话终端冲突。
 - e2e：Agents 面板列表分页与“加载更多”、聊天错误与重试状态显示、提问卡片、插话与排队（模拟接口）。
 - 第 3 批单元测试：各请求类型的回复与非法输入、不支持的请求立即回错误且一轮继续、插话成功与一轮结束后返回 `no_active_turn`。
+- 第 4 批：单元测试覆盖 `thread/start` 参数与登记、建会话失败不留运行时、新建接口的 201/403/400/405、未列出的新会话可打开且运行时关闭后 404、同会话标签复用；e2e 覆盖新建聊天、第一条消息建会话、重新加载后从面板打开复用同一标签。
 - 手动只读检查：本机列表能列出全部交互会话。

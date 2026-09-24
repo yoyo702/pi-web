@@ -7,6 +7,7 @@ import { isCodexCardRequest, type CodexRequestAnswer, type CodexServerRequest } 
 import { reduceCodexEvent, type CodexConversationItem } from "@/lib/agents/codex-conversation";
 import type { ChatDraftImage } from "@/lib/draft-store";
 import { useWorkspaceStatusSelector } from "@/hooks/useWorkspaceStatus";
+import { randomId } from "@/lib/random-id";
 
 type HistoryMessage = { role: "user" | "assistant"; text: string };
 type ModelOption = { id: string; label: string; provider?: string; defaultReasoningEffort?: string; reasoningEfforts?: { id: string; description?: string }[]; defaultServiceTier?: string; serviceTiers?: { id: string; label: string; description?: string }[] };
@@ -51,7 +52,7 @@ type ThreadRead = {
   thread?: { name?: string; title?: string; model?: string; turns?: { status?: string; items?: AppItem[] }[]; status?: { type?: string; activeFlags?: string[] } };
 };
 
-export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusChange, onConfigurationChange }: { terminal: Pick<TerminalSession, "cwd" | "model" | "sourceSessionId"> & { reasoningEffort?: string; serviceTier?: string; approvalPolicy?: "untrusted" | "on-request" | "never"; sessionName?: string }; workspaceTabId: string; onOpenFile?: (filePath: string) => void; onStatusChange?: (tabId: string, status: "idle" | "running" | "approval") => void; onConfigurationChange?: (tabId: string, configuration: { model?: string; reasoningEffort?: string; serviceTier?: string; approvalPolicy?: "untrusted" | "on-request" | "never" }) => void }) {
+export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCreated, onOpenFile, onStatusChange, onConfigurationChange }: { terminal: Pick<TerminalSession, "cwd" | "model" | "sourceSessionId"> & { reasoningEffort?: string; serviceTier?: string; approvalPolicy?: "untrusted" | "on-request" | "never"; sessionName?: string }; workspaceTabId: string; newChat?: boolean; onCreated?: (tabId: string, cwd: string, threadId: string, title: string) => void; onOpenFile?: (filePath: string) => void; onStatusChange?: (tabId: string, status: "idle" | "running" | "approval") => void; onConfigurationChange?: (tabId: string, configuration: { model?: string; reasoningEffort?: string; serviceTier?: string; approvalPolicy?: "untrusted" | "on-request" | "never" }) => void }) {
   const [items, setItems] = useState<CodexConversationItem[]>([]);
   const [approvals, setApprovals] = useState<CodexServerRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -87,7 +88,11 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
   }, [modelNotice]);
 
   useEffect(() => {
-    if (!threadId) { setError("Structured Chat requires a session started with Resume or Fork."); return; }
+    if (!threadId) {
+      // A new chat has nothing to load; its first message creates the session.
+      if (newChat) { setConnection("connected"); return; }
+      setError("Structured Chat requires a session started with Resume or Fork."); return;
+    }
     let closed = false;
     let source: EventSource | null = null;
     const connect = () => {
@@ -178,7 +183,7 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
       })
       .catch((cause) => { setConnection("failed"); setError(cause instanceof Error ? cause.message : "Unable to load Codex history"); });
     return () => { closed = true; source?.close(); };
-  }, [reloadKey, terminal.approvalPolicy, terminal.model, terminal.serviceTier, terminal.sessionName, threadId]);
+  }, [newChat, reloadKey, terminal.approvalPolicy, terminal.model, terminal.serviceTier, terminal.sessionName, threadId]);
 
   // This thread's pushed runtime state as a primitive, so the panel re-renders
   // (and the reconcile trigger below fires) only when it actually changes.
@@ -241,7 +246,7 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
   }, [pushedRuntimeState]);
 
   useEffect(() => {
-    if (!threadId || modelOptions.length) return;
+    if ((!threadId && !newChat) || modelOptions.length) return;
     void fetch(`/api/codex/models?${new URLSearchParams({ cwd: terminal.cwd })}`, { cache: "no-store" })
       .then(async (response) => {
         const data = await response.json() as { result?: { data?: { id?: string; displayName?: string; provider?: string; defaultReasoningEffort?: string; supportedReasoningEfforts?: { reasoningEffort?: string; description?: string }[]; defaultServiceTier?: string | null; serviceTiers?: { id?: string; name?: string; description?: string }[] }[]; models?: { id?: string; displayName?: string; provider?: string; defaultReasoningEffort?: string; supportedReasoningEfforts?: { reasoningEffort?: string; description?: string }[]; defaultServiceTier?: string | null; serviceTiers?: { id?: string; name?: string; description?: string }[] }[] } };
@@ -249,39 +254,52 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
         const models = data.result?.data ?? data.result?.models ?? [];
         setModelOptions(models.flatMap((model): ModelOption[] => model.id ? [{ id: model.id, label: model.displayName || model.id, provider: model.provider, defaultReasoningEffort: model.defaultReasoningEffort, reasoningEfforts: (model.supportedReasoningEfforts ?? []).flatMap((option) => option.reasoningEffort ? [{ id: option.reasoningEffort, description: option.description }] : []), defaultServiceTier: model.defaultServiceTier ?? undefined, serviceTiers: (model.serviceTiers ?? []).flatMap((option) => option.id ? [{ id: option.id, label: option.name || option.id, description: option.description }] : []) }] : []).sort((a, b) => (a.provider || "").localeCompare(b.provider || "") || a.label.localeCompare(b.label)));
       }).catch(() => { /* keep default model available */ });
-  }, [modelOptions.length, terminal.cwd, threadId]);
+  }, [modelOptions.length, newChat, terminal.cwd, threadId]);
 
   const send = useCallback(async (textOverride?: string, images: ChatDraftImage[] = []): Promise<boolean> => {
     const text = textOverride?.trim() ?? "";
     if ((!text && !images.length) || connection !== "connected") return false;
-    if (!threadId) { setError("Structured Chat requires a resumed Codex session"); return false; }
     if (!images.length && text === "/model") { setModelMenuRequest((request) => request + 1); return true; }
+    if (!threadId && !newChat) { setError("Structured Chat requires a resumed Codex session"); return false; }
+    if (!threadId && !images.length && (text === "/compact" || text === "/review")) { setError(`Send a message before using ${text}.`); return false; }
     setSending(true); setError(null); setRunState("working");
-    const clientMessageId = `pi-web-${crypto.randomUUID()}`;
+    const clientMessageId = `pi-web-${randomId()}`;
+    const optimistic: CodexConversationItem = { id: clientMessageId, kind: "message", role: "user", text: text || `[${images.length} image${images.length === 1 ? "" : "s"}]`, pending: true };
+    const body = { text, clientMessageId, images: images.map((image) => `data:${image.mimeType};base64,${image.data}`), model: chatModel || undefined, effort: reasoningEffort || undefined, serviceTier: serviceTier || undefined, approvalPolicy };
     try {
+      if (!threadId) {
+        // The first message of a new chat creates the session; the panel then loads it like any other.
+        const response = await fetch("/api/codex/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, cwd: terminal.cwd }) });
+        const data = await response.json() as ApiError & { threadId?: string };
+        if (!response.ok || !data.threadId) throw new Error(data.error ?? "Unable to start a Codex chat");
+        setItems([optimistic]);
+        setThreadId(data.threadId);
+        onCreated?.(workspaceTabId, terminal.cwd, data.threadId, (text || "Codex Chat").replace(/\s+/g, " ").slice(0, 60));
+        return true;
+      }
       if (!images.length && (text === "/compact" || text === "/review")) {
         const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/command`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: text.slice(1), terminals: terminalsChoiceRef.current }) });
         const data = await response.json() as ApiError & { result?: { turn?: { id?: string } } };
         if (data.code === "terminal_conflict") { setConflict({ kind: "unknown", message: data.error ?? "A Codex terminal is running in this folder." }); setRunState("idle"); return false; }
         if (!response.ok) throw new Error(data.error ?? "Codex command failed");
       } else {
-        const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, clientMessageId, images: images.map((image) => `data:${image.mimeType};base64,${image.data}`), model: chatModel || undefined, effort: reasoningEffort || undefined, serviceTier: serviceTier || undefined, approvalPolicy, terminals: terminalsChoiceRef.current }) });
+        const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, terminals: terminalsChoiceRef.current }) });
         const data = await response.json() as ApiError & { turn?: { turn?: { id?: string } } };
         if (data.code === "terminal_conflict") { setConflict({ kind: "unknown", message: data.error ?? "A Codex terminal is running in this folder." }); setRunState("idle"); return false; }
         if (!response.ok) throw new Error(data.error ?? "Unable to send message to Codex");
       }
-      setItems((current) => current.some((item) => item.id === clientMessageId) ? current : [...current, { id: clientMessageId, kind: "message", role: "user", text: text || `[${images.length} image${images.length === 1 ? "" : "s"}]`, pending: true }]);
+      setItems((current) => current.some((item) => item.id === clientMessageId) ? current : [...current, optimistic]);
       return true;
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to send message to Codex"); setRunState("idle"); return false; }
     finally { setSending(false); }
-  }, [approvalPolicy, chatModel, connection, reasoningEffort, serviceTier, threadId]);
+  }, [approvalPolicy, chatModel, connection, newChat, onCreated, reasoningEffort, serviceTier, terminal.cwd, threadId, workspaceTabId]);
 
   // Adds a message to the running turn. "queue": the turn cannot take it (it ended, or is a
   // review/compact); the caller sends it as the next turn instead.
   const steer = useCallback(async (textOverride: string, images: ChatDraftImage[] = []): Promise<"steered" | "queue" | "failed"> => {
     const text = textOverride.trim();
     if (!threadId || connection !== "connected") return "queue";
-    const clientMessageId = `pi-web-${crypto.randomUUID()}`;
+    const clientMessageId = `pi-web-${randomId()}`;
     try {
       const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/steer`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, clientMessageId, images: images.map((image) => `data:${image.mimeType};base64,${image.data}`) }) });
       if (!response.ok) {
@@ -364,7 +382,7 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
 
   return <section style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg)" }}>
     <header style={{ padding: "9px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>
-      <strong style={{ color: "var(--text)" }}>Codex Chat{sessionName ? ` · ${sessionName}` : ""}</strong><span title={terminal.cwd}> · {terminal.cwd}</span>
+      <strong style={{ color: "var(--text)" }}>Codex Chat{sessionName ? ` · ${sessionName}` : !threadId ? " · New chat" : ""}</strong><span title={terminal.cwd}> · {terminal.cwd}</span>
     </header>
     {conflict ? <div role="alert" style={{ padding: "7px 10px", color: "#fbbf24", fontSize: 12 }}>
       {conflict.message}{conflict.kind === "unknown" ? " Stop it before writing here?" : ""}
@@ -378,7 +396,7 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
         running={sending || runState === "working" || runState === "approval"}
         approvals={approvals}
         cwd={terminal.cwd}
-        draftKey={`codex:${threadId ?? terminal.sourceSessionId ?? "new"}`}
+        draftKey={`codex:${threadId ?? terminal.sourceSessionId ?? workspaceTabId}`}
         modelLabel={chatModel || sessionModel || "Model unknown"}
         modelValue={chatModel}
         modelOptions={modelOptions}
@@ -391,7 +409,7 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
         activityLabel={runState === "working" ? currentActivity || "Codex is working…" : undefined}
         noticeLabel={modelNotice || undefined}
         contextLabel={contextUsage ? contextUsage.limit && contextUsage.limit > 0 ? `${Math.min(100, Math.max(0, Math.round(contextUsage.used / contextUsage.limit * 100)))}% context` : `${contextUsage.used.toLocaleString()} tokens` : undefined}
-        forkDisabled={runState !== "idle" || sending}
+        forkDisabled={!threadId || runState !== "idle" || sending}
         onModelToggle={() => undefined}
         onModelChange={(model) => {
           setChatModel(model);
