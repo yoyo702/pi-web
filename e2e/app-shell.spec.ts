@@ -1010,6 +1010,65 @@ test("summarizes collapsed agent groups and keeps completed tasks reachable", as
   await expect(page.getByText("Task: test", { exact: true })).toBeVisible();
 });
 
+test("pages Codex sessions and shows fork source, model and busy errors", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const session = (id: string, name: string, extra: Record<string, unknown> = {}) => ({
+    id, name, cwd: "/tmp/pi-web-e2e", updatedAt: "2026-08-03T00:00:00.000Z", lastUserMessage: `${name} prompt`, archived: false, runtime: null, ...extra,
+  });
+  const parentId = "11111111-1111-1111-1111-111111111111";
+  const cursors: (string | null)[] = [];
+  const deleted = new Set<string>();
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
+    id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
+    created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
+  }], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
+  await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: { cwd: "/tmp/pi-web-e2e", terminals: [], stats: null } }));
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals: [], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
+  await page.route("**/api/project-scripts?*", async (route) => route.fulfill({ json: { scripts: [], runner: "npm" } }));
+  await page.route("**/api/codex/sessions?*", async (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    cursors.push(params.get("cursor"));
+    const second = [session("22222222-2222-2222-2222-222222222222", "Forked work", { forkedFromId: parentId, model: "gpt-5.5" })].filter((item) => !deleted.has(item.id));
+    return params.get("cursor") === "page-2"
+      ? route.fulfill({ json: { sessions: second, nextCursor: null } })
+      : route.fulfill({ json: { sessions: [session(parentId, "Parent work")], nextCursor: "page-2" } });
+  });
+  await page.route("**/api/codex/sessions/*/delete", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/")[4];
+    deleted.add(id);
+    return route.fulfill({ json: { session: session(id, "Forked work") } });
+  });
+  await page.route("**/api/codex/sessions/*/archive", async (route) => route.fulfill({ status: 409, json: { error: "This Codex session is running. Stop the chat turn or terminal first.", code: "session_busy" } }));
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.locator("button[aria-expanded]").filter({ hasText: "Codex" }).last().click();
+  await expect(page.getByText("Parent work", { exact: true })).toBeVisible();
+  expect(cursors.every((cursor) => cursor === null)).toBe(true);
+  await page.getByRole("button", { name: "Load more sessions" }).click();
+  await expect(page.getByText("Forked work", { exact: true })).toBeVisible();
+  await expect(page.getByText("Fork of Parent work · gpt-5.5", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Load more sessions" })).toHaveCount(0);
+  expect(cursors).toContain("page-2");
+
+  await page.getByRole("button", { name: "Manage Parent work" }).click();
+  await page.getByRole("menuitem", { name: "Archive" }).click();
+  await page.getByRole("dialog", { name: "Archive Codex session" }).getByRole("button", { name: "Archive" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "This Codex session is running" })).toBeVisible();
+
+  // A refresh re-reads every loaded page, so a row deleted from page 2 goes away.
+  await page.getByRole("button", { name: "Manage Forked work" }).click();
+  await page.getByRole("menuitem", { name: "Delete…" }).click();
+  await page.getByRole("dialog", { name: "Delete Codex session" }).getByRole("button", { name: "Remove" }).click();
+  await expect(page.getByText("Forked work", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Parent work", { exact: true })).toBeVisible();
+});
+
 test("searches and manages files from Explorer", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.startsWith("mobile"), "desktop Explorer test");
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);

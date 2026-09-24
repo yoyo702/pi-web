@@ -17,6 +17,7 @@ interface CodexSession {
   cwd: string;
   updatedAt: string;
   model?: string;
+  forkedFromId?: string | null;
   lastUserMessage?: string;
   archived?: boolean;
   runtime?: { state: "idle" | "running" | "approval" } | null;
@@ -48,6 +49,8 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [claudeOpen, setClaudeOpen] = useState(false);
   const [treesHydratedCwd, setTreesHydratedCwd] = useState<string | null>(null);
   const [sessions, setSessions] = useState<CodexSession[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [sessionQuery, setSessionQuery] = useState("");
   const [debouncedSessionQuery, setDebouncedSessionQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -148,17 +151,43 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     return () => { cancelled = true; };
   }, [cwd, launchTarget]);
 
+  const fetchSessionPage = useCallback(async (cursor?: string) => {
+    const params = new URLSearchParams({ cwd, archived: String(showArchived), limit: String(SESSION_PAGE_SIZE) });
+    if (debouncedSessionQuery) params.set("q", debouncedSessionQuery);
+    if (cursor) params.set("cursor", cursor);
+    const response = await fetch(`/api/codex/sessions?${params}`, { cache: "no-store" });
+    if (!response.ok) throw new Error("Unable to load sessions");
+    const data = await response.json() as { sessions?: CodexSession[]; nextCursor?: string | null };
+    return { page: data.sessions ?? [], cursor: data.nextCursor ?? null };
+  }, [cwd, debouncedSessionQuery, showArchived]);
+
+  // A refresh re-reads as many rows as are on screen, page by page, so rows
+  // that moved between pages, were archived or were deleted stay correct.
+  // Only a filter change (a non-quiet load) cancels "Load more"; a refresh
+  // waits for it instead of racing it.
+  const filterGenerationRef = useRef(0);
+  const loadedCountRef = useRef(0);
+  const loadingMoreRef = useRef(false);
+
   const loadSessions = useCallback(async (quiet = false) => {
+    if (quiet && loadingMoreRef.current) return;
     const requestId = ++sessionRequestRef.current;
-    if (!quiet) setLoading(true);
+    if (!quiet) { filterGenerationRef.current += 1; setLoading(true); }
     try {
-      const params = new URLSearchParams({ cwd, archived: String(showArchived), limit: "250" });
-      if (debouncedSessionQuery) params.set("q", debouncedSessionQuery);
-      const response = await fetch(`/api/codex/sessions?${params}`, { cache: "no-store" });
-      if (!response.ok) throw new Error("Unable to load sessions");
-      const data = await response.json() as { sessions?: CodexSession[] };
-      if (requestId !== sessionRequestRef.current) return;
-      setSessions(data.sessions ?? []);
+      // A new list is one page; a refresh covers the rows already shown.
+      const target = quiet ? loadedCountRef.current : 0;
+      let loaded: CodexSession[] = [];
+      let cursor: string | null = null;
+      do {
+        const result = await fetchSessionPage(cursor ?? undefined);
+        if (requestId !== sessionRequestRef.current) return;
+        const ids = new Set(loaded.map((session) => session.id));
+        loaded = [...loaded, ...result.page.filter((session) => !ids.has(session.id))];
+        cursor = result.cursor;
+      } while (cursor && loaded.length < target);
+      loadedCountRef.current = loaded.length;
+      setSessions(loaded);
+      setNextCursor(cursor);
       setError(false);
     } catch {
       if (requestId !== sessionRequestRef.current) return;
@@ -166,7 +195,33 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     } finally {
       if (!quiet && requestId === sessionRequestRef.current) setLoading(false);
     }
-  }, [cwd, debouncedSessionQuery, showArchived]);
+  }, [fetchSessionPage]);
+
+  const loadMoreSessions = useCallback(async () => {
+    if (!nextCursor || loadingMoreRef.current) return;
+    const generation = filterGenerationRef.current;
+    loadingMoreRef.current = true;
+    setLoadingMore(true);
+    setActionError(null);
+    try {
+      const { page, cursor } = await fetchSessionPage(nextCursor);
+      if (generation !== filterGenerationRef.current) return;
+      // Supersede a refresh that started before this page arrived.
+      sessionRequestRef.current += 1;
+      setSessions((current) => {
+        const ids = new Set(current.map((session) => session.id));
+        const next = [...current, ...page.filter((session) => !ids.has(session.id))];
+        loadedCountRef.current = next.length;
+        return next;
+      });
+      setNextCursor(cursor);
+    } catch (cause) {
+      if (generation === filterGenerationRef.current) setActionError(cause instanceof Error ? cause.message : "Unable to load more sessions");
+    } finally {
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+    }
+  }, [fetchSessionPage, nextCursor]);
 
   useEffect(() => {
     void loadSessions();
@@ -246,7 +301,10 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const manualShellTerminals = shellTerminals.filter((terminal) => !terminal.title?.startsWith("Task: "));
   const codexTerminals = terminals.filter((terminal) => terminal.provider === "codex");
   const claudeTerminals = terminals.filter((terminal) => terminal.provider === "claude");
-  const liveCodexSessionIds = new Set(codexTerminals.filter((terminal) => terminal.state === "running").map((terminal) => terminal.sourceSessionId).filter(Boolean));
+  // A fork terminal records its parent as the source but writes a new session,
+  // so only resumed sessions are hidden behind their terminal row.
+  const liveCodexSessionIds = new Set(codexTerminals.filter((terminal) => terminal.state === "running" && terminal.launchMode === "resume").map((terminal) => terminal.sourceSessionId).filter(Boolean));
+  const sessionNames = new Map(sessions.map((session) => [session.id, session.name]));
   const codexHistory = showArchived ? sessions : sessions.filter((session) => !liveCodexSessionIds.has(session.id));
   const matchingProjectScripts = projectScripts.filter((script) => `${script.name} ${script.command}`.toLowerCase().includes(projectScriptQuery.trim().toLowerCase()));
   const visibleProjectScripts = showAllProjectScripts || projectScriptQuery ? matchingProjectScripts : matchingProjectScripts.slice(0, 8);
@@ -496,13 +554,14 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
                   type="button"
                   disabled={busyId === session.id}
                   style={{ ...sessionMainStyle, cursor: showArchived ? "default" : "pointer" }}
-                  title={`${session.name}\n${session.cwd}`}
+                  title={[session.name, session.cwd, session.model && `Model: ${session.model}`, session.forkedFromId && `Forked from ${sessionNames.get(session.forkedFromId) || session.forkedFromId}`].filter(Boolean).join("\n")}
                   onClick={() => { if (!showArchived) configureLaunch(session, "chat", "resume"); }}
                 >
                   <StatusDot state={session.runtime?.state} />
                   <span style={{ minWidth: 0, flex: 1 }}>
                     <span style={sessionNameStyle}>{session.name}</span>
                     <span style={sessionMetaStyle}>{session.lastUserMessage || "No prompt yet"}</span>
+                    {(session.forkedFromId || session.model) && <span style={sessionMetaStyle}>{[session.forkedFromId && `Fork of ${sessionNames.get(session.forkedFromId) || session.forkedFromId.slice(0, 8)}`, session.model].filter(Boolean).join(" · ")}</span>}
                   </span>
                   <span style={timeStyle}>{busyId === session.id ? "…" : formatRelativeTime(session.updatedAt)}</span>
                 </button>
@@ -517,6 +576,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
                     <MenuButton danger onClick={() => requestSessionAction(session, "delete")}>Delete…</MenuButton>
                 </ActionMenu>
               </div>)}
+        {!loading && !error && nextCursor && <button type="button" disabled={loadingMore} onClick={() => void loadMoreSessions()} style={retryStyle}>{loadingMore ? "Loading…" : "Load more sessions"}</button>}
       </div>}
       <ProviderRow provider="claude" label="Claude" badge="A" badgeColor="#d97706" open={claudeOpen} count={claudeTerminals.length} running={claudeTerminals.filter((terminal) => terminal.state === "running").length} onToggle={() => setClaudeOpen((value) => !value)} onNewAgent={onNewAgent} />
       {claudeOpen && <div style={sessionListStyle}>
@@ -814,6 +874,7 @@ const searchClearStyle: CSSProperties = { width: 18, height: 18, padding: 0, bor
 const sessionRowStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 44, padding: "6px 7px 6px 9px", border: 0, borderRadius: 7, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "inherit" };
 const sessionContainerStyle: CSSProperties = { position: "relative", display: "flex", alignItems: "stretch", minWidth: 0, borderRadius: 6 };
 const sessionMainStyle: CSSProperties = { ...sessionRowStyle, minWidth: 0, paddingRight: 2, flex: 1 };
+const SESSION_PAGE_SIZE = 50;
 const sessionNameStyle: CSSProperties = { display: "block", overflow: "hidden", color: "var(--text)", fontSize: 11.5, lineHeight: "16px", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const sessionMetaStyle: CSSProperties = { display: "block", overflow: "hidden", color: "var(--text-dim)", fontSize: 10.5, lineHeight: "15px", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const timeStyle: CSSProperties = { alignSelf: "flex-start", paddingTop: 2, color: "var(--text-dim)", fontSize: 9.5, flexShrink: 0 };

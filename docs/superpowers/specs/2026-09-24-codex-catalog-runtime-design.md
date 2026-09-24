@@ -1,7 +1,7 @@
 # Codex 会话目录与运行时修复设计
 
 日期：2026-09-24
-状态：已确认，待实施
+状态：第 1 批已实施，第 2 批待实施
 
 ## 背景
 
@@ -23,7 +23,7 @@
 3. 每行显示：名称（无名称时显示 `preview` 第一条消息）、更新时间、模型、分叉来源（`forkedFromId`）。
 4. 改名、归档、取消归档、删除改用 `thread/name/set`、`thread/archive`、`thread/unarchive`、`thread/delete`。运行中（有聊天运行时且非空闲，或有 Codex 终端在写该会话）的会话拒绝归档和删除，返回明确错误。
 5. 聊天请求的会话校验改用 `thread/read`（不含 turns）或目录缓存，不再完整扫描；分叉出的会话可以直接打开聊天。
-6. 目录与模型列表使用一个长期运行、共享的 app-server 连接（与各会话的运行时进程分开）；该连接不可用时，列表退回现有的文件扫描实现，不显示空白。
+6. 目录使用一个长期运行、共享的 app-server 连接（与各会话的运行时进程分开）；该连接不可用时，列表退回现有的文件扫描实现，不显示空白。
 
 第 2 批（运行时）：
 1. 空闲关闭：有进行中的一轮（`activeTurnId`）或未决审批时不关闭运行时进程；一轮结束后再按原空闲时间关闭。关闭聊天标签不影响正在进行的一轮。
@@ -47,8 +47,10 @@
 
 ### 服务端
 
-- `server/agents/codex-catalog.cjs`（新）：共享 app-server 客户端（懒启动、单例挂在 `global`、崩溃后下次请求重启、空闲一段时间后关闭）。导出 `listThreads({ cwd, archived, searchTerm, cursor, limit })`、`readThread(id)`、`setName`、`archive`、`unarchive`、`remove`、`listModels`。进程不可用时抛出可识别错误。
-- `server/agents/codex-sessions.cjs`：`listSessions` 优先使用 `codex-catalog`，失败时退回现有文件扫描；返回结果增加分页游标、`preview`、`model`、`forkedFromId`；按 id 去重。现有的摘要读取（最后的用户/助手消息，只读文件尾部并缓存）保留，用于当前页。
+- `server/agents/codex-catalog.cjs`（新）：共享 app-server 客户端（懒启动、单例挂在 `global`、崩溃后下次请求重启、空闲一段时间后关闭）。导出 `listThreads({ cwd, archived, searchTerm, cursor, limit })`、`readThread(id)`、`setName`、`archive`、`unarchive`、`remove`。进程不可用时抛出可识别错误（`catalog_unavailable`）。
+  - 实施说明：`listModels` 仍留在 `codex-app-server.cjs`（按 cwd 启动、缓存 10 分钟），因为项目级 Codex 配置可能随 cwd 不同；共享连接固定在用户主目录启动。
+  - 实施说明：改名、归档、恢复、删除只走 app-server，不再保留 CLI 兜底；app-server 不可用时返回 503。
+- `server/agents/codex-sessions.cjs`：`listSessions` 优先使用 `codex-catalog`，失败时退回现有文件扫描；返回结果增加分页游标、`model`、`forkedFromId`（未命名会话以 `preview` 作为名称，不单独返回）；按 id 去重。现有的摘要读取（最后的用户/助手消息，只读文件尾部并缓存）保留，用于当前页。
 - `server/agents/codex-sessions-api.cjs` / `codex-app-api.cjs`：使用上述接口；运行中拒绝归档/删除（409）；会话校验走 `readThread`。
 - `server/agents/codex-app-server.cjs`：空闲关闭考虑进行中的一轮与未决审批；接管逻辑移到写操作。
 - `server/agents/terminal-manager.cjs`：提供“哪些终端在写某个会话 / 某目录下哪些 Codex 终端的会话未知”的查询。

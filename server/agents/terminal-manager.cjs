@@ -274,8 +274,13 @@ function terminalStats(cwd) {
 function getTerminal(id) { return publicSession(lookup(id)); }
 function renameTerminal(id, title) { const session = lookup(id); if (typeof title !== "string" || !title.trim()) throw new TerminalError("invalid_title", "terminal title is required"); session.title = title.trim().slice(0, 80); workspaceStatus.notify("terminals"); return publicSession(session); }
 function getBuffer(id) { const session = lookup(id); return { data: Buffer.concat(session.chunks), truncated: session.truncated, state: session.state }; }
+// A `resume` terminal writes to its source session; a `fork` terminal writes
+// to a new session and only reads the source.
+function writesSession(session, sessionId) {
+  return session.provider === "codex" && session.state === "running" && session.launchMode === "resume" && session.sourceSessionId === sessionId;
+}
 function runtimeForSession(sourceSessionId) {
-  const session = [...state.sessions.values()].find((candidate) => candidate.provider === "codex" && candidate.sourceSessionId === sourceSessionId && candidate.state === "running");
+  const session = [...state.sessions.values()].find((candidate) => writesSession(candidate, sourceSessionId));
   return session ? { owner: "terminal", state: "running", terminalId: session.id } : null;
 }
 
@@ -335,14 +340,14 @@ function clearEndedTerminals({ cwd, provider } = {}) {
 
 function stopTerminalsForSession(sourceSessionId) {
   for (const session of state.sessions.values()) {
-    if (session.provider === "codex" && session.sourceSessionId === sourceSessionId && session.state === "running") {
+    if (writesSession(session, sourceSessionId)) {
       stopTerminal(session.id);
     }
   }
 }
 
 async function interruptAndStopTerminalsForSession(sourceSessionId) {
-  const matching = [...state.sessions.values()].filter((session) => session.provider === "codex" && session.sourceSessionId === sourceSessionId && session.state === "running");
+  const matching = [...state.sessions.values()].filter((session) => writesSession(session, sourceSessionId));
   if (!matching.length) return false;
   // Let Codex cancel and persist an approval/current turn before termination.
   for (const session of matching) {

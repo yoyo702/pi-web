@@ -4,20 +4,16 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+const codexCatalog = require("./codex-catalog.cjs");
 
-const CODEX_HOME = path.join(os.homedir(), ".codex");
+// Listing, lookup and management go through the Codex app-server
+// (codex-catalog.cjs). Session files are read directly only for the
+// last-message summaries and chat history the protocol does not return
+// cheaply, and to list sessions while the app-server is unavailable.
+const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 const INDEX_PATH = path.join(CODEX_HOME, "session_index.jsonl");
 
 function error(code, message) { const value = new Error(message); value.code = code; return value; }
-function resolveCodex() {
-  const name = process.platform === "win32" ? "codex.cmd" : "codex";
-  for (const directory of (process.env.PATH || "").split(path.delimiter)) {
-    const candidate = path.join(directory, name);
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  throw error("cli_missing", "codex CLI was not found on PATH");
-}
 function indexEntries() {
   try {
     return fs.readFileSync(INDEX_PATH, "utf8").split("\n").flatMap((line) => { try { return line ? [JSON.parse(line)] : []; } catch { return []; } });
@@ -80,7 +76,9 @@ function sessionFiles() {
           const payload = cachedFor(metaCache, target, stat, () => { try { return sessionMeta(target); } catch { return null; } });
           const id = payload?.session_id || payload?.id;
           if (typeof id === "string") {
-            const candidate = { path: target, cwd: payload.cwd, timestamp: payload.timestamp, updatedAt: stat.mtime.toISOString(), updatedAtMs: stat.mtimeMs, size: stat.size, cliVersion: payload.cli_version, modelProvider: payload.model_provider, archived };
+            // Sub-agent threads (object `source`) are not user sessions.
+            const interactive = payload.source === undefined || payload.source === "cli" || payload.source === "vscode";
+            const candidate = { path: target, cwd: payload.cwd, timestamp: payload.timestamp, updatedAt: stat.mtime.toISOString(), updatedAtMs: stat.mtimeMs, size: stat.size, cliVersion: payload.cli_version, modelProvider: payload.model_provider, forkedFromId: payload.forked_from_id || null, interactive, archived };
             const current = result.get(id);
             if (!current || candidate.updatedAtMs > current.updatedAtMs) result.set(id, candidate);
           }
@@ -167,38 +165,122 @@ function readSessionSummary(detail) {
     lastAssistantMessage: [...messages].reverse().find((message) => message.role === "assistant")?.text.slice(0, 180) || null,
   };
 }
-function listSessions({ cwd, query, archived, limit = 100 } = {}) {
-  const details = sessionFiles();
+const ARCHIVED_PATH = /[\\/]archived_sessions[\\/]/;
+const SESSION_ID = /^[0-9a-f-]{16,}$/i;
+const FULL_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const FALLBACK_LIMIT = 250;
+
+function isoFromSeconds(seconds) { return Number.isFinite(seconds) ? new Date(seconds * 1000).toISOString() : null; }
+function titleFromPreview(preview) { return typeof preview === "string" ? preview.replace(/\s+/g, " ").trim().slice(0, 120) : ""; }
+function fromThread(thread) {
+  return {
+    id: thread.id,
+    name: (typeof thread.name === "string" && thread.name.trim()) || titleFromPreview(thread.preview) || "Untitled session",
+    updatedAt: isoFromSeconds(thread.updatedAt),
+    cwd: thread.cwd || null,
+    cliVersion: thread.cliVersion || null,
+    modelProvider: thread.modelProvider || null,
+    model: thread.model || null,
+    forkedFromId: thread.forkedFromId || null,
+    archived: ARCHIVED_PATH.test(thread.path || ""),
+    path: thread.path || null,
+  };
+}
+function withSummary(session) {
+  // Stale entries are pruned by sessionFiles(), which now runs only in
+  // fallback mode; bound the cache instead.
+  if (summaryCache.size > 2000) summaryCache.clear();
+  let detail = null;
+  if (session.path) try { const stat = fs.statSync(session.path); detail = { path: session.path, size: stat.size, updatedAtMs: stat.mtimeMs }; } catch { /* file moved or removed */ }
+  const summary = detail ? sessionSummary(detail) : { model: null, lastUserMessage: null, lastAssistantMessage: null };
+  return { ...session, ...summary, model: session.model || summary.model };
+}
+
+// Used only while the app-server is unavailable: every interactive session
+// file (not only the ones Codex has named in session_index.jsonl), newest
+// first, without pagination.
+function fromFile(id, detail, names) {
+  return { id, name: names.get(id) || "Untitled session", updatedAt: detail.updatedAt || detail.timestamp || null, cwd: detail.cwd || null, cliVersion: detail.cliVersion || null, modelProvider: detail.modelProvider || null, model: null, forkedFromId: detail.forkedFromId || null, archived: detail.archived === true, path: detail.path };
+}
+function indexNames() {
+  const names = new Map();
+  let entries = [];
+  try { entries = indexEntries(); } catch { /* list sessions without names */ }
+  for (const entry of entries) if (typeof entry.id === "string" && typeof entry.thread_name === "string" && entry.thread_name) names.set(entry.id, entry.thread_name);
+  return names;
+}
+// A short cache so chat requests and polls during an outage do not each walk
+// the whole sessions tree.
+let fallbackFiles = { at: 0, files: null };
+function recentSessionFiles() {
+  if (!fallbackFiles.files || Date.now() - fallbackFiles.at > 5000) fallbackFiles = { at: Date.now(), files: sessionFiles() };
+  return fallbackFiles.files;
+}
+function listSessionsFromFiles({ cwd, query, archived, limit }) {
+  const names = indexNames();
   const normalizedQuery = typeof query === "string" ? query.trim().toLowerCase() : "";
-  return indexEntries()
-    .map((entry) => {
-      const detail = details.get(entry.id) || {};
-      return {
-        id: entry.id,
-        name: typeof entry.thread_name === "string" && entry.thread_name ? entry.thread_name : "Untitled session",
-        updatedAt: detail.updatedAt || entry.updated_at || detail.timestamp || null,
-        cwd: detail.cwd || null,
-        cliVersion: detail.cliVersion || null,
-        modelProvider: detail.modelProvider || null,
-        archived: detail.archived === true,
-        _detail: detail,
-      };
-    })
+  return [...recentSessionFiles()].filter(([, detail]) => detail.interactive)
+    .map(([id, detail]) => fromFile(id, detail, names))
     .filter((session) => !cwd || session.cwd === cwd)
-    .filter((session) => typeof archived !== "boolean" || session.archived === archived)
+    .filter((session) => session.archived === (archived === true))
     .filter((session) => !normalizedQuery || `${session.name} ${session.id}`.toLowerCase().includes(normalizedQuery))
     .sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))
-    .slice(0, Math.min(250, Math.max(1, Number(limit) || 100)))
-    .map(({ _detail, ...session }) => ({ ...session, ...sessionSummary(_detail) }));
+    .slice(0, Math.min(FALLBACK_LIMIT, Math.max(1, Number(limit) || FALLBACK_LIMIT)));
 }
-function getSessionPreview(id) {
-  const session = requireSession(id);
-  const detail = sessionFiles().get(id);
-  return { session, recentMessages: readRecentMessages(detail).slice(-6) };
+
+/**
+ * One page of sessions, newest first: `{ sessions, nextCursor }`. Sessions
+ * include the file path; strip it before sending them to the browser.
+ */
+async function listSessions({ cwd, query, archived = false, cursor, limit = 50 } = {}) {
+  const searchTerm = typeof query === "string" ? query.trim() : "";
+  let page;
+  try {
+    page = await codexCatalog.listThreads({ cwd, archived, searchTerm, cursor, limit });
+  } catch (cause) {
+    if (!warnedFallback) { warnedFallback = true; console.warn(`[pi-web] Codex catalog unavailable, scanning session files instead: ${cause.message}`); }
+    // The fallback cannot continue an app-server cursor; report the outage
+    // rather than end the list early.
+    if (cursor) throw error("catalog_unavailable", "Codex app-server is unavailable; reload the session list");
+    return { sessions: listSessionsFromFiles({ cwd, query: searchTerm, archived, limit: FALLBACK_LIMIT }).map(withSummary), nextCursor: null };
+  }
+  warnedFallback = false;
+  const threads = page.data;
+  // searchTerm matches titles only; also accept a pasted session id.
+  if (!cursor && FULL_SESSION_ID.test(searchTerm) && !threads.some((thread) => thread.id === searchTerm)) {
+    const thread = await codexCatalog.readThread(searchTerm).catch(() => null);
+    if (thread) {
+      const session = fromThread(thread);
+      if (session.archived === (archived === true) && (!cwd || session.cwd === cwd)) threads.unshift(thread);
+    }
+  }
+  const seen = new Set();
+  const sessions = threads.filter((thread) => typeof thread?.id === "string" && !seen.has(thread.id) && seen.add(thread.id)).map((thread) => withSummary(fromThread(thread)));
+  return { sessions, nextCursor: page.nextCursor };
 }
-function latestTurnId(id) {
-  const detail = sessionFiles().get(id);
-  if (!detail?.path) return null;
+let warnedFallback = false;
+
+async function requireSession(id) {
+  if (typeof id !== "string" || !SESSION_ID.test(id)) throw error("invalid_session", "Invalid Codex session id");
+  let thread;
+  try {
+    thread = await codexCatalog.readThread(id);
+  } catch (cause) {
+    if (cause?.code !== "catalog_unavailable") throw cause;
+    const detail = recentSessionFiles().get(id);
+    if (!detail) throw error("not_found", "Codex session not found");
+    return fromFile(id, detail, indexNames());
+  }
+  if (!thread) throw error("not_found", "Codex session not found");
+  return fromThread(thread);
+}
+async function getSessionPreview(id) {
+  const session = withSummary(await requireSession(id));
+  return { session, recentMessages: readRecentMessages(session).slice(-6) };
+}
+async function latestTurnId(id) {
+  const { path: file } = await requireSession(id);
+  if (!file) return null;
   const turnIdOf = (line) => {
     if (line.indexOf("turn_id") === -1) return null;
     try { const payload = JSON.parse(line.toString("utf8")).payload; return typeof payload?.turn_id === "string" ? payload.turn_id : null; } catch { return null; }
@@ -207,7 +289,7 @@ function latestTurnId(id) {
   // that carries a turn id. Splitting on the newline byte is UTF-8 safe.
   let handle;
   try {
-    handle = fs.openSync(detail.path, "r");
+    handle = fs.openSync(file, "r");
     let position = fs.fstatSync(handle).size;
     let carry = Buffer.alloc(0);
     while (position > 0) {
@@ -229,35 +311,28 @@ function latestTurnId(id) {
   } catch { return null; }
   finally { if (handle !== undefined) try { fs.closeSync(handle); } catch { /* already closed */ } }
 }
-function requireSession(id) {
-  if (typeof id !== "string" || !/^[0-9a-f-]{16,}$/i.test(id)) throw error("invalid_session", "Invalid Codex session id");
-  const session = listSessions({ limit: 250 }).find((entry) => entry.id === id);
-  if (!session) throw error("not_found", "Codex session not found");
+async function archive(id) {
+  const session = await requireSession(id);
+  if (session.archived) throw error("already_archived", "Codex session is already archived");
+  await codexCatalog.archive(id);
+  return { ...session, archived: true };
+}
+async function unarchive(id) {
+  const session = await requireSession(id);
+  if (!session.archived) throw error("not_archived", "Codex session is not archived");
+  await codexCatalog.unarchive(id);
+  return { ...session, archived: false };
+}
+async function remove(id) {
+  const session = await requireSession(id);
+  await codexCatalog.remove(id);
   return session;
 }
-function runCli(args, cwd) {
-  const result = spawnSync(resolveCodex(), args, { cwd: cwd || process.cwd(), encoding: "utf8", timeout: 15_000, windowsHide: true });
-  if (result.error) throw error("cli_failed", result.error.message);
-  if (result.status !== 0) throw error("cli_failed", (result.stderr || result.stdout || "Codex command failed").trim());
-}
-function archive(id) { const session = requireSession(id); if (session.archived) throw error("already_archived", "Codex session is already archived"); runCli(["archive", id], session.cwd); return session; }
-function unarchive(id) { const session = requireSession(id); if (!session.archived) throw error("not_archived", "Codex session is not archived"); runCli(["unarchive", id], session.cwd); return session; }
-function remove(id) { const session = requireSession(id); runCli(["delete", "--force", id], session.cwd); return session; }
-function rename(id, name) {
+async function rename(id, name) {
   if (typeof name !== "string" || !name.trim() || name.length > 120) throw error("invalid_name", "Session name must be between 1 and 120 characters");
-  requireSession(id);
-  const lines = fs.readFileSync(INDEX_PATH, "utf8").split("\n");
-  let found = false;
-  const next = lines.map((line) => {
-    if (!line) return line;
-    try { const entry = JSON.parse(line); if (entry.id === id) { entry.thread_name = name.trim(); found = true; return JSON.stringify(entry); } } catch { /* preserve unknown lines */ }
-    return line;
-  });
-  if (!found) throw error("not_found", "Codex session not found");
-  const temporary = `${INDEX_PATH}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(temporary, next.join("\n"), { mode: 0o600 });
-  fs.renameSync(temporary, INDEX_PATH);
-  return requireSession(id);
+  const session = await requireSession(id);
+  await codexCatalog.setName(id, name.trim());
+  return { ...session, name: name.trim() };
 }
 
 module.exports = { listSessions, requireSession, getSessionPreview, latestTurnId, readRecentMessages, archive, unarchive, remove, rename };

@@ -25,8 +25,18 @@ function imageInputs(value) {
     return url;
   });
 }
+// Session file paths stay on the server.
+function withoutPath(result) {
+  if (!result?.thread) return result;
+  const thread = { ...result.thread };
+  delete thread.path;
+  return { ...result, thread };
+}
 async function state(id, url) {
-  const session = catalog.requireSession(id);
+  const session = await catalog.requireSession(id);
+  // Resuming would write to a rollout that archive has moved away (an open
+  // chat tab keeps polling after its session is archived elsewhere).
+  if (session.archived) throw new Error("This Codex session is archived. Restore it to continue.");
   await terminals.claimCodexSession(id);
   const model = url.searchParams.get("model");
   const serviceTier = url.searchParams.get("serviceTier");
@@ -46,7 +56,7 @@ async function handle(req, res, url) {
     const [, , , , id, action] = url.pathname.split("/");
     if (!id) return send(res, 404, { error: "not found" });
     const thread = await state(id, url);
-    if (!action && req.method === "GET") return send(res, 200, { thread: await appServer.readThread(thread), history: catalog.getSessionPreview(id).recentMessages, events: appServer.snapshot(thread) });
+    if (!action && req.method === "GET") return send(res, 200, { thread: withoutPath(await appServer.readThread(thread)), history: (await catalog.getSessionPreview(id)).recentMessages, events: appServer.snapshot(thread) });
     if (action === "events" && req.method === "GET") {
       res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" });
       const requestedSeq = Number(req.headers["last-event-id"] || url.searchParams.get("after") || 0);
@@ -62,7 +72,7 @@ async function handle(req, res, url) {
       if (!["compact", "review", "models"].includes(body.name)) return send(res, 400, { error: "unsupported command" });
       return send(res, 200, { result: await appServer.command(thread, body.name) });
     }
-    if (action === "interrupt" && req.method === "POST") return send(res, 200, { result: await appServer.interrupt(thread, body.recoverStaleApproval === true ? catalog.latestTurnId(id) : null) });
+    if (action === "interrupt" && req.method === "POST") return send(res, 200, { result: await appServer.interrupt(thread, body.recoverStaleApproval === true ? await catalog.latestTurnId(id) : null) });
     if (action === "approve" && req.method === "POST") {
       if (typeof body.requestId !== "string" || !["accept", "acceptForSession", "decline"].includes(body.decision)) return send(res, 400, { error: "invalid approval" });
       appServer.respond(thread, body.requestId, { decision: body.decision });
