@@ -1069,7 +1069,7 @@ test("pages Codex sessions and shows fork source, model and busy errors", async 
   await expect(page.getByText("Parent work", { exact: true })).toBeVisible();
 });
 
-test("shows Codex chat retries, turn failures and the terminal conflict prompt", async ({ page }, testInfo) => {
+test("shows Codex chat retries, turn failures, the terminal conflict prompt, question cards and steering", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
   const id = "33333333-3333-3333-3333-333333333333";
   // The chat's event stream is driven from the test through window.__codexStreams.
@@ -1120,6 +1120,17 @@ test("shows Codex chat retries, turn failures and the terminal conflict prompt",
       ? route.fulfill({ status: 202, json: { turn: { turn: { id: "turn-2" } } } })
       : route.fulfill({ status: 409, json: { error: "A Codex terminal is running in this folder.", code: "terminal_conflict", terminals: [{ id: "term-1", title: "codex", launchMode: "new" }] } });
   });
+  // The first steer lands in the running turn; the second finds the turn over and is queued.
+  const actions: Array<{ action: string; body: Record<string, unknown> }> = [];
+  await page.route(`**/api/codex/chat/${id}/*`, async (route) => {
+    const action = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
+    actions.push({ action, body: route.request().postDataJSON() as Record<string, unknown> });
+    if (action === "approve") return route.fulfill({ status: 204, body: "" });
+    if (action === "steer") return actions.filter((entry) => entry.action === "steer").length === 1
+      ? route.fulfill({ status: 202, json: { turn: { turnId: "turn-2" } } })
+      : route.fulfill({ status: 409, json: { error: "This turn can no longer take new input", code: "no_active_turn" } });
+    return route.fallback();
+  });
 
   await page.goto("/");
   await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
@@ -1160,6 +1171,34 @@ test("shows Codex chat retries, turn failures and the terminal conflict prompt",
   await expect.poll(() => sent.length).toBe(2);
   expect(sent[0].terminals).toBeUndefined();
   expect(sent[1]).toMatchObject({ text: "continue from my phone", terminals: "ignore" });
+
+  // Codex asks a question; the answer goes back keyed by question id.
+  await emit({ method: "turn/started", params: { turn: { id: "turn-2" } }, piSeq: 4, piRuntime: "run1" });
+  await emit({ id: 902, method: "item/tool/requestUserInput", params: { questions: [{ id: "color", header: "Color", question: "Pick one", isOther: true, isSecret: false, options: [{ label: "Red", description: "" }] }] }, piSeq: 5, piRuntime: "run1" });
+  const card = chat.getByRole("alert", { name: "Codex has a question" });
+  await expect(card.getByRole("button", { name: "Submit" })).toBeDisabled();
+  await card.getByLabel("Red").check();
+  await card.getByRole("button", { name: "Submit" }).click();
+  await expect.poll(() => actions.find((entry) => entry.action === "approve")?.body).toEqual({ requestId: "902", answers: { color: ["Red"] } });
+  await expect(card).toHaveCount(0);
+
+  // A request Codex Chat cannot show is reported, not left hanging.
+  await emit({ method: "codex/unsupportedRequest", params: { method: "item/tool/call" }, piSeq: 6, piRuntime: "run1" });
+  await expect(chat.getByText("Codex asked for item/tool/call, which Codex Chat does not support; it was declined.")).toBeVisible();
+
+  // While running, Enter steers the current turn; a turn that already ended queues the message.
+  const running = chat.getByPlaceholder("Add to this turn, or queue for the next…");
+  await running.fill("also run the tests");
+  await running.press("Enter");
+  await expect.poll(() => actions.filter((entry) => entry.action === "steer").length).toBe(1);
+  expect(actions.find((entry) => entry.action === "steer")?.body).toMatchObject({ text: "also run the tests" });
+  await expect(chat.getByText("also run the tests")).toBeVisible();
+  await running.fill("then summarize");
+  await running.press("Enter");
+  await expect(chat.getByText("1 queued")).toBeVisible();
+  await emit({ method: "turn/completed", params: { turn: { id: "turn-2", status: "completed", error: null } }, piSeq: 7, piRuntime: "run1" });
+  await expect.poll(() => sent.length).toBe(3);
+  expect(sent[2]).toMatchObject({ text: "then summarize", terminals: "ignore" });
 });
 
 test("searches and manages files from Explorer", async ({ page }, testInfo) => {

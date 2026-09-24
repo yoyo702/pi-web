@@ -8,7 +8,7 @@ const terminalManager = require("./terminal-manager.cjs");
 const { readBody } = require("../http-body.cjs");
 
 const MAX_BODY_BYTES = 20 * 1024 * 1024;
-function isPath(pathname) { return pathname === "/api/codex/models" || /^\/api\/codex\/chat\/[0-9a-f-]+(?:\/(?:events|approve|command|interrupt|fork|claim))?$/i.test(pathname); }
+function isPath(pathname) { return pathname === "/api/codex/models" || /^\/api\/codex\/chat\/[0-9a-f-]+(?:\/(?:events|approve|command|interrupt|fork|claim|steer))?$/i.test(pathname); }
 function requestError(message, code = "invalid_request") { return Object.assign(new Error(message), { code }); }
 async function read(req) {
   let text;
@@ -121,20 +121,29 @@ async function handle(req, res, url) {
       return send(res, 200, { result: await appServer.interrupt(runtime(session, url), body.recoverStaleApproval === true ? await catalog.latestTurnId(id) : null) });
     }
     if (action === "approve") {
-      if (typeof body.requestId !== "string" || !["accept", "acceptForSession", "decline"].includes(body.decision)) return send(res, 400, { error: "invalid approval", code: "invalid_request" });
+      // The answer's shape depends on the request type; codex-requests validates it.
+      if (typeof body.requestId !== "string") return send(res, 400, { error: "invalid approval", code: "invalid_request" });
       await claim(session, "ignore");
-      appServer.respond(runtime(session, url), body.requestId, { decision: body.decision });
+      appServer.respond(runtime(session, url), body.requestId, body);
       return send(res, 204, {});
     }
-    if (!action) {
+    if (!action || action === "steer") {
       const images = imageInputs(body.images);
       const text = typeof body.text === "string" ? body.text.trim() : "";
       if (body.text != null && typeof body.text !== "string") throw requestError("text must be a string");
       if (!text && !images.length) throw requestError("text or an image is required");
+      if (body.clientMessageId != null && (typeof body.clientMessageId !== "string" || !/^[A-Za-z0-9._:-]{1,120}$/.test(body.clientMessageId))) throw requestError("invalid client message id");
+      if (action === "steer") {
+        // Only a turn this chat is running can take more input; never start a runtime for it.
+        if (!appServer.isClaimed(id)) throw requestError("No active turn to add this message to", "no_active_turn");
+        await claim(session, "ignore");
+        // The runtime may have closed while claiming; do not start a new one for it.
+        if (!appServer.isClaimed(id)) throw requestError("No active turn to add this message to", "no_active_turn");
+        return send(res, 202, { turn: await appServer.steer(runtime(session, url), text, images, body.clientMessageId || null) });
+      }
       if (body.model != null && (typeof body.model !== "string" || !/^[A-Za-z0-9._:/-]+$/.test(body.model))) throw requestError("invalid model");
       if (body.effort != null && (typeof body.effort !== "string" || !["low", "medium", "high", "xhigh", "max", "ultra"].includes(body.effort))) throw requestError("invalid reasoning effort");
       if (body.serviceTier != null && (typeof body.serviceTier !== "string" || !/^[A-Za-z0-9._-]+$/.test(body.serviceTier))) throw requestError("invalid service tier");
-      if (body.clientMessageId != null && (typeof body.clientMessageId !== "string" || !/^[A-Za-z0-9._:-]{1,120}$/.test(body.clientMessageId))) throw requestError("invalid client message id");
       if (body.approvalPolicy != null && !["untrusted", "on-request", "never"].includes(body.approvalPolicy)) throw requestError("invalid approval policy");
       await claim(session, body.terminals);
       return send(res, 202, { turn: await appServer.prompt(runtime(session, url), text, body.model || null, body.approvalPolicy || null, images, body.clientMessageId || null, body.effort || null, body.serviceTier || null) });

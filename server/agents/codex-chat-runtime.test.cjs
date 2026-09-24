@@ -60,6 +60,58 @@ test("a pending approval keeps the runtime up until it is answered", async (t) =
   await waitFor(() => !appServer.isClaimed(ID));
 });
 
+test("a request pi-web cannot show is refused at once and the turn keeps running", async (t) => {
+  const { dir, methods } = useFakeRuntime(t);
+  const warn = console.warn;
+  console.warn = () => undefined;
+  t.after(() => { console.warn = warn; });
+  const runtime = appServer.start({ threadId: ID, cwd: dir });
+  const events = [];
+  t.after(appServer.subscribe(runtime, (event) => events.push(event)));
+  await appServer.prompt(runtime, "tool call");
+  await waitFor(() => methods().some((entry) => entry.response === 901));
+  assert.equal(methods().find((entry) => entry.response === 901).error.code, -32601);
+  assert.equal(appServer.runtimeForSession(ID).state, "running");
+  await waitFor(() => events.some((event) => event.method === "codex/unsupportedRequest"));
+  assert.equal(events.find((event) => event.method === "codex/unsupportedRequest").params.method, "item/tool/call");
+  await appServer.interrupt(runtime);
+});
+
+test("answering a user-input question sends the answers and ends the wait", async (t) => {
+  const { dir, methods } = useFakeRuntime(t);
+  const runtime = appServer.start({ threadId: ID, cwd: dir });
+  await appServer.prompt(runtime, "a question");
+  await waitFor(() => appServer.runtimeForSession(ID)?.state === "approval");
+  assert.throws(() => appServer.respond(runtime, "902", { answers: { color: "Red" } }), (error) => error.code === "invalid_request");
+  assert.equal(appServer.runtimeForSession(ID).state, "approval");
+  appServer.respond(runtime, "902", { answers: { color: ["Blue"] } });
+  await waitFor(() => methods().some((entry) => entry.response === 902));
+  assert.deepEqual(methods().find((entry) => entry.response === 902).result, { answers: { color: { answers: ["Blue"] } } });
+});
+
+test("steering adds input to the running turn and fails once it has ended", async (t) => {
+  const { dir, methods } = useFakeRuntime(t);
+  const runtime = appServer.start({ threadId: ID, cwd: dir });
+  const { turn } = await appServer.prompt(runtime, "long task");
+  assert.deepEqual(await appServer.steer(runtime, "also this", [], "msg-1"), { turnId: turn.id });
+  const steer = methods().find((entry) => entry.method === "turn/steer");
+  assert.equal(steer.params.expectedTurnId, turn.id);
+  assert.deepEqual(steer.params.input, [{ type: "text", text: "also this" }]);
+  runtime.activeTurnId = "stale-turn";
+  await assert.rejects(appServer.steer(runtime, "late"), (error) => error.code === "no_active_turn");
+  runtime.activeTurnId = turn.id;
+  await appServer.interrupt(runtime);
+  await waitFor(() => !runtime.activeTurnId);
+  await assert.rejects(appServer.steer(runtime, "late"), (error) => error.code === "no_active_turn");
+});
+
+test("a turn Codex will not steer is reported as no_active_turn", async (t) => {
+  const { dir } = useFakeRuntime(t);
+  const runtime = appServer.start({ threadId: ID, cwd: dir });
+  await appServer.prompt(runtime, "review the diff");
+  await assert.rejects(appServer.steer(runtime, "more"), (error) => error.code === "no_active_turn" && /activeTurnNotSteerable/.test(JSON.stringify(error.cause.rpcData)));
+});
+
 test("closing the last viewer of an idle runtime shuts it down", async (t) => {
   const { dir } = useFakeRuntime(t);
   const runtime = appServer.start({ threadId: ID, cwd: dir });
@@ -169,6 +221,31 @@ test("an image-only message is accepted", async (t) => {
   const response = await request("POST", `/api/codex/chat/${ID}`, { images: [image] });
   assert.equal(response.status, 202);
   assert.deepEqual(calls.at(-1), ["prompt", "", [image]]);
+});
+
+test("steering needs a turn this chat is running and never starts a runtime", async (t) => {
+  const calls = setupApi(t);
+  const refused = await request("POST", `/api/codex/chat/${ID}/steer`, { text: "more" });
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.code, "no_active_turn");
+  assert.deepEqual(calls, []);
+  stub(t, appServer, "isClaimed", () => true);
+  stub(t, appServer, "steer", async (_state, text, images, clientMessageId) => { calls.push(["steer", text, clientMessageId]); return { turnId: "turn-1" }; });
+  const accepted = await request("POST", `/api/codex/chat/${ID}/steer`, { text: "more", clientMessageId: "m1" });
+  assert.equal(accepted.status, 202);
+  assert.deepEqual(accepted.body, { turn: { turnId: "turn-1" } });
+  assert.deepEqual(calls.at(-1), ["steer", "more", "m1"]);
+});
+
+test("an answer is passed through for the request type to validate", async (t) => {
+  setupApi(t);
+  const answers = [];
+  stub(t, appServer, "respond", (_state, requestId, body) => answers.push([requestId, body]));
+  const response = await request("POST", `/api/codex/chat/${ID}/approve`, { requestId: "902", answers: { color: ["Red"] } });
+  assert.equal(response.status, 204);
+  assert.deepEqual(answers, [["902", { requestId: "902", answers: { color: ["Red"] } }]]);
+  stub(t, appServer, "respond", () => { throw Object.assign(new Error("invalid answer"), { code: "invalid_request" }); });
+  assert.equal((await request("POST", `/api/codex/chat/${ID}/approve`, { requestId: "902", answers: { color: "Red" } })).status, 400);
 });
 
 test("chat errors map to status codes", async (t) => {

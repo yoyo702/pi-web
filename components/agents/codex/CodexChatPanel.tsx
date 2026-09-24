@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { TerminalSession } from "@/lib/agents/terminal";
 import { CodexAssistantThread } from "./CodexAssistantThread";
+import { isCodexCardRequest, type CodexRequestAnswer, type CodexServerRequest } from "./CodexRequestCard";
 import { reduceCodexEvent, type CodexConversationItem } from "@/lib/agents/codex-conversation";
 import type { ChatDraftImage } from "@/lib/draft-store";
 import { useWorkspaceStatusSelector } from "@/hooks/useWorkspaceStatus";
@@ -13,22 +14,14 @@ type AppItem = Record<string, unknown> & { id?: string; type?: string };
 type TokenCount = { totalTokens?: number; inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; reasoningOutputTokens?: number };
 type TokenUsagePayload = { totalTokens?: number; total?: TokenCount; last?: TokenCount; modelContextWindow?: number };
 type AppEvent = { id?: string | number; piSeq?: number; piRuntime?: string; method?: string; params?: { turnId?: string; runtimeId?: string; willRetry?: boolean; turn?: { status?: string; error?: { message?: string } | null }; requestId?: string | number; delta?: string; command?: string | string[]; cwd?: string; grantRoot?: string; reason?: string; message?: string; error?: { message?: string } | string; status?: { type?: string; activeFlags?: string[] }; tokenUsage?: TokenUsagePayload; modelContextWindow?: number; item?: AppItem } };
-type ApprovalRequest = { id: string; kind: string; command?: string; cwd?: string; grantRoot?: string; reason?: string };
-function approvalFromEvent(event: AppEvent): ApprovalRequest {
-  const method = event.method ?? "";
-  return {
-    id: String(event.id),
-    kind: method.includes("fileChange") ? "File changes" : method.includes("commandExecution") ? "Command execution" : "Tool access",
-    command: Array.isArray(event.params?.command) ? event.params.command.join(" ") : event.params?.command,
-    cwd: event.params?.cwd,
-    grantRoot: event.params?.grantRoot,
-    reason: event.params?.reason,
-  };
+function requestFromEvent(event: AppEvent): CodexServerRequest | null {
+  return event.id !== undefined && isCodexCardRequest(event.method) ? { id: String(event.id), method: event.method!, params: (event.params ?? {}) as Record<string, unknown> } : null;
 }
-function pendingApprovalsFromEvents(events: AppEvent[]): ApprovalRequest[] {
-  const pending = new Map<string, ApprovalRequest>();
+function pendingApprovalsFromEvents(events: AppEvent[]): CodexServerRequest[] {
+  const pending = new Map<string, CodexServerRequest>();
   for (const event of events) {
-    if (event.id !== undefined && event.method?.endsWith("/requestApproval")) pending.set(String(event.id), approvalFromEvent(event));
+    const request = requestFromEvent(event);
+    if (request) pending.set(request.id, request);
     if (event.method === "serverRequest/resolved" && event.params?.requestId !== undefined) pending.delete(String(event.params.requestId));
     if (event.method === "turn/completed") pending.clear();
   }
@@ -60,7 +53,7 @@ type ThreadRead = {
 
 export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusChange, onConfigurationChange }: { terminal: Pick<TerminalSession, "cwd" | "model" | "sourceSessionId"> & { reasoningEffort?: string; serviceTier?: string; approvalPolicy?: "untrusted" | "on-request" | "never"; sessionName?: string }; workspaceTabId: string; onOpenFile?: (filePath: string) => void; onStatusChange?: (tabId: string, status: "idle" | "running" | "approval") => void; onConfigurationChange?: (tabId: string, configuration: { model?: string; reasoningEffort?: string; serviceTier?: string; approvalPolicy?: "untrusted" | "on-request" | "never" }) => void }) {
   const [items, setItems] = useState<CodexConversationItem[]>([]);
-  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
+  const [approvals, setApprovals] = useState<CodexServerRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [connection, setConnection] = useState<"loading" | "connected" | "reconnecting" | "failed">("loading");
   const [runState, setRunState] = useState<"idle" | "working" | "approval" | "recovering">("idle");
@@ -119,7 +112,7 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
             if (event.params?.willRetry) setError(`Codex is retrying: ${errorText(event) || "temporary error"}`);
             else { setError(errorText(event) || "Codex reported an error"); setRunState("idle"); }
           }
-          if (event.method === "item/started" || event.method === "turn/started") { setRunState("working"); setError((current) => current?.startsWith("Codex is retrying") ? null : current); }
+          if (event.method === "item/started" || event.method === "turn/started") { setRunState("working"); setError((current) => current?.startsWith("Codex is retrying") || current?.startsWith("Codex asked for") ? null : current); }
           if (event.method === "turn/completed" && event.params?.turn?.error?.message) setError(`Turn failed: ${event.params.turn.error.message}`);
           if (event.method === "codex/closed") { setConnection("reconnecting"); setRunState("idle"); setCurrentActivity(""); setApprovals([]); }
           if (event.method === "item/started") {
@@ -131,7 +124,9 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
             if (event.params?.status?.activeFlags?.includes("waitingOnApproval")) setRunState("approval");
             else if (event.params?.status?.type === "idle" || event.params?.status?.activeFlags?.length === 0) { setRunState("idle"); setCurrentActivity(""); }
           }
-          if (event.id !== undefined && event.method?.endsWith("/requestApproval")) { const request = approvalFromEvent(event); setApprovals((current) => [...current.filter((approval) => approval.id !== request.id), request]); setRunState("approval"); }
+          const request = requestFromEvent(event);
+          if (request) { setApprovals((current) => [...current.filter((approval) => approval.id !== request.id), request]); setRunState("approval"); }
+          if (event.method === "codex/unsupportedRequest") setError(`Codex asked for ${String((event.params as { method?: unknown } | undefined)?.method ?? "an action")}, which Codex Chat does not support; it was declined.`);
           if (event.method === "serverRequest/resolved" && event.params?.requestId !== undefined) setApprovals((current) => {
             const next = current.filter((approval) => approval.id !== String(event.params?.requestId));
             if (next.length) setRunState("approval");
@@ -281,9 +276,27 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
     finally { setSending(false); }
   }, [approvalPolicy, chatModel, connection, reasoningEffort, serviceTier, threadId]);
 
-  const decide = useCallback(async (requestId: string, decision: "accept" | "acceptForSession" | "decline") => {
+  // Adds a message to the running turn. "queue": the turn cannot take it (it ended, or is a
+  // review/compact); the caller sends it as the next turn instead.
+  const steer = useCallback(async (textOverride: string, images: ChatDraftImage[] = []): Promise<"steered" | "queue" | "failed"> => {
+    const text = textOverride.trim();
+    if (!threadId || connection !== "connected") return "queue";
+    const clientMessageId = `pi-web-${crypto.randomUUID()}`;
+    try {
+      const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/steer`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, clientMessageId, images: images.map((image) => `data:${image.mimeType};base64,${image.data}`) }) });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({})) as ApiError;
+        if (data.code === "no_active_turn") return "queue";
+        throw new Error(data.error ?? "Unable to add the message to this turn");
+      }
+      setItems((current) => current.some((item) => item.id === clientMessageId) ? current : [...current, { id: clientMessageId, kind: "message", role: "user", text: text || `[${images.length} image${images.length === 1 ? "" : "s"}]`, pending: true }]);
+      return "steered";
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to add the message to this turn"); return "failed"; }
+  }, [connection, threadId]);
+
+  const decide = useCallback(async (requestId: string, answer: CodexRequestAnswer) => {
     if (!threadId) return;
-    const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requestId, decision }) });
+    const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...answer, requestId }) });
     if (!response.ok) {
       const data = await response.json().catch(() => ({})) as ApiError;
       if (data.code === "approval_expired") {
@@ -395,8 +408,9 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
         onApprovalPolicyChange={(value) => { setApprovalPolicy(value); onConfigurationChange?.(workspaceTabId, { approvalPolicy: value }); setModelNotice("Permission policy updated · applies to the next turn"); }}
         onFork={() => void forkChat()}
         onSend={send}
+        onSteer={steer}
         onStop={stopRun}
-        onApproval={(requestId, decision) => void decide(requestId, decision)}
+        onApproval={(requestId, answer) => void decide(requestId, answer)}
         onOpenFile={onOpenFile}
       />
     </div>

@@ -7,8 +7,10 @@
 // another client holds it); every request is appended to FAKE_CODEX_LOG.
 // FAKE_CODEX_INIT_ERROR makes `initialize` fail.
 // Runtime: `turn/start` starts a turn that runs until `turn/interrupt`; a
-// prompt containing "approve" also asks for an approval, and answering it
-// ends the turn.
+// prompt containing "approve" also asks for an approval, "question" asks the
+// user a question, and answering either ends the turn. "tool call" sends an
+// `item/tool/call` request (which pi-web refuses). `turn/steer` checks
+// `expectedTurnId`, and refuses a turn whose prompt contains "review".
 
 const fs = require("node:fs");
 const readline = require("node:readline");
@@ -18,14 +20,16 @@ const logPath = process.env.FAKE_CODEX_LOG;
 const load = () => JSON.parse(fs.readFileSync(statePath, "utf8"));
 const save = (state) => fs.writeFileSync(statePath, JSON.stringify(state));
 const reply = (id, result) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
-const fail = (id, message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32600, message } })}\n`);
+const fail = (id, message, data) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32600, message, ...(data ? { data } : {}) } })}\n`);
 const notify = (method, params, id) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...(id == null ? {} : { id }), method, params })}\n`);
 let activeTurn = null;
+let reviewTurn = false;
 const publicThread = (thread) => { const result = { ...thread, turns: [] }; delete result.archived; return result; };
 
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
-  const { id, method, params = {}, result } = JSON.parse(line);
-  if (logPath) fs.appendFileSync(logPath, `${JSON.stringify(method ? { method, params } : { response: id, result })}\n`);
+  const { id, method, params = {}, result, error } = JSON.parse(line);
+  if (logPath) fs.appendFileSync(logPath, `${JSON.stringify(method ? { method, params } : { response: id, result, error })}\n`);
+  if (!method && id === 901) return undefined;
   if (!method) {
     notify("serverRequest/resolved", { requestId: id });
     notify("turn/completed", { turn: { id: activeTurn, status: "completed", error: null } });
@@ -56,9 +60,18 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       activeTurn = `turn-${Date.now()}`;
       reply(id, { turn: { id: activeTurn } });
       notify("turn/started", { turn: { id: activeTurn } });
-      if (params.input.some((part) => part.type === "text" && part.text.includes("approve"))) notify("item/commandExecution/requestApproval", { command: "npm test" }, 900);
+      const text = params.input.filter((part) => part.type === "text").map((part) => part.text).join(" ");
+      reviewTurn = text.includes("review");
+      if (text.includes("approve")) notify("item/commandExecution/requestApproval", { command: "npm test", proposedExecpolicyAmendment: ["npm", "test"] }, 900);
+      if (text.includes("tool call")) notify("item/tool/call", { tool: "lookup" }, 901);
+      if (text.includes("question")) notify("item/tool/requestUserInput", { questions: [{ id: "color", header: "Color", question: "Pick one", isOther: true, isSecret: false, options: [{ label: "Red", description: "" }] }] }, 902);
       return undefined;
     }
+    case "turn/steer":
+      if (!activeTurn) return fail(id, "no active turn");
+      if (reviewTurn) return fail(id, "cannot add input to this turn", { codexErrorInfo: { activeTurnNotSteerable: { turnKind: "review" } } });
+      if (params.expectedTurnId !== activeTurn) return fail(id, `expected active turn id \`${params.expectedTurnId}\` but found \`${activeTurn}\``);
+      return reply(id, { turnId: activeTurn });
     case "turn/interrupt":
       reply(id, {});
       notify("turn/completed", { turn: { id: params.turnId, status: "interrupted", error: null } });

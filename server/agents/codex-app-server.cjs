@@ -3,6 +3,7 @@
 const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const workspaceStatus = require("../workspace-status.cjs");
+const requests = require("./codex-requests.cjs");
 const sessions = new Map();
 const modelCatalogCache = global.__piWebCodexModelCatalogCache || new Map();
 global.__piWebCodexModelCatalogCache = modelCatalogCache;
@@ -63,7 +64,7 @@ function protocolError(error) {
   if (/already has an active writer/i.test(message)) {
     return Object.assign(new Error("This session is open in another Codex client (for example the ChatGPT desktop app). Quit that app completely and try again, or fork the session from the Agents panel."), { code: "writer_conflict" });
   }
-  return Object.assign(new Error(message), { code: "rpc_error", rpcCode: error?.code });
+  return Object.assign(new Error(message), { code: "rpc_error", rpcCode: error?.code, rpcData: error?.data });
 }
 function handleProtocolMessage(state, message) {
   // JSON-RPC ids are scoped to each direction. A Codex server request may use
@@ -76,6 +77,13 @@ function handleProtocolMessage(state, message) {
     if (message.error) pending.reject(protocolError(message.error));
     else pending.resolve(message.result);
     return;
+  }
+  // A request pi-web cannot answer is refused now instead of stalling the turn;
+  // the browser gets a notice saying what was declined.
+  if (message.id != null && message.method && !requests.isSupported(message.method)) {
+    console.warn(`[pi-web] Declined unsupported Codex request ${message.method}`);
+    state.child?.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: `pi-web does not support ${message.method}` } })}\n`);
+    message = { method: "codex/unsupportedRequest", params: { method: message.method } };
   }
   if (message.method === "turn/started") { state.activeTurnId = message.params?.turn?.id || message.params?.turnId || state.activeTurnId; cancelIdleShutdown(state); }
   // Approvals left open when a turn ends can no longer be answered.
@@ -124,11 +132,26 @@ function start({ threadId, cwd, model, serviceTier, approvalPolicy = "untrusted"
   return state;
 }
 async function prompt(state, text, model = null, approvalPolicy = null, images = [], clientUserMessageId = null, effort = null, serviceTier = null) { await state.ready; const result = await state.request("turn/start", { threadId: state.threadId, cwd: state.cwd, input: [...(text ? [{ type: "text", text }] : []), ...images.map((url) => ({ type: "image", url }))], clientUserMessageId, approvalPolicy, model, effort, serviceTier, summary: "auto" }); state.activeTurnId = result?.turn?.id || result?.id || state.activeTurnId; if (state.activeTurnId) cancelIdleShutdown(state); workspaceStatus.notify("codex_runtimes"); return result; }
+// Adds input to the running turn. Codex refuses it if that turn has already ended.
+async function steer(state, text, images = [], clientUserMessageId = null) {
+  await state.ready;
+  if (!state.activeTurnId) throw Object.assign(new Error("No active turn to add this message to"), { code: "no_active_turn" });
+  try {
+    return await state.request("turn/steer", { threadId: state.threadId, expectedTurnId: state.activeTurnId, clientUserMessageId, input: [...(text ? [{ type: "text", text }] : []), ...images.map((url) => ({ type: "image", url }))] });
+  } catch (error) {
+    // The turn ended (or a review/compact turn cannot take input); the browser queues the message instead.
+    const notSteerable = /activeTurnNotSteerable/.test(JSON.stringify(error.rpcData ?? null));
+    if (error.code === "rpc_error" && (notSteerable || /no active turn|expected active turn id/i.test(error.message))) throw Object.assign(new Error("This turn can no longer take new input", { cause: error }), { code: "no_active_turn" });
+    throw error;
+  }
+}
 async function readThread(state) { await state.ready; return state.request("thread/read", { threadId: state.threadId, includeTurns: true }); }
 async function command(state, name) { await state.ready; if (name === "compact") return state.request("thread/compact/start", { threadId: state.threadId }); if (name === "review") return state.request("review/start", { threadId: state.threadId, target: { type: "uncommittedChanges" }, delivery: "inline" }); if (name === "models") return state.request("model/list", { cursor: null, includeHidden: false, limit: 100 }); throw Object.assign(new Error(`Unsupported Codex command: /${name}`), { code: "invalid_request" }); }
-function respond(state, requestId, result) {
+// `answer` is the browser's reply; codex-requests turns it into the protocol result.
+function respond(state, requestId, answer) {
   const request = state.incoming.get(String(requestId));
   if (!request) throw Object.assign(new Error("Approval request is no longer pending"), { code: "approval_expired" });
+  const result = requests.responseFor(request, answer);
   state.incoming.delete(String(requestId));
   workspaceStatus.notify("codex_runtimes");
   state.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`);
@@ -217,6 +240,6 @@ async function listModels(cwd) {
   modelCatalogCache.set(cwd, { promise, expiresAt: 0 });
   return promise;
 }
-module.exports = { configure, withRemovalLock, isRemoving, start, stop, stopAndWait, prompt, readThread, command, respond, fork, interrupt, subscribe, isClaimed, isAttached, snapshot, runtimeForSession, listRuntimes, listModels, handleProtocolMessage, failState };
+module.exports = { configure, withRemovalLock, isRemoving, start, stop, stopAndWait, prompt, steer, readThread, command, respond, fork, interrupt, subscribe, isClaimed, isAttached, snapshot, runtimeForSession, listRuntimes, listModels, handleProtocolMessage, failState };
 
 workspaceStatus.registerProvider("codex_runtimes", () => ({ runtimes: listRuntimes() }));

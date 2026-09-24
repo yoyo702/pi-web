@@ -41,6 +41,15 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - 每个会话一个 `codex app-server` 运行时进程（`server/agents/codex-app-server.cjs`），所有浏览器共用。没有页面在看、也没有进行中的一轮和未决审批时，30 秒后关闭；有进行中的一轮或等待审批时一直保留，一轮结束（或审批回复）后再开始空闲计时。因此在手机上发起一轮后锁屏或关闭标签，这一轮会继续跑完，在电脑上打开同一会话可继续看到。
 - 运行时每次启动有新的 `runtimeId`；SSE 事件 id 为 `runtimeId:seq`。运行时重启后，浏览器按新运行时从头重放事件，不会因序号重置而漏事件。运行时退出时推送 `codex/closed`，聊天显示 “Reconnecting”；事件流在运行时就绪（`thread/resume` 成功）后才建立；新运行时无法恢复会话（如 `writer_conflict`）时直接返回 JSON 错误，浏览器不再反复重连，显示 “Codex chat disconnected.” 与 “Reconnect” 按钮，点击后显示具体原因。
 - 只发图片（无文字）也可以发送。
+- Codex 请求的处理（服务端 `server/agents/codex-requests.cjs` 按类型校验回答）：
+  - 命令审批：Allow once / Allow for session / Deny / Deny and stop；Codex 建议了命令规则时多一个 “Always allow `<命令前缀>`”，建议了网络规则时按主机显示 “Always allow/block <host>”（规则内容取自请求，浏览器只传选择）。
+  - 文件改动审批：Allow once / Allow for session / Deny / Deny and stop。
+  - 额外权限（网络、文件读写）：Allow for this turn / Allow for session / Deny，授予的正是请求的权限；卡片列出全部请求的路径（含通配和特殊路径条目）。
+  - Codex 提问（“Codex has a question”）：每个问题选一项或填写答案，全部回答后才能 Submit。
+  - MCP 服务请求输入：链接模式显示链接（仅 http/https 可点击），完成后点 Done；表单模式按字段填写后 Submit；都可 Decline / Cancel。
+  - 其他请求（如动态工具调用 `item/tool/call`、ChatGPT 登录刷新）立即回错误，聊天显示 “Codex asked for …, which Codex Chat does not support; it was declined.”，这一轮不会卡住。
+  - 回答格式错误返回 400，卡片保留；请求已不存在返回 409 `approval_expired`。
+- 运行中插话：Codex 在跑时，Enter 或 “Steer” 把消息加入当前这一轮（`POST /api/codex/chat/:id/steer`，app-server `turn/steer`）；“Queue” 排到下一轮，斜杠命令在运行中总是排队。这一轮刚结束或不能插话（review、compact）时返回 409 `no_active_turn`，消息自动排队，这一轮结束后按普通消息发送。插话不会启动运行时，只作用于本聊天已在运行的一轮；请求失败时消息放回输入框。
 - 错误显示：
   - `error` 且 `willRetry: true`：显示 “Codex is retrying: …”，这一轮继续，收到新的条目或一轮开始后提示消失。
   - `turn/completed` 带 `turn.error`：显示 “Turn failed: …”。
@@ -77,7 +86,7 @@ Codex Chat 的审批来自 app-server 协议；普通 Terminal 不通过输出�
 - 服务端进程缺失或 spawn 失败时返回可恢复错误，不导致 TianForge pi 崩溃。
 - 终端重连不重复或丢失缓冲区输出。
 - 切换标签后草稿、模型与权限配置不丢失。
-- 审批卡片只针对真实协议审批请求显示。
+- 审批卡片只针对真实协议审批请求显示；Codex 的每个请求要么显示卡片，要么立即被拒绝，不会让一轮一直等待。
 - 一个 Chat 的消息和 Thinking 不重复渲染。
 
 ## 后续计划

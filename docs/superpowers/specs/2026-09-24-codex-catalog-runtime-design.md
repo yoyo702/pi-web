@@ -1,7 +1,7 @@
 # Codex 会话目录与运行时修复设计
 
 日期：2026-09-24
-状态：第 1、2 批已实施
+状态：第 1、2、3 批已实施
 
 ## 背景
 
@@ -48,9 +48,19 @@
 - 归档/删除期间加删除锁：不启动聊天运行时，也不创建 `resume` 终端。
 - 创建 `resume` 终端时若聊天正在运行一轮，返回 409，不再中断手机上发起的一轮。
 
+第 3 批（审批补全与运行中插话）：
+1. Codex 发给客户端的请求按类型处理，由 `server/agents/codex-requests.cjs` 校验浏览器的回答并生成协议回复：
+   - 命令审批（`item/commandExecution/requestApproval`）：`accept`、`acceptForSession`、`decline`、`cancel`；有 `proposedExecpolicyAmendment` 时可“始终允许”该命令前缀，有 `proposedNetworkPolicyAmendments` 时可按主机始终允许/阻止。规则内容取自请求本身，浏览器只传选择（`amendmentIndex`）。
+   - 文件改动审批（`item/fileChange/requestApproval`）：`accept`、`acceptForSession`、`decline`、`cancel`。
+   - 额外权限（`item/permissions/requestApproval`）：按请求授予网络/文件读写权限（含 `fileSystem.entries` 路径/通配/特殊路径条目，卡片逐条列出“访问方式: 路径”），范围为本轮（`turn`）或本会话（`session`）；拒绝时授予空权限。
+   - 向用户提问（`item/tool/requestUserInput`）：每个问题选一个选项或填写答案（`isOther`、`isSecret` 时显示输入框/密码框），回复 `{answers:{[id]:{answers:[...]}}}`。
+   - MCP 请求输入（`mcpServer/elicitation/request`）：`url` 模式显示链接（只打开 http/https），点“Done”回复 `accept`；表单模式按 schema 显示字符串、数字、布尔、单选、多选字段；都可 Decline、Cancel。
+   - 其他请求（`item/tool/call`、ChatGPT token 刷新、attestation、旧版 `applyPatchApproval`/`execCommandApproval`）立即回 JSON-RPC 错误（-32601），聊天显示“Codex asked for …, which Codex Chat does not support; it was declined.”，这一轮不会一直等待。
+2. 运行中插话：Codex 在跑时，按 Enter 或“Steer”调用 `POST /api/codex/chat/:id/steer`（app-server `turn/steer`，带 `expectedTurnId`），消息加入当前这一轮；“Queue”按钮排到下一轮。斜杠命令在运行中总是排队。这一轮已结束或不能插话（如 review、compact）时返回 409 `no_active_turn`，前端自动改为排队，这一轮结束后发送。判断依据：JSON-RPC `error.data` 里的 `activeTurnNotSteerable`（`protocolError` 保留为 `rpcData`），或错误文字 “no active turn” / “expected active turn id”。插话只作用于本聊天已在运行的一轮，不会启动运行时（接管后再检查一次运行时仍在）。插话请求失败时，消息放回输入框，排在期间新输入内容的前面。
+
 ## 非目标
 
-- 审批补全、新建 Codex 聊天、运行中插话、改动/待办展示、从消息分叉（后续批次）。
+- 新建 Codex 聊天、改动/待办展示、从消息分叉（后续批次）。
 - 终端内启动 Codex 的方式不变。
 - 会话数据只存于 `~/.codex`，本项目不另存副本。
 
@@ -69,10 +79,11 @@
 ### 前端
 
 - `components/agents/AgentsPanel.tsx`：列表分页（“加载更多”）、显示预览/模型/分叉来源；删除/归档运行中会话时显示服务端错误。
-- `components/agents/codex/CodexChatPanel.tsx`：重试中状态、失败原因、只发图片、写冲突提示与确认。
+- `components/agents/codex/CodexChatPanel.tsx`：重试中状态、失败原因、只发图片、写冲突提示与确认；第 3 批：按类型的请求卡片（`CodexRequestCard.tsx`）、插话与排队。
 
 ## 测试
 
 - 服务端单元测试使用假的 app-server（可执行脚本或注入的传输层）与临时目录，不读写真实 `~/.codex`：分页与去重、过滤、回退到文件扫描、运行中拒绝删除、空闲关闭不打断进行中的一轮、写操作才接管、未知会话终端冲突。
-- e2e：Agents 面板列表分页与“加载更多”、聊天错误与重试状态显示（模拟接口）。
+- e2e：Agents 面板列表分页与“加载更多”、聊天错误与重试状态显示、提问卡片、插话与排队（模拟接口）。
+- 第 3 批单元测试：各请求类型的回复与非法输入、不支持的请求立即回错误且一轮继续、插话成功与一轮结束后返回 `no_active_turn`。
 - 手动只读检查：本机列表能列出全部交互会话。
