@@ -20,7 +20,8 @@ import {
 } from "@/lib/file-types";
 import { encodeFilePathForApi, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { resolveLocalFileHref } from "@/lib/file-links";
-import { markdownPreviewRehypePlugins, markdownPreviewRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { markdownRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { useMarkdownRehypePlugins } from "@/hooks/useMarkdownRehypePlugins";
 import { CodeBlock, MermaidBlock } from "./MermaidBlock";
 import { parseUnifiedPatch } from "@/lib/patch";
 import type { GitFileDiffResponse } from "@/lib/git-types";
@@ -900,6 +901,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     () => (data?.language === "markdown" ? normalizeDisplayMath(data.content) : ""),
     [data],
   );
+  const markdownPreviewRehypePlugins = useMarkdownRehypePlugins(markdownPreview);
 
   // Tokenizing a large file is the most expensive part of this view. Reusing
   // the element lets unrelated re-renders (toolbar state, line selection)
@@ -1138,7 +1140,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
             style={{ padding: "24px 32px" }}
           >
             <ReactMarkdown
-              remarkPlugins={markdownPreviewRemarkPlugins}
+              remarkPlugins={markdownRemarkPlugins}
               rehypePlugins={markdownPreviewRehypePlugins}
               components={{
                 code({ className, children, ...props }) {

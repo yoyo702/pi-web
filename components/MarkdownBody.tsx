@@ -1,10 +1,12 @@
 "use client";
 
-import { useMemo, type MouseEvent } from "react";
+import { memo, useMemo, type MouseEvent } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
-import { markdownRehypePlugins, markdownRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { markdownRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
+import { useMarkdownRehypePlugins } from "@/hooks/useMarkdownRehypePlugins";
+import { splitMarkdownBlocks } from "@/lib/markdown-blocks";
 import { MermaidBlock, CodeBlock } from "./MermaidBlock";
 
 interface MarkdownBodyProps {
@@ -17,6 +19,7 @@ interface MarkdownBodyProps {
 
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
+  const rehypePlugins = useMarkdownRehypePlugins(normalizedMarkdown);
   // react-markdown uses these functions as element types, so a fresh object on
   // every render would unmount and remount code/Mermaid blocks (losing their
   // local state such as Mermaid preview mode) on each streaming update.
@@ -89,16 +92,35 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
             );
           },
   }), [cwd, isStreaming, onOpenFile]);
+  // While streaming, parse block by block: finished blocks keep identical
+  // text, so their memoized chunks skip re-parsing and only the growing last
+  // block is re-rendered. The final message renders as one document.
+  const streamingBlocks = useMemo(
+    () => (isStreaming ? splitMarkdownBlocks(normalizedMarkdown) : null),
+    [isStreaming, normalizedMarkdown],
+  );
 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>
-      <ReactMarkdown
-        remarkPlugins={markdownRemarkPlugins}
-        rehypePlugins={markdownRehypePlugins}
-        components={components}
-      >
-        {normalizedMarkdown}
-      </ReactMarkdown>
+      {streamingBlocks
+        ? streamingBlocks.map((block, index) => <MarkdownChunk key={index} markdown={block} components={components} rehypePlugins={rehypePlugins} />)
+        : <MarkdownChunk markdown={normalizedMarkdown} components={components} rehypePlugins={rehypePlugins} />}
     </div>
   );
 }
+
+const MarkdownChunk = memo(function MarkdownChunk({ markdown, components, rehypePlugins }: {
+  markdown: string;
+  components: Components;
+  rehypePlugins: ReturnType<typeof useMarkdownRehypePlugins>;
+}) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={markdownRemarkPlugins}
+      rehypePlugins={rehypePlugins}
+      components={components}
+    >
+      {markdown}
+    </ReactMarkdown>
+  );
+});

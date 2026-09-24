@@ -10,6 +10,7 @@ const jiti = createJiti(import.meta.url, {
 });
 const { MarkdownBody } = await jiti.import("./MarkdownBody.tsx");
 const { normalizeDisplayMath } = await jiti.import("../lib/markdown.ts");
+const { loadMathRendering } = await jiti.import("../hooks/useMarkdownRehypePlugins.ts");
 
 function renderMarkdown(markdown) {
   return renderToStaticMarkup(
@@ -37,14 +38,25 @@ test("keeps local file markdown links in the app", () => {
   assert.doesNotMatch(html, /target=|rel=|\snode=/);
 });
 
-test("renders LaTeX parenthesis delimiters as inline math", () => {
+test("renders math as plain code until KaTeX has loaded", () => {
+  const html = renderMarkdown(String.raw`射线为 \(r_c = K^{-1}p\)。`);
+
+  assert.doesNotMatch(html, /class="katex"/);
+  assert.match(html, /math-inline/);
+  assert.match(html, /r_c/);
+});
+
+test("renders LaTeX parenthesis delimiters as inline math", async () => {
+  // In the app the first render with math triggers this load, then re-renders.
+  await loadMathRendering();
   const html = renderMarkdown(String.raw`射线为 \(r_c = K^{-1}p\)。`);
 
   assert.match(html, /class="katex"/);
   assert.match(html, /r_c/);
 });
 
-test("renders paired LaTeX bracket delimiters as display math", () => {
+test("renders paired LaTeX bracket delimiters as display math", async () => {
+  await loadMathRendering();
   const html = renderMarkdown(String.raw`\[
 P(\lambda)=o_b+\lambda r_b
 \]`);
@@ -89,4 +101,43 @@ test("normalizes multiple inline math expressions without regex lookbehind", () 
     normalizeDisplayMath(String.raw`Values \(x+y\) and \(z\).`),
     "Values $x+y$ and $z$.",
   );
+});
+
+test("streaming block-by-block rendering matches the one-shot render", () => {
+  const markdown = [
+    "# Title",
+    "",
+    "Some **bold** text with `code` and a [link](https://example.com).",
+    "",
+    "1. first",
+    "",
+    "   continued paragraph",
+    "2. second",
+    "",
+    "- a",
+    "- b",
+    "",
+    "```ts",
+    "const a = 1;",
+    "",
+    "const b = 2;",
+    "```",
+    "",
+    "$$",
+    "x = y",
+    "",
+    "z = w",
+    "$$",
+    "",
+    "| a | b |",
+    "|---|---|",
+    "| 1 | 2 |",
+    "",
+    "> quote",
+    "",
+    "Final paragraph.",
+  ].join("\n");
+  const render = (isStreaming) => renderToStaticMarkup(React.createElement(MarkdownBody, { isStreaming }, markdown))
+    .replace(/>\s+</g, "><");
+  assert.equal(render(true), render(false));
 });

@@ -1,5 +1,4 @@
 import type { Options as ReactMarkdownOptions } from "react-markdown";
-import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
@@ -161,16 +160,13 @@ function normalizeInlineLatexMath(line: string): string {
 }
 
 export const markdownRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [remarkGfm, remarkMath];
-export const markdownPreviewRemarkPlugins: ReactMarkdownOptions["remarkPlugins"] = [remarkGfm, remarkMath];
 
-export const markdownRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
+/**
+ * Base rehype pipeline. KaTeX is appended on demand by useMarkdownRehypePlugins
+ * so its bundle and stylesheet load only when a message contains math.
+ */
+export const markdownRehypePlugins: NonNullable<ReactMarkdownOptions["rehypePlugins"]> = [
   rehypeRaw,
   [rehypeSanitize, markdownSanitizeSchema],
-  [rehypeKatex, { throwOnError: false, strict: false }],
 ];
 
-export const markdownPreviewRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
-  rehypeRaw,
-  [rehypeSanitize, markdownSanitizeSchema],
-  [rehypeKatex, { throwOnError: false, strict: false }],
-];

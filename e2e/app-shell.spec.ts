@@ -369,6 +369,47 @@ test("loads older session history only after scrolling to the top", async ({ pag
   expect(olderRequests).toBe(1);
 });
 
+test("renders math in chat messages after KaTeX loads on demand", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop chat rendering test");
+  const session = {
+    id: "math-session",
+    path: "/tmp/pi-web-math/session.jsonl",
+    cwd: "/tmp/pi-web-math",
+    projectRoot: "/tmp/pi-web-math",
+    created: "2026-08-03T00:00:00.000Z",
+    modified: "2026-08-03T00:01:00.000Z",
+    messageCount: 2,
+    firstMessage: "Show some math",
+  };
+  await page.route("**/api/sessions/math-session/state", async (route) => route.fulfill({ json: { running: false } }));
+  await page.route("**/api/sessions/math-session?*", async (route) => route.fulfill({ json: {
+    sessionId: session.id,
+    filePath: session.path,
+    modified: session.modified,
+    info: session,
+    leafId: "answer",
+    tree: [],
+    context: {
+      messages: [
+        { role: "user", content: "Show some math", timestamp: 1 },
+        { role: "assistant", content: [{ type: "text", text: "Euler: $e^{i\\pi}+1=0$\n\n$$\n\\int_0^1 x\\,dx\n$$" }], stopReason: "stop", timestamp: 2 },
+      ],
+      entryIds: ["prompt", "answer"],
+      thinkingLevel: "medium",
+      model: { provider: "openai-codex", modelId: "gpt-5.6-sol" },
+      page: { hasMore: false, beforeEntryId: null, totalMessages: 2 },
+    },
+  } }));
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [session], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: session.cwd } }));
+
+  await page.goto("/?session=math-session");
+  await expect(page.locator(".markdown-body .katex").first()).toBeVisible();
+  await expect(page.locator(".markdown-body .katex-display")).toBeVisible();
+  // The lazily loaded KaTeX stylesheet must be applied, not just the markup.
+  await expect.poll(() => page.locator(".markdown-body .katex").first().evaluate((element) => getComputedStyle(element).fontFamily)).toContain("KaTeX_Main");
+});
+
 test("renders a usable mobile shell", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith("mobile"), "mobile project only");
   await page.goto("/");
