@@ -70,6 +70,9 @@ app/api/
   skills/search/route.ts          GET/POST skills.sh search
   worktrees/route.ts              GET/POST/DELETE git worktrees
 
+server/
+  workspace-status.cjs process-wide bus for terminal/Codex run status; coalesces notify() calls and forwards snapshots to the running-status SSE
+
 lib/
   access-links.ts      classifies and formats LAN/Tailscale addresses
   agent-client.ts      typed fetch helper for /api/agent commands
@@ -88,6 +91,7 @@ lib/
   tool-presets.ts     PRESET_NONE/DEFAULT/FULL + getPresetFromTools()
   types.ts            shared TypeScript types
   normalize.ts        normalizeToolCalls() — field name mismatch between file format and our types
+  workspace-status-store.ts client store applying pushed terminals/codex_runtimes/running snapshots
   worktree.ts         project/worktree resolution and git worktree operations
   workspace/
     tabs.ts           type definitions for tab kinds
@@ -124,6 +128,7 @@ components/
 
 hooks/
   useAgentSession.ts  messages + streaming + SSE + fork/navigate/reconciliation logic
+  useWorkspaceStatus.ts shared EventSource for /api/agent/running/events; feeds workspace-status-store
   useAudio.ts         completion sound + browser AudioContext unlock
   useDragDrop.ts      shared drag/drop state
   useIsMobile.ts      responsive breakpoint hook
@@ -187,6 +192,7 @@ Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's
 - `useAgentSession` still treats per-session SSE as primary for chat events, but while a run is active it periodically calls `GET /api/agent/[id]` and also reconciles on `visibilitychange`/`online`. This fixes missed `agent_end` events from background tabs or half-open connections.
 - Prompt runs use a monotonic run id; late SSE or slow reconciliation responses from an old run must be ignored so they cannot resurrect stale streaming bubbles.
 - Pi's `isBashRunning` only covers user `!command` execution, not model tool calls. `AgentSessionWrapper` therefore tracks `tool_execution_start`/`tool_execution_update`/`tool_execution_end` and exposes `activeTools` so reopening a running conversation restores the command, bounded output tail, elapsed time, timeout, and last-output activity instead of showing only a generic tool name. Keep command/output snapshots bounded through `lib/tool-progress.ts`.
+- The running SSE also carries `terminals` and `codex_runtimes` snapshots from `server/workspace-status.cjs`. State owners call `workspaceStatus.notify(kind)` on every change (throttled for output-driven changes). Browsers share one connection via `hooks/useWorkspaceStatus.ts`, which reopens it with backoff (1–30 s) when an HTTP error closes it. Do not add polling for terminal or Codex run state. The Codex session catalog (disk state) keeps a 30 s poll and refreshes once when a terminal or Codex runtime starts, ends, or changes run state — not on output-driven pushes.
 
 ### Model Bash watchdog
 - Pi's built-in Bash schema accepts an optional timeout but intentionally has no default. TianForge injects the hidden inline extension from `lib/bash-watchdog.ts`, which fills in a 300-second timeout only when the model omitted one.

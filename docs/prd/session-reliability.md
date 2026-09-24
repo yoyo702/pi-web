@@ -51,7 +51,7 @@ TianForge pi、终端 Pi、Codex Chat 和 Agent Terminal 可能同时观察同�
 
 ## 后续计划
 
-- 将 Pi、Codex 和 Terminal 的状态进一步统一为同一活动协议。
+- Pi、Codex 和 Terminal 的运行状态已经共用同一条 SSE 推送；仍需把三者的事件语义（审批、命令历史等）进一步统一为同一活动协议，而不只是共享传输通道。
 - 更明确的单写者租约和所有权交接协议。
 - 审批、运行和恢复流程的故障注入测试。
 - Session 修复和诊断工具。

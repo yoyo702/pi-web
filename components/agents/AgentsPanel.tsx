@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { TerminalPermissionMode, TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
 import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
+import { useWorkspaceStatus } from "@/hooks/useWorkspaceStatus";
 import { ProductStatusDot } from "@/components/ProductStatus";
 import type { CodexChatTarget } from "@/components/workspace/WorkspaceActions";
 
@@ -51,6 +52,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [debouncedSessionQuery, setDebouncedSessionQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const { terminals, stats: terminalStats, update: setTerminals } = useWorkspaceTerminals(cwd, refreshKey);
+  const status = useWorkspaceStatus();
   const [projectScripts, setProjectScripts] = useState<ProjectScript[]>([]);
   const [projectScriptQuery, setProjectScriptQuery] = useState("");
   const [showAllProjectScripts, setShowAllProjectScripts] = useState(false);
@@ -74,6 +76,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const sessionRequestRef = useRef(0);
+  const lastCatalogSignatureRef = useRef<{ terminals: string | null; codexRuntimes: string | null }>({ terminals: null, codexRuntimes: null });
   const taskStatesRef = useRef(new Map<string, TerminalSession["state"]>());
   const taskStatesReadyRef = useRef(false);
   const taskNoticeTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -169,9 +172,40 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     void loadSessions();
     const timer = window.setInterval(() => {
       if (!document.hidden) void loadSessions(true);
-    }, 5000);
+    }, 30000);
     return () => window.clearInterval(timer);
   }, [loadSessions, refreshKey]);
+
+  // Terminal/Codex runtime pushes are a strong signal the session catalog
+  // (Codex-owned disk state, not covered by the status stream) may also have
+  // changed — e.g. a resumed session becomes a running terminal. Debounce so a
+  // burst of pushes triggers one refresh. Compare lifecycle signatures, not
+  // snapshots: output-driven terminal pushes (every 5 s while any terminal
+  // prints) must not turn this back into a 5 s scan of Codex session files.
+  // The first snapshot of each kind is not a change (the effect above already
+  // loads on mount), and filter changes that recreate `loadSessions` are
+  // reloaded by the effect above, so this reacts to the signatures only.
+  const loadSessionsRef = useRef(loadSessions);
+  useEffect(() => {
+    loadSessionsRef.current = loadSessions;
+  }, [loadSessions]);
+
+  const terminalSignature = useMemo(() => status.terminals === null ? null
+    : JSON.stringify(status.terminals.map((terminal) => [terminal.id, terminal.state, terminal.provider, terminal.sourceSessionId ?? null]).sort()), [status.terminals]);
+  const runtimeSignature = useMemo(() => status.codexRuntimes === null ? null
+    : JSON.stringify(status.codexRuntimes.map((runtime) => [runtime.threadId, runtime.state]).sort()), [status.codexRuntimes]);
+
+  useEffect(() => {
+    const last = lastCatalogSignatureRef.current;
+    lastCatalogSignatureRef.current = { terminals: terminalSignature, codexRuntimes: runtimeSignature };
+    const changed = (last.terminals !== null && last.terminals !== terminalSignature)
+      || (last.codexRuntimes !== null && last.codexRuntimes !== runtimeSignature);
+    if (!changed) return;
+    const timer = window.setTimeout(() => {
+      if (!document.hidden) void loadSessionsRef.current(true);
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [terminalSignature, runtimeSignature]);
 
   useEffect(() => {
     if (taskStatesReadyRef.current) {
