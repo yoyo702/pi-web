@@ -731,6 +731,100 @@ test("drives project rail activity from pushed terminal status without polling",
   expect(codexRuntimeRequests).toBe(0);
 });
 
+test("opens the specific terminal behind a project rail activity item", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop project rail test");
+  const cwdA = "/tmp/pi-web-rail-open-a";
+  const cwdB = "/tmp/pi-web-rail-open-b";
+  // Project C is open on a worktree; its terminal runs in the main checkout.
+  const rootC = "/tmp/pi-web-rail-open-c";
+  const worktreeC = "/tmp/pi-web-rail-open-c-worktrees/feat";
+  await page.addInitScript((snapshot) => {
+    if (!localStorage.getItem("pi-web:project-workspaces:v1")) localStorage.setItem("pi-web:project-workspaces:v1", JSON.stringify(snapshot));
+  }, {
+    activeId: cwdA,
+    workspaces: [
+      { id: cwdA, projectRoot: cwdA, cwd: cwdA, label: "rail-open-a", sessionId: null, lastActive: 2 },
+      { id: cwdB, projectRoot: cwdB, cwd: cwdB, label: "rail-open-b", sessionId: null, lastActive: 1 },
+      { id: rootC, projectRoot: rootC, cwd: worktreeC, label: "rail-open-c", sessionId: null, lastActive: 0 },
+    ],
+  });
+  const terminal = (id: string, title: string, cwd: string) => ({
+    id, title, provider: "shell", state: "running", exitCode: null, cwd,
+    pid: 111, permissionMode: "confirm", launchMode: "new", noAltScreen: false, cols: 80, rows: 24,
+    createdAt: "2026-08-03T00:00:00.000Z", endedAt: null, signal: null, bufferBytes: 0, bufferTruncated: false, history: [],
+  });
+  const terminals = [terminal("rail-terminal-a", "Dev server", cwdA), terminal("rail-terminal-b", "Build watcher", cwdB), terminal("rail-terminal-c", "Root server", rootC)];
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => {
+    const body = route.request().postDataJSON() as { cwd?: string };
+    return body.cwd ? route.fulfill({ json: { success: true, cwd: body.cwd } }) : route.fulfill({ status: 400, json: { error: "cwd required" } });
+  });
+  await page.route("**/api/git/status?*", async (route) => route.fulfill({ json: { isGitRepository: false, files: [] } }));
+  await page.route("**/api/worktrees?*", async (route) => route.fulfill({ json: { projectRoot: new URL(route.request().url()).searchParams.get("cwd"), isGit: false, isTopLevel: true, worktrees: [] } }));
+  await page.route("**/api/terminals**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname !== "/api/terminals") return route.fulfill({ status: 404, json: { error: "not found" } });
+    const cwd = url.searchParams.get("cwd") ?? "";
+    const own = terminals.filter((item) => item.cwd === cwd);
+    return route.fulfill({ json: {
+      cwd,
+      terminals: own,
+      stats: { workspace: { running: own.length, records: own.length, bufferBytes: 0 }, global: { running: 2, records: 2, bufferBytes: 0 }, limits: { running: 20, records: 100 } },
+    } });
+  });
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals, limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
+
+  await page.goto("/");
+  const rail = page.getByRole("navigation", { name: "Project workspaces" });
+  const workspaceTabs = page.locator(".center-workspace").getByRole("tablist").first();
+  await expect(rail.getByTitle(cwdA)).toHaveAttribute("aria-current", "page");
+
+  // Active project: the badge menu lists the terminal itself and opens its tab.
+  await rail.getByTitle(cwdA).getByLabel("Running: 1 working").click();
+  const menu = page.getByRole("dialog", { name: "rail-open-a activity" });
+  const devServer = menu.getByRole("button", { name: /^Dev server · Terminal · Running$/ });
+  await expect(devServer).toBeVisible();
+  await expect(menu.getByRole("button", { name: "Open workspace" })).toBeVisible();
+  await devServer.click();
+  await expect(menu).toBeHidden();
+  const devServerTab = page.locator('.center-workspace [role="tab"][data-tab-id="terminal:rail-terminal-a"]');
+  await expect(devServerTab).toHaveAttribute("aria-label", "Dev server");
+  await expect(devServerTab).toHaveAttribute("aria-selected", "true");
+
+  // Another project: the activity center switches to it first, then opens the
+  // terminal on top of that project's restored tabs.
+  await rail.getByRole("button", { name: "Workspace activity" }).click();
+  const center = page.getByRole("dialog", { name: "Workspace activity" });
+  await center.getByRole("group", { name: "rail-open-b activity items" }).getByRole("button", { name: /^Build watcher · Terminal/ }).click();
+  await expect(center).toBeHidden();
+  await expect(rail.getByTitle(cwdB)).toHaveAttribute("aria-current", "page");
+  const buildWatcherTab = page.locator('.center-workspace [role="tab"][data-tab-id="terminal:rail-terminal-b"]');
+  await expect(buildWatcherTab).toHaveAttribute("aria-selected", "true");
+  await expect(workspaceTabs.getByRole("tab", { name: "Build watcher" })).toBeVisible();
+  await expect(devServerTab).toHaveCount(0);
+
+  // Each project kept its own opened tab.
+  await rail.getByTitle(cwdA).click();
+  await expect(rail.getByTitle(cwdA)).toHaveAttribute("aria-current", "page");
+  await expect(devServerTab).toBeVisible();
+  await expect(buildWatcherTab).toHaveCount(0);
+
+  // A terminal matched by project root, not by the workspace's worktree cwd,
+  // opens with the workspace switched to the terminal's own directory, so the
+  // tab is backed by a live record instead of "Terminal process is unavailable".
+  await rail.getByRole("button", { name: "Workspace activity" }).click();
+  await center.getByRole("group", { name: "rail-open-c activity items" }).getByRole("button", { name: /^Root server · Terminal/ }).click();
+  await expect(rail.getByTitle(rootC)).toHaveAttribute("aria-current", "page");
+  const rootServerTab = page.locator('.center-workspace [role="tab"][data-tab-id="terminal:rail-terminal-c"]');
+  await expect(rootServerTab).toHaveAttribute("aria-selected", "true");
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("pi-web:project-workspaces:v1") || "null")?.workspaces?.find((workspace: { id: string }) => workspace.id === "/tmp/pi-web-rail-open-c")?.cwd)).toBe(rootC);
+  await expect(page.getByText("Terminal process is unavailable")).toHaveCount(0);
+});
+
 test("switches project workspaces from the mobile picker", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith("mobile"), "mobile project picker test");
   const sessions = [

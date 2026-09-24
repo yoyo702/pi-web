@@ -93,6 +93,7 @@ lib/
   types.ts            shared TypeScript types
   normalize.ts        normalizeToolCalls() — field name mismatch between file format and our types
   workspace-status-store.ts client store applying pushed terminals/codex_runtimes/running snapshots
+  rail-activity.ts    project rail activity items (running / ended / recently completed) grouped per workspace
   worktree.ts         project/worktree resolution and git worktree operations
   workspace/
     tabs.ts           type definitions for tab kinds

@@ -2,12 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { Activity, Bell, ChevronDown, Clipboard, FolderOpen, FolderPlus, GitBranch, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, TerminalSquare, X } from "lucide-react";
+import { Activity, Bell, Bot, ChevronDown, Clipboard, FolderOpen, FolderPlus, GitBranch, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, TerminalSquare, X } from "lucide-react";
 import { ProductStatusDot } from "./ProductStatus";
 import { DirectoryPicker } from "./DirectoryPicker";
 import type { ProjectWorkspace } from "@/lib/project-workspaces";
 import type { GitStatusResponse } from "@/lib/git-types";
+import type { SessionInfo } from "@/lib/types";
 import { getProductStatus, type ProductStatusId } from "@/lib/product-status";
+import { computeRailActivity, groupRailActivity, type RailActivityItem, type RailCompletedEntry, type WorkspaceActivity, type WorkspaceActivityState } from "@/lib/rail-activity";
 import { useWorkspaceStatus } from "@/hooks/useWorkspaceStatus";
 
 interface ProjectStatus {
@@ -15,14 +17,7 @@ interface ProjectStatus {
   changedFiles: number;
 }
 
-type ActivityState = "approval" | "failed" | "working" | "completed" | "idle";
-interface WorkspaceActivity {
-  state: ActivityState;
-  working: number;
-  approval: number;
-  failed: number;
-  completed: number;
-}
+type ActivityState = WorkspaceActivityState;
 
 const activityStatus: Record<ActivityState, ProductStatusId> = { approval: "approval", failed: "failed", working: "running", completed: "completed", idle: "idle" };
 const activityDefinition = (state: ActivityState) => getProductStatus(activityStatus[state]);
@@ -41,6 +36,8 @@ interface Props {
   onRename: (workspace: ProjectWorkspace, label: string) => void;
   onTogglePinned: (workspace: ProjectWorkspace) => void;
   onOpenSettings: () => void;
+  /** Opens one activity item (session, terminal, Codex chat), switching workspace first when needed. */
+  onOpenActivityItem: (workspace: ProjectWorkspace, item: RailActivityItem) => void;
 }
 
 function initials(label: string): string {
@@ -49,8 +46,20 @@ function initials(label: string): string {
 }
 
 const contextMenuButtonStyle: CSSProperties = { minHeight: 32, display: "flex", alignItems: "center", gap: 9, padding: "0 9px", border: 0, borderRadius: 5, background: "transparent", color: "var(--text)", cursor: "pointer", font: "12px/1.2 inherit", textAlign: "left" };
+const activityItemButtonStyle: CSSProperties = { width: "100%", minHeight: 30, display: "flex", alignItems: "center", gap: 8, padding: "0 7px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", font: "11px/1.3 inherit", textAlign: "left" };
+const activityKindLabel: Record<RailActivityItem["kind"], string> = { pi: "Pi session", terminal: "Terminal", codex: "Codex chat" };
 
-export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, onRestore, onReorder, onOpenTerminal, onRename, onTogglePinned, onOpenSettings }: Props) {
+function ActivityItemButton({ item, onOpen }: { item: RailActivityItem; onOpen: () => void }) {
+  const Icon = item.kind === "terminal" ? TerminalSquare : Bot;
+  return <button type="button" aria-label={`${item.label} · ${activityKindLabel[item.kind]} · ${activityLabel[item.state]}`} title={`${activityKindLabel[item.kind]} · ${item.label}\n${item.cwd}`} onClick={onOpen} style={activityItemButtonStyle}>
+    <span aria-hidden="true" style={{ width: 8, height: 8, flexShrink: 0, borderRadius: "50%", background: activityColor[item.state] }} />
+    <Icon size={12} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }} />
+    <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label}</span>
+    <small style={{ flexShrink: 0, color: activityColor[item.state], fontSize: 10 }}>{activityLabel[item.state]}</small>
+  </button>;
+}
+
+export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, onRestore, onReorder, onOpenTerminal, onRename, onTogglePinned, onOpenSettings, onOpenActivityItem }: Props) {
   const workspaceStatus = useWorkspaceStatus();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerBusy, setPickerBusy] = useState(false);
@@ -72,9 +81,9 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
   const [collapsed, setCollapsed] = useState(false);
   const [tick, setTick] = useState(0);
   const mobileRef = useRef<HTMLDivElement>(null);
-  const previousRunningRef = useRef<Map<string, string> | null>(null);
-  const completedUntilRef = useRef<Map<string, number>>(new Map());
-  const sessionRootByIdRef = useRef<Map<string, string>>(new Map());
+  const previousRunningRef = useRef<Map<string, RailActivityItem> | null>(null);
+  const completedRef = useRef<Map<string, RailCompletedEntry>>(new Map());
+  const sessionsByIdRef = useRef<Map<string, SessionInfo>>(new Map());
   const sessionRootsFetchedAtRef = useRef(0);
   useEffect(() => {
     setCollapsed(localStorage.getItem("pi-web:project-rail-collapsed") === "true");
@@ -138,57 +147,32 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
         // The full session list requires a server-side scan of every session
         // file, so only fetch it when a running session's project is unknown.
         // Throttled because a brand-new session may not be listed yet.
-        if (runningSessionIds.some((id) => !sessionRootByIdRef.current.has(id)) && Date.now() - sessionRootsFetchedAtRef.current >= 30_000) {
+        if (runningSessionIds.some((id) => !sessionsByIdRef.current.has(id)) && Date.now() - sessionRootsFetchedAtRef.current >= 30_000) {
           sessionRootsFetchedAtRef.current = Date.now();
           try {
             const response = await fetch("/api/sessions", { cache: "no-store" });
-            const sessionData = response.ok ? await response.json() as { sessions?: Array<{ id: string; cwd: string; projectRoot?: string | null }> } : null;
-            if (sessionData?.sessions) sessionRootByIdRef.current = new Map(sessionData.sessions.map((session) => [session.id, session.projectRoot || session.cwd]));
+            const sessionData = response.ok ? await response.json() as { sessions?: SessionInfo[] } : null;
+            // Kept whole: activity items open the session through this record.
+            if (sessionData?.sessions) sessionsByIdRef.current = new Map(sessionData.sessions.map((session) => [session.id, session]));
           } catch { /* status badges are best effort */ }
           // Status frames arrive back to back on connect, so a newer compute has
           // usually replaced this one by now (and was throttled out of its own
-          // lookup); recompute so the roots just fetched are used.
+          // lookup); recompute so the sessions just fetched are used.
           if (cancelled) { setTick((current) => current + 1); return; }
         }
         const counts: Record<string, number> = {};
-        const runningNow = new Map<string, string>();
-        for (const terminal of terminals) if (terminal.state === "running") { counts[terminal.cwd] = (counts[terminal.cwd] ?? 0) + 1; runningNow.set(`terminal:${terminal.id}`, terminal.cwd); }
-        for (const id of runningSessionIds) { const root = sessionRootByIdRef.current.get(id); if (root) runningNow.set(`pi:${id}`, root); }
-        for (const runtime of codexRuntimes) if (runtime.state !== "idle") runningNow.set(`codex:${runtime.threadId}`, runtime.cwd);
+        for (const terminal of terminals) if (terminal.state === "running") counts[terminal.cwd] = (counts[terminal.cwd] ?? 0) + 1;
         const now = Date.now();
-        if (previousRunningRef.current) for (const [key, cwd] of previousRunningRef.current) if (!runningNow.has(key)) completedUntilRef.current.set(cwd, now + 30_000);
-        previousRunningRef.current = runningNow;
-        for (const [cwd, until] of completedUntilRef.current) if (until <= now) completedUntilRef.current.delete(cwd);
-        const activities: Record<string, WorkspaceActivity> = {};
-        const matchingWorkspace = (cwd: string) => workspaces.find((workspace) => cwd === workspace.cwd || cwd === workspace.projectRoot);
-        for (const workspace of workspaces) activities[workspace.id] = { state: "idle", working: 0, approval: 0, failed: 0, completed: 0 };
-        for (const [key, cwd] of runningNow) {
-          const workspace = matchingWorkspace(cwd); if (!workspace) continue;
-          const activity = activities[workspace.id];
-          const runtime = key.startsWith("codex:") ? codexRuntimes.find((item) => `codex:${item.threadId}` === key) : null;
-          if (runtime?.state === "approval") activity.approval += 1; else activity.working += 1;
-        }
-        // Terminals ended within the last 5 minutes still count as completed/failed
-        // activity; track the soonest moment one of them (or a "recently completed"
-        // entry below) falls out of its window so we can schedule a recompute.
-        let nextExpiry = Infinity;
+        // Running items, terminals ended within 5 minutes, and items that
+        // finished within the last 30 s; see lib/rail-activity.ts.
+        const result = computeRailActivity({ terminals, runningSessionIds, codexRuntimes, sessionsById: sessionsByIdRef.current, previousRunning: previousRunningRef.current, completed: completedRef.current, now });
+        previousRunningRef.current = result.running;
+        completedRef.current = result.completed;
+        const activities = groupRailActivity(result.items, workspaces);
+        let nextExpiry = result.nextExpiry;
         // A running session whose project is still unknown (brand-new, or its
         // lookup was throttled) gets another lookup once the throttle lapses.
-        if (runningSessionIds.some((id) => !sessionRootByIdRef.current.has(id))) nextExpiry = sessionRootsFetchedAtRef.current + 30_000;
-        for (const terminal of terminals) {
-          if (terminal.state === "running" || !terminal.endedAt) continue;
-          const endedAt = Date.parse(terminal.endedAt);
-          if (now - endedAt > 5 * 60_000) continue;
-          nextExpiry = Math.min(nextExpiry, endedAt + 5 * 60_000);
-          const workspace = matchingWorkspace(terminal.cwd); if (!workspace) continue;
-          if (terminal.exitCode != null && terminal.exitCode !== 0) activities[workspace.id].failed += 1;
-          else activities[workspace.id].completed += 1;
-        }
-        for (const [cwd, until] of completedUntilRef.current) {
-          nextExpiry = Math.min(nextExpiry, until);
-          const workspace = matchingWorkspace(cwd); if (workspace) activities[workspace.id].completed += 1;
-        }
-        for (const activity of Object.values(activities)) activity.state = activity.approval ? "approval" : activity.failed ? "failed" : activity.working ? "working" : activity.completed ? "completed" : "idle";
+        if (runningSessionIds.some((id) => !sessionsByIdRef.current.has(id))) nextExpiry = Math.min(nextExpiry, sessionRootsFetchedAtRef.current + 30_000);
         if (cancelled) return;
         setRunningByCwd(counts);
         setActivityById(activities);
@@ -285,6 +269,11 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
     const activity = activityById[workspace.id];
     return activity && activity.state !== "idle" ? [{ workspace, activity }] : [];
   });
+  const openActivityItem = (workspace: ProjectWorkspace, item: RailActivityItem) => {
+    setActivityMenu(null);
+    setActivityCenterOpen(false);
+    onOpenActivityItem(workspace, item);
+  };
   const attentionCount = activeActivities.reduce((total, item) => total + item.activity.approval + item.activity.failed, 0);
 
   return <>
@@ -343,8 +332,20 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
         <footer style={{ display: "flex", gap: 12, padding: "7px 12px", borderTop: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 10 }}><span>↑↓ Navigate</span><span>Enter Open</span><span style={{ marginLeft: "auto" }}>{workspaces.length} projects</span></footer>
       </section>
     </div>}
-    {activityMenu && (() => { const activity = activityById[activityMenu.workspace.id]; if (!activity) return null; const rows: Array<[ActivityState, number]> = [["approval", activity.approval], ["failed", activity.failed], ["working", activity.working], ["completed", activity.completed]]; return <section className="project-activity-menu" role="dialog" aria-label={`${activityMenu.workspace.label} activity`} style={{ position: "fixed", zIndex: 1250, left: Math.max(8, Math.min(activityMenu.x, window.innerWidth - 248)), top: Math.max(8, Math.min(activityMenu.y, window.innerHeight - 230)), width: 240, padding: 7, border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", boxShadow: "0 16px 44px rgba(0,0,0,.36)" }}><header style={{ padding: "5px 7px 8px", borderBottom: "1px solid var(--border)" }}><strong style={{ display: "block", color: "var(--text)", fontSize: 12 }}>{activityMenu.workspace.label}</strong><small style={{ display: "block", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 9 }}>{activityMenu.workspace.cwd}</small></header><div style={{ display: "grid", gap: 2, padding: "6px 0" }}>{rows.filter(([, count]) => count > 0).map(([state, count]) => <div key={state} style={{ minHeight: 28, display: "flex", alignItems: "center", gap: 8, padding: "0 7px", color: "var(--text)", fontSize: 11 }}><span style={{ width: 8, height: 8, borderRadius: "50%", background: activityColor[state] }} /><span style={{ flex: 1 }}>{activityLabel[state]}</span><strong>{count}</strong></div>)}</div><button type="button" onClick={() => { const workspace = activityMenu.workspace; setActivityMenu(null); onSelect(workspace); }} style={{ width: "100%", minHeight: 32, border: 0, borderRadius: 6, background: "var(--bg-selected)", color: "var(--accent)", cursor: "pointer", font: "600 11px/1 inherit" }}>Open workspace</button></section>; })()}
-    {activityCenterOpen && <div role="dialog" aria-modal="true" aria-label="Workspace activity" onMouseDown={(event) => { if (event.target === event.currentTarget) setActivityCenterOpen(false); }} onKeyDown={(event) => { if (event.key === "Escape") setActivityCenterOpen(false); }} style={{ position: "fixed", inset: 0, zIndex: 1300, display: "grid", alignItems: "start", justifyItems: "center", padding: "min(14vh,140px) 16px 16px", background: "rgba(0,0,0,.32)" }}><section style={{ width: "min(520px,100%)", maxHeight: "min(620px,72vh)", display: "flex", flexDirection: "column", overflow: "hidden", border: "1px solid var(--border)", borderRadius: 11, background: "var(--bg-panel)", boxShadow: "0 22px 64px rgba(0,0,0,.42)" }}><header style={{ display: "flex", alignItems: "center", gap: 9, padding: "12px 14px", borderBottom: "1px solid var(--border)" }}><Bell size={15} color="var(--text-muted)" /><strong style={{ flex: 1, color: "var(--text)", fontSize: 13 }}>Workspace activity</strong><span style={{ color: "var(--text-dim)", fontSize: 10 }}>{activeActivities.length} active</span><button type="button" aria-label="Close workspace activity" onClick={() => setActivityCenterOpen(false)} style={{ width: 26, height: 26, display: "grid", placeItems: "center", border: 0, borderRadius: 5, background: "transparent", color: "var(--text-dim)", cursor: "pointer" }}><X size={13} /></button></header><div style={{ minHeight: 0, overflowY: "auto", padding: 6 }}>{activeActivities.map(({ workspace, activity }) => { const summary = [activity.approval && `${activity.approval} waiting`, activity.failed && `${activity.failed} failed`, activity.working && `${activity.working} working`, activity.completed && `${activity.completed} completed`].filter(Boolean).join(" · "); return <button key={workspace.id} type="button" onClick={() => { setActivityCenterOpen(false); onSelect(workspace); }} style={{ width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 10, padding: "7px 9px", border: 0, borderRadius: 7, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left" }}><span style={{ width: 10, height: 10, borderRadius: "50%", background: activityColor[activity.state], boxShadow: `0 0 0 3px color-mix(in srgb,${activityColor[activity.state]} 18%,transparent)` }} /><span style={{ minWidth: 0, flex: 1, display: "grid", gap: 4 }}><strong style={{ fontSize: 12 }}>{workspace.label}</strong><small style={{ color: "var(--text-dim)", fontSize: 10 }}>{summary}</small></span><span style={{ color: activityColor[activity.state], fontSize: 10 }}>{activityLabel[activity.state]}</span></button>; })}{activeActivities.length === 0 && <div style={{ padding: 30, textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>No active, failed, or recently completed tasks</div>}</div></section></div>}
+    {activityMenu && (() => {
+      const activity = activityById[activityMenu.workspace.id];
+      if (!activity) return null;
+      const menuHeight = Math.min(activity.items.length * 32, 240) + 104;
+      return <section className="project-activity-menu" role="dialog" aria-label={`${activityMenu.workspace.label} activity`} style={{ position: "fixed", zIndex: 1250, left: Math.max(8, Math.min(activityMenu.x, window.innerWidth - 288)), top: Math.max(8, Math.min(activityMenu.y, window.innerHeight - menuHeight)), width: 280, padding: 7, border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", boxShadow: "0 16px 44px rgba(0,0,0,.36)" }}>
+        <header style={{ padding: "5px 7px 8px", borderBottom: "1px solid var(--border)" }}><strong style={{ display: "block", color: "var(--text)", fontSize: 12 }}>{activityMenu.workspace.label}</strong><small style={{ display: "block", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontSize: 9 }}>{activityMenu.workspace.cwd}</small></header>
+        <div style={{ display: "grid", gap: 2, maxHeight: 240, overflowY: "auto", padding: "6px 0" }}>
+          {activity.items.map((item) => <ActivityItemButton key={item.key} item={item} onOpen={() => openActivityItem(activityMenu.workspace, item)} />)}
+          {activity.items.length === 0 && <div style={{ padding: "8px 7px", color: "var(--text-dim)", fontSize: 11 }}>No active, failed, or recently completed tasks</div>}
+        </div>
+        <button type="button" onClick={() => { const workspace = activityMenu.workspace; setActivityMenu(null); onSelect(workspace); }} style={{ width: "100%", minHeight: 32, border: 0, borderRadius: 6, background: "var(--bg-selected)", color: "var(--accent)", cursor: "pointer", font: "600 11px/1 inherit" }}>Open workspace</button>
+      </section>;
+    })()}
+    {activityCenterOpen && <div role="dialog" aria-modal="true" aria-label="Workspace activity" onMouseDown={(event) => { if (event.target === event.currentTarget) setActivityCenterOpen(false); }} onKeyDown={(event) => { if (event.key === "Escape") setActivityCenterOpen(false); }} style={{ position: "fixed", inset: 0, zIndex: 1300, display: "grid", alignItems: "start", justifyItems: "center", padding: "min(14vh,140px) 16px 16px", background: "rgba(0,0,0,.32)" }}><section style={{ width: "min(520px,100%)", maxHeight: "min(620px,72vh)", display: "flex", flexDirection: "column", overflow: "hidden", border: "1px solid var(--border)", borderRadius: 11, background: "var(--bg-panel)", boxShadow: "0 22px 64px rgba(0,0,0,.42)" }}><header style={{ display: "flex", alignItems: "center", gap: 9, padding: "12px 14px", borderBottom: "1px solid var(--border)" }}><Bell size={15} color="var(--text-muted)" /><strong style={{ flex: 1, color: "var(--text)", fontSize: 13 }}>Workspace activity</strong><span style={{ color: "var(--text-dim)", fontSize: 10 }}>{activeActivities.length} active</span><button type="button" aria-label="Close workspace activity" onClick={() => setActivityCenterOpen(false)} style={{ width: 26, height: 26, display: "grid", placeItems: "center", border: 0, borderRadius: 5, background: "transparent", color: "var(--text-dim)", cursor: "pointer" }}><X size={13} /></button></header><div style={{ minHeight: 0, overflowY: "auto", padding: 6 }}>{activeActivities.map(({ workspace, activity }) => { const summary = [activity.approval && `${activity.approval} waiting`, activity.failed && `${activity.failed} failed`, activity.working && `${activity.working} working`, activity.completed && `${activity.completed} completed`].filter(Boolean).join(" · "); return <div key={workspace.id} style={{ display: "grid", gap: 1, paddingBottom: 4 }}><button type="button" onClick={() => { setActivityCenterOpen(false); onSelect(workspace); }} style={{ width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 10, padding: "7px 9px", border: 0, borderRadius: 7, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left" }}><span style={{ width: 10, height: 10, borderRadius: "50%", background: activityColor[activity.state], boxShadow: `0 0 0 3px color-mix(in srgb,${activityColor[activity.state]} 18%,transparent)` }} /><span style={{ minWidth: 0, flex: 1, display: "grid", gap: 4 }}><strong style={{ fontSize: 12 }}>{workspace.label}</strong><small style={{ color: "var(--text-dim)", fontSize: 10 }}>{summary}</small></span><span style={{ color: activityColor[activity.state], fontSize: 10 }}>{activityLabel[activity.state]}</span></button>{activity.items.length > 0 && <div role="group" aria-label={`${workspace.label} activity items`} style={{ display: "grid", gap: 1, paddingLeft: 22 }}>{activity.items.map((item) => <ActivityItemButton key={item.key} item={item} onOpen={() => openActivityItem(workspace, item)} />)}</div>}</div>; })}{activeActivities.length === 0 && <div style={{ padding: 30, textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>No active, failed, or recently completed tasks</div>}</div></section></div>}
     {recentlyClosed && <div role="status" aria-live="polite" style={{ position: "fixed", left: 14, bottom: 14, zIndex: 1400, maxWidth: "min(390px,calc(100vw - 28px))", minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: "8px 9px 8px 13px", border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 16px 44px rgba(0,0,0,.36)", fontSize: 12 }}><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Closed <strong>{recentlyClosed.label}</strong></span><kbd style={{ color: "var(--text-dim)", font: "9px/1 var(--font-mono)" }}>⌘⇧T</kbd><button type="button" onClick={() => { const workspace = recentlyClosed; setRecentlyClosed(null); onRestore(workspace); }} style={{ minHeight: 28, padding: "0 9px", border: 0, borderRadius: 5, background: "var(--bg-selected)", color: "var(--accent)", cursor: "pointer", font: "600 11px/1 inherit" }}>Undo</button><button type="button" aria-label="Dismiss closed project notice" onClick={() => setRecentlyClosed(null)} style={{ width: 28, height: 28, display: "grid", placeItems: "center", padding: 0, border: 0, borderRadius: 5, background: "transparent", color: "var(--text-dim)", cursor: "pointer" }}><X size={13} /></button></div>}
     <div className="project-mobile-switcher" ref={mobileRef}>
       <button type="button" className="project-mobile-trigger" aria-label="Switch project" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><span>{activeWorkspace?.label ?? "Projects"}</span><ChevronDown size={13} /></button>

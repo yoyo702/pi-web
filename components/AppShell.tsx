@@ -40,6 +40,7 @@ import { useProjectWorkspaces } from "@/hooks/useProjectWorkspaces";
 import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PanelsTopLeft, Plus, TerminalSquare } from "lucide-react";
 import { projectLabel, upsertProjectWorkspace, type ProjectWorkspace } from "@/lib/project-workspaces";
 import { getProductStatus } from "@/lib/product-status";
+import type { RailActivityItem } from "@/lib/rail-activity";
 
 const rightPanelHeaderButtonStyle: React.CSSProperties = { width: 36, height: 36, display: "grid", placeItems: "center", padding: 0, border: 0, borderLeft: "1px solid var(--border)", background: "transparent", color: "var(--text-muted)", cursor: "pointer" };
 const rightPanelToolMenuStyle: React.CSSProperties = { position: "absolute", zIndex: 500, top: 38, right: 2, width: 190, display: "grid", gap: 2, padding: 5, border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", boxShadow: "0 14px 36px rgba(0,0,0,.26)" };
@@ -404,7 +405,7 @@ export function AppShell() {
     router.replace("/", { scroll: false });
   }, [activeProjectId, recordProjectWorkspace, router, isMobile, activateWorkspaceTab]);
 
-  const activateProjectWorkspace = useCallback(async (workspace: ProjectWorkspace) => {
+  const activateProjectWorkspace = useCallback(async (workspace: ProjectWorkspace, onActivated?: (activation: { token: number; cwd: string }) => void) => {
     // Activation is the trust boundary. Always ask the current server to
     // validate the path, even if the picker or a previous render already did.
     // This keeps restored workspaces and Fast Refresh/server-restart state in
@@ -447,6 +448,7 @@ export function AppShell() {
     setActiveTopPanel(null);
     suppressCwdBumpRef.current = true;
     router.replace("/", { scroll: false });
+    onActivated?.({ token, cwd: authorizedWorkspace.cwd });
     if (!authorizedWorkspace.sessionId) return;
     try {
       const response = await fetch("/api/sessions", { cache: "no-store" });
@@ -716,12 +718,16 @@ export function AppShell() {
     openGitReview();
   }, [rightPanelOpen, activeFileTabId, handleCloseFileTab, openGitReview]);
 
+  const openTerminalTab = useCallback((terminal: TerminalSession, preferredLabel?: string) => {
+    dispatchCenter({ type: "open", tab: { id: terminalTabId(terminal.id), label: preferredLabel || terminal.title || (terminal.provider === "shell" ? "Terminal" : `${terminal.provider} terminal`), kind: "terminal", terminalId: terminal.id, terminalProvider: terminal.provider, terminalPermissionMode: terminal.permissionMode, terminalLaunchMode: terminal.launchMode, terminalNoAltScreen: terminal.noAltScreen, terminalModel: terminal.model, terminalWebSearch: terminal.webSearch, terminalChatMode: terminal.chatMode, cwd: terminal.cwd, sourceSessionId: terminal.sourceSessionId, status: terminal.state === "running" ? "running" : "ended" } });
+  }, []);
+
   const handleTerminalCreated = useCallback((terminal: TerminalSession, preferredLabel?: string) => {
     updateTerminals((current) => [...current.filter((item) => item.id !== terminal.id), terminal]);
-    dispatchCenter({ type: "open", tab: { id: terminalTabId(terminal.id), label: preferredLabel || terminal.title || (terminal.provider === "shell" ? "Terminal" : `${terminal.provider} terminal`), kind: "terminal", terminalId: terminal.id, terminalProvider: terminal.provider, terminalPermissionMode: terminal.permissionMode, terminalLaunchMode: terminal.launchMode, terminalNoAltScreen: terminal.noAltScreen, terminalModel: terminal.model, terminalWebSearch: terminal.webSearch, terminalChatMode: terminal.chatMode, cwd: terminal.cwd, sourceSessionId: terminal.sourceSessionId, status: terminal.state === "running" ? "running" : "ended" } });
+    openTerminalTab(terminal, preferredLabel);
     setNewTerminalProvider(null);
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile, updateTerminals]);
+  }, [isMobile, openTerminalTab, updateTerminals]);
 
   const restartUnavailableTerminal = useCallback(async (tab: TerminalTab): Promise<TerminalSession | null> => {
     if (!tab.terminalProvider || !tab.cwd) return null;
@@ -756,7 +762,8 @@ export function AppShell() {
   }, []);
 
   const handleOpenCodexSessionChat = useCallback((target: CodexChatTarget) => {
-    const fields = { label: target.sessionName, sessionName: target.sessionName, cwd: target.cwd, model: target.model, reasoningEffort: target.reasoningEffort, serviceTier: target.serviceTier, approvalPolicy: target.approvalPolicy };
+    // An empty name falls back to the panel's own title and the thread's name.
+    const fields = { label: target.sessionName || "Codex Chat", sessionName: target.sessionName || undefined, cwd: target.cwd, model: target.model, reasoningEffort: target.reasoningEffort, serviceTier: target.serviceTier, approvalPolicy: target.approvalPolicy };
     dispatchCenter({ type: "open", tab: { id: codexChatTabId(target.sessionId), kind: "codex-chat", sourceSessionId: target.sessionId, ...fields }, mergeExisting: fields });
   }, []);
 
@@ -791,6 +798,81 @@ export function AppShell() {
       }
     }
   }, [activeCwd, centerHydratedCwd, restartUnavailableTerminal, terminalList, terminalSplit, terminalsLoaded, workspaceTabs]);
+
+  // Rail activity items open a specific session/terminal/Codex chat, possibly
+  // in another project. The open waits until that project's center panel state
+  // is hydrated (and, for terminals, its terminal list is loaded): the project
+  // switch restores saved tabs, which would otherwise replace the opened tab.
+  // `token` is the project switch that must still be current when it runs
+  // (null while activation is in flight); activation may canonicalize the cwd,
+  // so the cwd to wait for comes from the activation itself.
+  const [activityOpenIntent, setActivityOpenIntent] = useState<{ seq: number; item: RailActivityItem; token: number | null; cwd: string | null } | null>(null);
+  const activityOpenSeqRef = useRef(0);
+  const handleOpenActivityItem = useCallback((workspace: ProjectWorkspace, item: RailActivityItem) => {
+    const seq = ++activityOpenSeqRef.current;
+    // Terminals are grouped under a workspace by cwd or project root, but the
+    // center only loads the active cwd's terminals. A terminal in another
+    // directory of the project (e.g. the main checkout while a worktree is
+    // active) needs the workspace activated in that directory.
+    const targetCwd = item.kind === "terminal" ? item.terminal.cwd : null;
+    if (workspace.id === activeProjectId && activeCwd && (!targetCwd || targetCwd === activeCwd)) {
+      setActivityOpenIntent({ seq, item, token: projectSwitchTokenRef.current, cwd: activeCwd });
+      return;
+    }
+    setActivityOpenIntent({ seq, item, token: null, cwd: null });
+    void activateProjectWorkspace(targetCwd ? { ...workspace, cwd: targetCwd } : workspace, ({ token, cwd }) => {
+      setActivityOpenIntent((current) => current?.seq === seq ? { ...current, token, cwd } : current);
+    }).finally(() => {
+      // Activation failed (e.g. the path is no longer authorized).
+      setActivityOpenIntent((current) => current?.seq === seq && current.token === null ? null : current);
+    });
+  }, [activateProjectWorkspace, activeCwd, activeProjectId]);
+
+  // An intent that cannot run soon (e.g. the terminal list never loads) is
+  // dropped rather than popping a tab open much later.
+  const activityOpenIntentSeq = activityOpenIntent?.seq ?? null;
+  useEffect(() => {
+    if (activityOpenIntentSeq === null) return;
+    const timer = setTimeout(() => setActivityOpenIntent((current) => current?.seq === activityOpenIntentSeq ? null : current), 10_000);
+    return () => clearTimeout(timer);
+  }, [activityOpenIntentSeq]);
+
+  useEffect(() => {
+    const intent = activityOpenIntent;
+    if (!intent || intent.token === null) return;
+    // The user moved to another project (or cwd) before it could open.
+    if (intent.token !== projectSwitchTokenRef.current || activeCwd !== intent.cwd) {
+      setActivityOpenIntent(null);
+      return;
+    }
+    if (!activeCwd || centerHydratedCwd !== activeCwd) return;
+    if (intent.item.kind === "terminal" && !terminalsLoaded) return;
+    setActivityOpenIntent(null);
+    const { item } = intent;
+    if (item.kind === "terminal") {
+      // Only open a terminal this cwd actually has: a tab without a live record
+      // shows "unavailable", and its Restart would delete the real process
+      // (or the record was removed after the item was listed).
+      const current = terminals[item.id];
+      if (!current) return;
+      if (isMobile) closeMobileOverlays();
+      openTerminalTab(current);
+      return;
+    }
+    if (isMobile) closeMobileOverlays();
+    if (item.kind === "pi") {
+      // Supersede the activation's pending restore of the project's last session.
+      projectSwitchTokenRef.current += 1;
+      handleSelectSession(item.session);
+    } else {
+      const threadId = item.id;
+      const existing = workspaceTabs.find((tab) => tab.kind === "codex-chat" && (tab.id === codexChatTabId(threadId) || tab.sourceSessionId === threadId));
+      if (existing) activateWorkspaceTab(existing.id);
+      // A running runtime was started from a chat tab; reopen it with the chat
+      // defaults. No session name, so the panel shows the thread's own name.
+      else handleOpenCodexSessionChat({ sessionId: threadId, sessionName: "", cwd: item.runtime.cwd, approvalPolicy: "untrusted" });
+    }
+  }, [activateWorkspaceTab, activeCwd, activityOpenIntent, centerHydratedCwd, closeMobileOverlays, handleOpenCodexSessionChat, handleSelectSession, isMobile, openTerminalTab, terminals, terminalsLoaded, workspaceTabs]);
 
   // The context value is ref-backed so its identity never changes. Consumers
   // derive callbacks from it (e.g. ChatWindow's onOpenFile) and MessageView's
@@ -1009,6 +1091,7 @@ export function AppShell() {
         onRename={handleRenameProjectWorkspace}
         onTogglePinned={handleTogglePinnedProjectWorkspace}
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenActivityItem={handleOpenActivityItem}
         onOpenTerminal={(workspace) => {
           void activateProjectWorkspace(workspace);
           setNewTerminalProvider("shell");
