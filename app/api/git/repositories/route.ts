@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { discoverGitRepositories } from "@/lib/git-repositories";
 import { validateGitCwd } from "@/lib/git-request";
+import { errorResponse } from "@/lib/http-error";
 
 export async function GET(request: NextRequest) {
   try {
@@ -10,6 +11,6 @@ export async function GET(request: NextRequest) {
 
     return NextResponse.json({ repositories: await discoverGitRepositories(cwd) });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

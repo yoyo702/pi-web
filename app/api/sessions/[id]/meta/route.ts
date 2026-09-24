@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { statSync } from "fs";
 import { resolveSessionPath } from "@/lib/session-reader";
+import { errorResponse } from "@/lib/http-error";
 
 /**
  * Lightweight freshness probe for a session file. Returns only the file's
@@ -24,6 +25,6 @@ export async function GET(
       size: stat.size,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

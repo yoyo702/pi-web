@@ -1,9 +1,6 @@
-import { execFile } from "child_process";
 import fs from "fs";
 import path from "path";
-import { promisify } from "util";
-
-const execFileAsync = promisify(execFile);
+import { runGit } from "./git-exec";
 
 const SKIPPED_DIRECTORY_NAMES = new Set([
   ".git", "node_modules", ".next", "dist", "build", "coverage", ".turbo",
@@ -23,12 +20,7 @@ export interface GitRepositoryEntry {
 
 async function resolveRepositoryRoot(cwd: string): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync(
-      "git",
-      ["-C", cwd, "rev-parse", "--show-toplevel"],
-      { timeout: 5_000, maxBuffer: 1024 * 1024, env: { ...process.env, LC_ALL: "C" } },
-    );
-    return stdout.trim() || null;
+    return (await runGit(["rev-parse", "--show-toplevel"], { cwd, timeout: 5_000 })).trim() || null;
   } catch {
     return null;
   }

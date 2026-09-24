@@ -1,10 +1,7 @@
-import { execFile } from "child_process";
 import { existsSync, mkdirSync, realpathSync } from "fs";
 import { basename, dirname, join, resolve } from "path";
-import { promisify } from "util";
 import { allowFileRoot } from "./allowed-roots";
-
-const execFileAsync = promisify(execFile);
+import { runGit } from "./git-exec";
 
 // ============================================================================
 // Project resolution: cwd → { projectRoot, branch }
@@ -49,14 +46,9 @@ export function invalidateProjectCache(): void {
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
-    timeout: 10_000,
-    maxBuffer: 1024 * 1024,
-    // Pin the message locale so error-text matching (e.g. the dirty-worktree
-    // detection in the DELETE route) works regardless of system language.
-    env: { ...process.env, LC_ALL: "C" },
-  });
-  return stdout.trim();
+  // Raw exec errors propagate: the worktree DELETE route matches git's
+  // (locale-pinned) message text to detect dirty worktrees.
+  return (await runGit(args, { cwd, timeout: 10_000 })).trim();
 }
 
 /**

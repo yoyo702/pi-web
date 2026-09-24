@@ -5,6 +5,7 @@ import { invalidateModelsCache } from "@/lib/models-cache";
 import { normalizeModelCompat } from "@/lib/model-compat";
 import { getModelsPath, readModelsJson } from "@/lib/models-config-file";
 import { redactModelsConfig, restoreModelsConfigSecrets } from "@/lib/models-config-secrets";
+import { errorResponse } from "@/lib/http-error";
 
 export const dynamic = "force-dynamic";
 
@@ -34,6 +35,6 @@ export async function PUT(req: Request) {
     invalidateModelsCache();
     return NextResponse.json({ success: true });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

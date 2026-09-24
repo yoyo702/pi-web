@@ -2,6 +2,7 @@ import fs from "fs";
 import { NextRequest, NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed, isWindowsAbsolutePath } from "@/lib/file-access";
 import { getGitLog } from "@/lib/git-changes";
+import { errorResponse } from "@/lib/http-error";
 
 export async function GET(request: NextRequest) {
   try {
@@ -35,6 +36,6 @@ export async function GET(request: NextRequest) {
       skip: Number.isFinite(skip) ? skip : undefined,
     }));
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

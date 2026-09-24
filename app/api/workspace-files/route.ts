@@ -2,13 +2,14 @@ import fs from "fs";
 import path from "path";
 import { NextRequest, NextResponse } from "next/server";
 import { getAllowedFileRoots, isFilePathAllowed } from "@/lib/file-access";
+import { HttpError, errorResponse } from "@/lib/http-error";
 
 export const dynamic = "force-dynamic";
 
 type Action = "create-file" | "create-folder" | "rename" | "delete" | "copy" | "move";
 
-class RequestError extends Error {
-  constructor(message: string, readonly status = 400) { super(message); }
+class RequestError extends HttpError {
+  constructor(message: string, status = 400) { super(status, message); }
 }
 
 function isWithin(root: string, target: string) {
@@ -53,15 +54,15 @@ function invalidateFileIndex(cwd: string) {
   shared.__piFileIndexCache?.delete(cwd);
 }
 
-function errorResponse(error: unknown) {
-  if (error instanceof RequestError) return NextResponse.json({ error: error.message }, { status: error.status });
+/** Map filesystem error codes to user-facing statuses before the shared handler. */
+function workspaceErrorResponse(error: unknown) {
   if (error && typeof error === "object" && "code" in error) {
     const code = String(error.code);
     if (code === "EEXIST") return NextResponse.json({ error: "A file with that name already exists" }, { status: 409 });
     if (code === "ENOENT") return NextResponse.json({ error: "File not found" }, { status: 404 });
     if (code === "ENOTEMPTY") return NextResponse.json({ error: "Folder is not empty" }, { status: 409 });
   }
-  return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+  return errorResponse(error);
 }
 
 export async function POST(request: NextRequest) {
@@ -115,6 +116,6 @@ export async function POST(request: NextRequest) {
     invalidateFileIndex(cwd);
     return NextResponse.json({ path: sourceRelative });
   } catch (error) {
-    return errorResponse(error);
+    return workspaceErrorResponse(error);
   }
 }

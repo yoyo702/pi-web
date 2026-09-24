@@ -19,6 +19,7 @@ import type {
   PluginScope,
   PluginsResponse,
 } from "@/lib/api-types";
+import { errorResponse } from "@/lib/http-error";
 
 export const dynamic = "force-dynamic";
 
@@ -279,7 +280,7 @@ export async function GET(req: Request) {
     }
     return NextResponse.json(await readPlugins(cwd));
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }
 
@@ -330,6 +331,6 @@ export async function POST(req: Request) {
 
     return NextResponse.json(await readPlugins(body.cwd));
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

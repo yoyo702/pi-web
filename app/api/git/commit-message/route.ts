@@ -3,6 +3,7 @@ import { completeSimple, type AssistantMessage } from "@earendil-works/pi-ai/com
 import { createAgentSessionServices, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { getStagedDiffForCommitMessage } from "@/lib/git-changes";
 import { validateGitCwd } from "@/lib/git-request";
+import { errorResponse } from "@/lib/http-error";
 
 export const dynamic = "force-dynamic";
 
@@ -72,6 +73,6 @@ export async function POST(request: NextRequest) {
       clearTimeout(timeout);
     }
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

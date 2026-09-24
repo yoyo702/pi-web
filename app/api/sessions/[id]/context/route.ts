@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { resolveSessionPath, buildSessionContext, paginateSessionContext } from "@/lib/session-reader";
+import { errorResponse } from "@/lib/http-error";
 
 export async function GET(
   req: Request,
@@ -31,6 +32,6 @@ export async function GET(
 
     return NextResponse.json({ context });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

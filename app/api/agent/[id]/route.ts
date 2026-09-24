@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
-import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { getOrStartRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { errorResponse } from "@/lib/http-error";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -11,27 +11,11 @@ export async function POST(
 
   try {
     const body = await req.json() as { type: string; [key: string]: unknown };
-
-    // Fast path: already-running session
-    const existing = getRpcSession(id);
-    if (existing?.isAlive()) {
-      const result = await existing.send(body);
-      return NextResponse.json({ success: true, data: result });
-    }
-
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
-    }
-
-    const cwd = readSessionHeader(filePath)?.cwd ?? process.cwd();
-
-    const { session } = await startRpcSession(id, filePath, cwd);
+    const session = await getOrStartRpcSession(id);
     const result = await session.send(body);
-
     return NextResponse.json({ success: true, data: result });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }
 
@@ -51,6 +35,6 @@ export async function GET(
     const state = await session.send({ type: "get_state" });
     return NextResponse.json({ running: true, state });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

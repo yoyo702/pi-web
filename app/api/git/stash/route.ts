@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { changeGitStash, getGitStashes, type GitStashAction } from "@/lib/git-changes";
 import { validateGitCwd } from "@/lib/git-request";
+import { errorResponse } from "@/lib/http-error";
 
 const STASH_ACTIONS = new Set<GitStashAction>(["save", "apply", "pop", "drop"]);
 
@@ -11,7 +12,7 @@ export async function GET(request: NextRequest) {
     if (invalid) return NextResponse.json({ error: invalid.error }, { status: invalid.status });
     return NextResponse.json({ stashes: await getGitStashes(cwd) });
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }
 
@@ -33,6 +34,6 @@ export async function POST(request: NextRequest) {
       message: body.message,
     }));
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

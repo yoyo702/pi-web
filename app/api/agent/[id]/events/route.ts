@@ -1,5 +1,5 @@
-import { readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
-import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
+import { getOrStartRpcSession, type AgentSessionWrapper } from "@/lib/rpc-manager";
+import { HttpError } from "@/lib/http-error";
 
 export const dynamic = "force-dynamic";
 
@@ -16,19 +16,12 @@ export async function GET(
 ) {
   const { id } = await params;
 
-  // Fast path: already-running session
-  let session = getRpcSession(id);
-  if (!session || !session.isAlive()) {
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
-      return new Response("Session not found", { status: 404 });
-    }
-    const cwd = readSessionHeader(filePath)?.cwd ?? process.cwd();
-    try {
-      ({ session } = await startRpcSession(id, filePath, cwd));
-    } catch (error) {
-      return new Response(`Failed to start agent: ${error}`, { status: 500 });
-    }
+  let session: AgentSessionWrapper;
+  try {
+    session = await getOrStartRpcSession(id);
+  } catch (error) {
+    if (error instanceof HttpError) return new Response(error.message, { status: error.status });
+    return new Response(`Failed to start agent: ${error}`, { status: 500 });
   }
 
   let flushPendingUpdate: (() => void) | null = null;

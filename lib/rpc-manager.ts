@@ -5,7 +5,8 @@ import { randomUUID } from "crypto";
 import { existsSync, statSync, writeFileSync } from "fs";
 import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
-import { cacheSessionPath, invalidateSessionListCache } from "./session-reader";
+import { cacheSessionPath, invalidateSessionListCache, readSessionHeader, resolveSessionPath } from "./session-reader";
+import { badRequest, conflict, notFound } from "./http-error";
 import type { SlashCommandInfo, Theme } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type { ExtensionUiRequest, ExtensionUiResponse, ExtensionWidgetItem } from "./types";
@@ -418,13 +419,13 @@ export class AgentSessionWrapper {
 
     if (type === "prompt" || type === "steer" || type === "follow_up") {
       const imageError = validateAgentImages(command.images);
-      if (imageError) throw new Error(imageError);
+      if (imageError) throw badRequest(imageError);
     }
 
     switch (type) {
       case "prompt": {
         if (this.inner.isBashRunning) {
-          throw new Error("Cannot send a prompt while a shell command is running");
+          throw conflict("Cannot send a prompt while a shell command is running");
         }
         // Another process (e.g. terminal `pi`) may have appended to this same
         // session file while it sat idle here. Reload first so the new prompt
@@ -509,7 +510,7 @@ export class AgentSessionWrapper {
           await this.inner.modelRuntime.refresh({ allowNetwork: false });
           model = this.inner.modelRuntime.getModel(provider, modelId);
         }
-        if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
+        if (!model) throw notFound(`Model not found: ${provider}/${modelId}`);
         await this.inner.setModel(normalizeModelCompat(model), { persist: true });
         invalidateModelsCache();
         invalidateSessionListCache();
@@ -518,7 +519,7 @@ export class AgentSessionWrapper {
 
       case "fork": {
         if (this.inner.isBashRunning) {
-          throw new Error("Cannot fork while a shell command is running");
+          throw conflict("Cannot fork while a shell command is running");
         }
         const entryId = command.entryId as string;
         const sessionManager = this.inner.sessionManager;
@@ -528,7 +529,7 @@ export class AgentSessionWrapper {
         if (!currentSessionFile) throw new Error("Persisted session is missing a session file");
 
         const entry = sessionManager.getEntry(entryId);
-        if (!entry) throw new Error("Invalid entry ID for forking");
+        if (!entry) throw badRequest("Invalid entry ID for forking");
 
         const sessionDir = sessionManager.getSessionDir();
         let newSessionFile: string;
@@ -557,7 +558,7 @@ export class AgentSessionWrapper {
 
       case "navigate_tree": {
         if (this.inner.isBashRunning) {
-          throw new Error("Cannot navigate while a shell command is running");
+          throw conflict("Cannot navigate while a shell command is running");
         }
         const result = await this.inner.navigateTree(command.targetId as string, {});
         return { cancelled: result.cancelled };
@@ -588,7 +589,7 @@ export class AgentSessionWrapper {
 
       case "set_session_name": {
         const name = (command.name as string | undefined)?.trim();
-        if (!name) throw new Error("Session name cannot be empty");
+        if (!name) throw badRequest("Session name cannot be empty");
         this.inner.setSessionName(name);
         invalidateSessionListCache();
         return null;
@@ -676,7 +677,7 @@ export class AgentSessionWrapper {
       }
 
       case "reload": {
-        if (this.isRunning()) throw new Error("Cannot reload extensions while the session is running");
+        if (this.isRunning()) throw conflict("Cannot reload extensions while the session is running");
         await this.performReload();
         return { success: true };
       }
@@ -703,7 +704,7 @@ export class AgentSessionWrapper {
 
       case "bash": {
         if (this.promptRunning || this.inner.isStreaming || this.inner.isCompacting || this.inner.isBashRunning) {
-          throw new Error("Cannot run a shell command while the session is busy");
+          throw conflict("Cannot run a shell command while the session is busy");
         }
         const execution = this.inner.executeBash(
           command.command as string,
@@ -727,7 +728,7 @@ export class AgentSessionWrapper {
       }
 
       default:
-        throw new Error(`Unsupported command: ${type}`);
+        throw badRequest(`Unsupported command: ${type}`);
     }
   }
 
@@ -1122,6 +1123,19 @@ function getLocks(): Map<string, Promise<{ session: AgentSessionWrapper; realSes
 
 export function getRpcSession(sessionId: string): AgentSessionWrapper | undefined {
   return getRegistry().get(sessionId);
+}
+
+/**
+ * The live wrapper for a persisted session, cold-starting it from its session
+ * file when none is running. Throws a 404 HttpError if the file is unknown.
+ */
+export async function getOrStartRpcSession(sessionId: string): Promise<AgentSessionWrapper> {
+  const existing = getRpcSession(sessionId);
+  if (existing?.isAlive()) return existing;
+  const filePath = await resolveSessionPath(sessionId);
+  if (!filePath) throw notFound("Session not found");
+  const cwd = readSessionHeader(filePath)?.cwd ?? process.cwd();
+  return (await startRpcSession(sessionId, filePath, cwd)).session;
 }
 
 export function getRunningRpcSessionIds(): string[] {

@@ -6,6 +6,7 @@ import {
   listDirectories,
   resolveDirectory,
 } from "@/lib/directory-browser";
+import { errorResponse } from "@/lib/http-error";
 
 // GET /api/cwd/browse?path=...：列出文件系统中的可读子目录。
 export async function GET(request: NextRequest) {
@@ -36,6 +37,6 @@ export async function GET(request: NextRequest) {
       directories,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

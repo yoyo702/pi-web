@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getAllowedFileRoots, isExistingFilePathAllowed, isFilePathAllowed, isWindowsAbsolutePath } from "@/lib/file-access";
 import { commitChanges, getGitCommitDetail, getGitCommitFileDiff } from "@/lib/git-changes";
 import { validateGitCwd } from "@/lib/git-request";
+import { errorResponse } from "@/lib/http-error";
 
 export async function GET(request: NextRequest) {
   try {
@@ -46,7 +47,7 @@ export async function GET(request: NextRequest) {
     }
     return NextResponse.json(detail);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }
 
@@ -60,6 +61,6 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json(await commitChanges(body.cwd as string, body.message, { amend: body.amend === true }));
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

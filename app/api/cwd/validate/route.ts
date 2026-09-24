@@ -3,6 +3,7 @@ import { statSync, type Stats } from "fs";
 import { homedir } from "os";
 import { isAbsolute, resolve } from "path";
 import { allowFileRoot } from "@/lib/file-access";
+import { errorResponse } from "@/lib/http-error";
 
 function normalizeCwd(cwd: string): string {
   if (cwd === "~") return homedir();
@@ -36,6 +37,6 @@ export async function POST(req: Request) {
     allowFileRoot(normalizedCwd);
     return NextResponse.json({ success: true, cwd: normalizedCwd });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

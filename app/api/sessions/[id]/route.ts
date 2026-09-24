@@ -13,6 +13,7 @@ import {
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
 import { getRpcSession } from "@/lib/rpc-manager";
+import { errorResponse } from "@/lib/http-error";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -176,7 +177,7 @@ export async function GET(
       context,
     });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }
 
@@ -200,7 +201,7 @@ export async function PATCH(
     invalidateSessionListCache();
     return NextResponse.json({ ok: true });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }
 
@@ -269,6 +270,6 @@ export async function DELETE(
     invalidateSessionListCache();
     return NextResponse.json(reparentFailures.length ? { ok: true, reparentFailures } : { ok: true });
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

@@ -1,8 +1,7 @@
-import { execFile } from "child_process";
 import fs from "fs";
 import path from "path";
-import { promisify } from "util";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
+import { runGit } from "./git-exec";
 import type {
   GitBranch,
   GitBranchesResponse,
@@ -21,20 +20,13 @@ import {
   type GitPorcelainEntry,
 } from "./git-status";
 
-const execFileAsync = promisify(execFile);
 const GIT_TIMEOUT_MS = 10_000;
 const GIT_STATUS_MAX_BUFFER = 8 * 1024 * 1024;
 const COMMIT_MESSAGE_DIFF_MAX_CHARS = 50_000;
 
 async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFER): Promise<string> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
-      timeout: GIT_TIMEOUT_MS,
-      maxBuffer,
-      // Fail visibly rather than opening an invisible terminal credential prompt.
-      env: { ...process.env, LC_ALL: "C", GIT_TERMINAL_PROMPT: "0" },
-    });
-    return stdout;
+    return await runGit(args, { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer });
   } catch (error) {
     const detail = typeof error === "object" && error !== null && "stderr" in error
       ? String(error.stderr).trim()

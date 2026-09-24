@@ -1,8 +1,7 @@
-import { execFile } from "child_process";
 import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
-import { promisify } from "util";
+import { runGit } from "./git-exec";
 import type {
   SkillInstallInfo,
   SkillUpdateResult,
@@ -11,7 +10,6 @@ import type {
 const CHECK_TIMEOUT_MS = 15_000;
 const GIT_CHECK_TIMEOUT_MS = 30_000;
 const DEFAULT_SKILLS_API_BASE = process.env.SKILLS_API_URL || "https://skills.sh";
-const execFileAsync = promisify(execFile);
 
 type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 type GitTreeResolver = (install: SkillInstallInfo) => Promise<string>;
@@ -124,10 +122,10 @@ async function resolveGitTreeHash(install: SkillInstallInfo): Promise<string> {
   const gitDir = await mkdtemp(join(tmpdir(), "pi-web-skill-check-"));
 
   try {
-    await execFileAsync("git", ["init", "--bare", gitDir], {
-      timeout: GIT_CHECK_TIMEOUT_MS,
-    });
-    await execFileAsync("git", [
+    await runGit(["init", "--bare", gitDir], { timeout: GIT_CHECK_TIMEOUT_MS });
+    // runGit disables credential prompts, so a private or missing repository
+    // fails immediately instead of hanging until the timeout.
+    await runGit([
       `--git-dir=${gitDir}`,
       "fetch",
       "--depth=1",
@@ -137,12 +135,7 @@ async function resolveGitTreeHash(install: SkillInstallInfo): Promise<string> {
       ref,
     ], { timeout: GIT_CHECK_TIMEOUT_MS });
     const revision = folder ? `FETCH_HEAD:${folder}` : "FETCH_HEAD^{tree}";
-    const { stdout } = await execFileAsync(
-      "git",
-      [`--git-dir=${gitDir}`, "rev-parse", revision],
-      { timeout: GIT_CHECK_TIMEOUT_MS },
-    );
-    const hash = stdout.trim();
+    const hash = (await runGit([`--git-dir=${gitDir}`, "rev-parse", revision], { timeout: GIT_CHECK_TIMEOUT_MS })).trim();
     if (!/^[0-9a-f]{40}$/i.test(hash)) throw new Error("Invalid Git tree hash");
     return hash;
   } finally {

@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { generateSessionTitle } from "@/lib/session-title";
-import { getRpcSession, startRpcSession } from "@/lib/rpc-manager";
-import { invalidateSessionListCache, readSessionHeader, resolveSessionPath } from "@/lib/session-reader";
+import { getOrStartRpcSession } from "@/lib/rpc-manager";
+import { invalidateSessionListCache, resolveSessionPath } from "@/lib/session-reader";
+import { errorResponse } from "@/lib/http-error";
 
 export async function POST(
   _req: Request,
@@ -11,16 +12,11 @@ export async function POST(
   const { id } = await params;
 
   try {
-    const filePath = await resolveSessionPath(id);
-    if (!filePath) {
+    // Naming needs a persisted session, even when a live wrapper exists.
+    if (!(await resolveSessionPath(id))) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
-
-    const cwd = readSessionHeader(filePath)?.cwd ?? process.cwd();
-    const existing = getRpcSession(id);
-    const { session } = existing?.isAlive()
-      ? { session: existing }
-      : await startRpcSession(id, filePath, cwd);
+    const session = await getOrStartRpcSession(id);
 
     // globalThis keeps wrappers alive across dev hot reloads; older instances
     // may predate waitUntilReady(), but those have already completed startup.
@@ -38,9 +34,6 @@ export async function POST(
     invalidateSessionListCache();
     return NextResponse.json({ title: result.title, usage: result.usage ?? null });
   } catch (error) {
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : String(error) },
-      { status: 500 },
-    );
+    return errorResponse(error);
   }
 }

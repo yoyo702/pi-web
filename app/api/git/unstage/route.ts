@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { validateGitCwd } from "@/lib/git-request";
 import { unstageFiles } from "@/lib/git-changes";
+import { errorResponse } from "@/lib/http-error";
 
 export async function POST(request: NextRequest) {
   try {
@@ -12,6 +13,6 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json(await unstageFiles(body.cwd as string, body.paths));
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }

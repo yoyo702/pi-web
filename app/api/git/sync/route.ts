@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { syncGitRemote, type GitRemoteAction } from "@/lib/git-changes";
 import { validateGitCwd } from "@/lib/git-request";
+import { errorResponse } from "@/lib/http-error";
 
 const REMOTE_ACTIONS = new Set<GitRemoteAction>(["fetch", "pull", "push", "publish"]);
 
@@ -17,6 +18,6 @@ export async function POST(request: NextRequest) {
     }
     return NextResponse.json(await syncGitRemote(body.cwd as string, body.action));
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
+    return errorResponse(error);
   }
 }
