@@ -794,6 +794,8 @@ test("opens the specific terminal behind a project rail activity item", async ({
   const devServerTab = page.locator('.center-workspace [role="tab"][data-tab-id="terminal:rail-terminal-a"]');
   await expect(devServerTab).toHaveAttribute("aria-label", "Dev server");
   await expect(devServerTab).toHaveAttribute("aria-selected", "true");
+  // A desktop pointer keeps the touch-key bar hidden.
+  await expect(page.getByLabel("Terminal shortcuts")).toBeHidden();
 
   // Another project: the activity center switches to it first, then opens the
   // terminal on top of that project's restored tabs.
@@ -823,6 +825,47 @@ test("opens the specific terminal behind a project rail activity item", async ({
   await expect(rootServerTab).toHaveAttribute("aria-selected", "true");
   await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("pi-web:project-workspaces:v1") || "null")?.workspaces?.find((workspace: { id: string }) => workspace.id === "/tmp/pi-web-rail-open-c")?.cwd)).toBe(rootC);
   await expect(page.getByText("Terminal process is unavailable")).toHaveCount(0);
+});
+
+test("shows terminal touch keys on a landscape tablet wider than the mobile breakpoint", async ({ browser }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "touch tablet emulation runs once, from the desktop project");
+  const context = await browser.newContext({ baseURL: testInfo.project.use.baseURL, viewport: { width: 1024, height: 768 }, hasTouch: true, isMobile: true });
+  const page = await context.newPage();
+  const cwd = "/tmp/pi-web-touch-keys";
+  await page.addInitScript((snapshot) => {
+    if (!localStorage.getItem("pi-web:project-workspaces:v1")) localStorage.setItem("pi-web:project-workspaces:v1", JSON.stringify(snapshot));
+  }, { activeId: cwd, workspaces: [{ id: cwd, projectRoot: cwd, cwd, label: "touch-keys", sessionId: null, lastActive: 1 }] });
+  const terminals = [{
+    id: "touch-terminal", title: "Claude", provider: "shell", state: "running", exitCode: null, cwd,
+    pid: 111, permissionMode: "confirm", launchMode: "new", noAltScreen: false, cols: 80, rows: 24,
+    createdAt: "2026-08-03T00:00:00.000Z", endedAt: null, signal: null, bufferBytes: 0, bufferTruncated: false, history: [],
+  }];
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd } }));
+  await page.route("**/api/git/status?*", async (route) => route.fulfill({ json: { isGitRepository: false, files: [] } }));
+  await page.route("**/api/worktrees?*", async (route) => route.fulfill({ json: { projectRoot: cwd, isGit: false, isTopLevel: true, worktrees: [] } }));
+  await page.route("**/api/terminals**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname !== "/api/terminals") return route.fulfill({ status: 404, json: { error: "not found" } });
+    return route.fulfill({ json: { cwd, terminals, stats: { workspace: { running: 1, records: 1, bufferBytes: 0 }, global: { running: 1, records: 1, bufferBytes: 0 }, limits: { running: 20, records: 100 } } } });
+  });
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals, limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
+
+  try {
+    await page.goto("/");
+    const rail = page.getByRole("navigation", { name: "Project workspaces" });
+    await rail.getByTitle(cwd).getByLabel("Running: 1 working").click();
+    await page.getByRole("dialog", { name: "touch-keys activity" }).getByRole("button", { name: /^Claude · Terminal/ }).click();
+    const keys = page.getByLabel("Terminal shortcuts");
+    await expect(keys).toBeVisible();
+    for (const name of ["Esc", "Tab", "Shift+Tab", "Ctrl+C", "Ctrl", "Alt", "Enter"]) await expect(keys.getByRole("button", { name, exact: true })).toBeVisible();
+  } finally {
+    await context.close();
+  }
 });
 
 test("switches project workspaces from the mobile picker", async ({ page }, testInfo) => {

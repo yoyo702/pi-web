@@ -51,3 +51,27 @@ function getDevToolsVisibilitySnapshot(): boolean {
 export function useHideDevelopmentTools(): boolean {
   return useSyncExternalStore(subscribeDevToolsVisibility, getDevToolsVisibilitySnapshot, getServerSnapshot);
 }
+
+// Shared with the touch-keys block in app/globals.css.
+const TOUCH_KEYS_QUERY = "(max-width: 640px), (hover: none) and (pointer: coarse)";
+
+function subscribeTouchKeys(cb: () => void): () => void {
+  if (typeof window === "undefined" || !window.matchMedia) return () => {};
+  const mql = window.matchMedia(TOUCH_KEYS_QUERY);
+  mql.addEventListener("change", cb);
+  return () => mql.removeEventListener("change", cb);
+}
+
+function getTouchKeysSnapshot(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  return window.matchMedia(TOUCH_KEYS_QUERY).matches;
+}
+
+/**
+ * True on phones and on touch-only devices wider than the mobile breakpoint
+ * (landscape phones, tablets): they need on-screen terminal keys and a
+ * terminal that stays above the on-screen keyboard.
+ */
+export function useTouchTerminalKeys(): boolean {
+  return useSyncExternalStore(subscribeTouchKeys, getTouchKeysSnapshot, getServerSnapshot);
+}

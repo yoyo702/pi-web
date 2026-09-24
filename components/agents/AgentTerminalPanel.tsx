@@ -8,7 +8,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, ChevronDown, ChevronUp, History, Maximize2, Search, Star, X } from "lucide-react";
 import type { TerminalSession } from "@/lib/agents/terminal";
 import { applyTerminalModifier, asBracketedPaste, getTerminalVisibleHeight, isTerminalCopyShortcut, type TerminalModifier } from "@/lib/terminal-input";
-import { useIsMobile } from "@/hooks/useIsMobile";
+import { useTouchTerminalKeys } from "@/hooks/useIsMobile";
 import { useTheme } from "@/hooks/useTheme";
 import { useTerminalSocket, type TerminalConnectionState } from "@/hooks/useTerminalSocket";
 import { copyText } from "@/lib/clipboard";
@@ -30,7 +30,7 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
   const { isDark } = useTheme();
   const isDarkRef = useRef(isDark);
   isDarkRef.current = isDark;
-  const isMobile = useIsMobile();
+  const touchKeys = useTouchTerminalKeys();
   const panelRef = useRef<HTMLElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -239,7 +239,7 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
 
   useEffect(() => {
     const viewport = window.visualViewport;
-    if (!viewport || !isMobile) return;
+    if (!viewport || !touchKeys) return;
     const panel = panelRef.current;
     if (!panel) return;
     let frame = 0;
@@ -258,7 +258,7 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
       viewport.removeEventListener("scroll", sync);
       panel.style.height = "";
     };
-  }, [isMobile]);
+  }, [touchKeys]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -365,7 +365,7 @@ export function AgentTerminalPanel({ terminal: initial, splitCandidates = [], sp
       <div className="agent-terminal-mobile-dock" aria-label="Terminal shortcuts">
         {pasteOpen && <div className="agent-terminal-paste"><textarea value={pasteText} onChange={(event) => setPasteText(event.target.value)} placeholder="Paste or enter a command" autoCapitalize="none" autoCorrect="off" spellCheck={false} /><div><button type="button" onClick={() => setPasteOpen(false)}>Close</button><button type="button" disabled={!pasteText} onClick={() => { sendInput(asBracketedPaste(pasteText)); setPasteText(""); setPasteOpen(false); }}>Send</button></div></div>}
         {commandPanel && <div className="agent-terminal-command-panel"><header><strong>{commandPanel === "history" ? "Recent commands" : "Favorites"}</strong><button type="button" onClick={() => setCommandPanel(null)} aria-label="Close"><X size={16} /></button></header><div>{(commandPanel === "history" ? history : favorites).length === 0 ? <p>No commands yet</p> : (commandPanel === "history" ? history : favorites).slice(0, 20).map((command) => <div className="agent-terminal-command" key={command}><button type="button" onClick={() => inputSavedCommand(command)}>{command}</button><button type="button" className={favorites.includes(command) ? "is-favorite" : ""} onClick={() => toggleFavorite(command)} aria-label="Toggle favorite"><Star size={16} fill={favorites.includes(command) ? "currentColor" : "none"} /></button></div>)}</div></div>}
-        <div className="agent-terminal-mobile-actions" onPointerDownCapture={(event) => { event.preventDefault(); terminalRef.current?.focus(); }}><button type="button" onClick={() => { setCommandPanel(commandPanel === "history" ? null : "history"); setPasteOpen(false); }}><History size={16} /></button><button type="button" onClick={() => { setCommandPanel(commandPanel === "favorites" ? null : "favorites"); setPasteOpen(false); }}><Star size={16} /></button><button type="button" onClick={() => sendInput("\r")}>Enter</button><button type="button" onClick={() => sendInput("\x1b")}>Esc</button><button type="button" onClick={() => setPasteOpen((open) => !open)}>Paste</button><button type="button" onClick={() => sendInput("\x1b[A")}><ArrowUp size={16} /></button><button type="button" onClick={() => sendInput("\x1b[D")}><ArrowLeft size={16} /></button><button type="button" onClick={() => sendInput("\x1b[B")}><ArrowDown size={16} /></button><button type="button" onClick={() => sendInput("\x1b[C")}><ArrowRight size={16} /></button><button type="button" onClick={() => sendInput("\t")}>Tab</button><button type="button" className={modifier === "ctrl" ? "is-active" : ""} onClick={() => setStickyModifier(modifierRef.current === "ctrl" ? null : "ctrl")}>Ctrl</button><button type="button" className={modifier === "alt" ? "is-active" : ""} onClick={() => setStickyModifier(modifierRef.current === "alt" ? null : "alt")}>Alt</button></div>
+        <div className="agent-terminal-mobile-actions" onPointerDownCapture={(event) => { event.preventDefault(); terminalRef.current?.focus(); }}><button type="button" onClick={() => { setCommandPanel(commandPanel === "history" ? null : "history"); setPasteOpen(false); }}><History size={16} /></button><button type="button" onClick={() => { setCommandPanel(commandPanel === "favorites" ? null : "favorites"); setPasteOpen(false); }}><Star size={16} /></button><button type="button" onClick={() => sendInput("\r")}>Enter</button><button type="button" onClick={() => sendInput("\x1b")}>Esc</button><button type="button" onClick={() => setPasteOpen((open) => !open)}>Paste</button><button type="button" onClick={() => sendInput("\x1b[A")}><ArrowUp size={16} /></button><button type="button" onClick={() => sendInput("\x1b[D")}><ArrowLeft size={16} /></button><button type="button" onClick={() => sendInput("\x1b[B")}><ArrowDown size={16} /></button><button type="button" onClick={() => sendInput("\x1b[C")}><ArrowRight size={16} /></button><button type="button" onClick={() => sendInput("\t")}>Tab</button><button type="button" onClick={() => sendInput("\x1b[Z")} aria-label="Shift+Tab">⇧Tab</button><button type="button" onClick={() => sendInput("\x03")} aria-label="Ctrl+C">^C</button><button type="button" className={modifier === "ctrl" ? "is-active" : ""} onClick={() => setStickyModifier(modifierRef.current === "ctrl" ? null : "ctrl")}>Ctrl</button><button type="button" className={modifier === "alt" ? "is-active" : ""} onClick={() => setStickyModifier(modifierRef.current === "alt" ? null : "alt")}>Alt</button></div>
       </div>
       {confirmStop && <div role="dialog" aria-modal="true" aria-label="Stop terminal" onMouseDown={(event) => { if (event.target === event.currentTarget) setConfirmStop(false); }} style={overlayStyle}>
         <section style={dialogStyle}><strong>Stop {terminal.provider} terminal</strong><p style={{ margin: "8px 0 18px", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>The running process will be interrupted. Its session history will remain available.</p><div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}><button type="button" onClick={() => setConfirmStop(false)} style={dialogButtonStyle}>Cancel</button><button type="button" onClick={() => void stop()} style={{ ...dialogButtonStyle, borderColor: "rgb(239 68 68 / 45%)", background: "rgb(239 68 68 / 10%)", color: "#ef4444" }}>Stop terminal</button></div></section>

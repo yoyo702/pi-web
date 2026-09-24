@@ -1555,7 +1555,11 @@ html.dark .agent-terminal { background: #11151d; }
   .agent-terminal > header > span[role="status"] { max-width:82px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .agent-terminal > header strong { max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .agent-terminal-viewport { padding: 6px 6px 22px; }
+}
 
+/* Touch keys: phones, and landscape phones/tablets whose width exceeds the
+ * mobile breakpoint but still have no Esc, arrows, or modifiers. */
+@media (max-width: 640px), (hover: none) and (pointer: coarse) {
   .agent-terminal-mobile-dock {
     position: relative;
     z-index: 4;
@@ -1569,7 +1573,7 @@ html.dark .agent-terminal { background: #11151d; }
 
   .agent-terminal-mobile-actions {
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
     gap: 4px;
   }
 
