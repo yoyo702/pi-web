@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { openSessionForRead } from "@/lib/session-file-cache";
 import { resolveSessionPath, buildSessionContext, paginateSessionContext } from "@/lib/session-reader";
 import { errorResponse } from "@/lib/http-error";
 
@@ -21,7 +21,7 @@ export async function GET(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = SessionManager.open(filePath);
+    const sm = openSessionForRead(filePath);
     const fullContext = buildSessionContext(sm.getEntries() as never, leafId, {
       deferThinking,
       deferToolResultImages,

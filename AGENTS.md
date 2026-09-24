@@ -84,6 +84,7 @@ lib/
   pi-types.ts          local structural types for pi SDK objects
   rpc-manager.ts      AgentSessionWrapper + registry + startRpcSession
   session-reader.ts   SessionManager wrappers + path cache + buildSessionContext adapter
+  session-file-cache.ts incremental parsed-entry cache for read-only session loads
   session-snapshot-cache.ts bounded recent-session memory + IndexedDB cache
   session-background-sync.ts reduces background events into cached snapshots
   background-session-event.ts bounds events broadcast to inactive sessions
@@ -194,6 +195,7 @@ Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's
 - Pi's `isBashRunning` only covers user `!command` execution, not model tool calls. `AgentSessionWrapper` therefore tracks `tool_execution_start`/`tool_execution_update`/`tool_execution_end` and exposes `activeTools` so reopening a running conversation restores the command, bounded output tail, elapsed time, timeout, and last-output activity instead of showing only a generic tool name. Keep command/output snapshots bounded through `lib/tool-progress.ts`.
 - The running SSE also carries `terminals` and `codex_runtimes` snapshots from `server/workspace-status.cjs`. State owners call `workspaceStatus.notify(kind)` on every change (throttled for output-driven changes). Browsers share one connection via `hooks/useWorkspaceStatus.ts`, which reopens it with backoff (1–30 s) when an HTTP error closes it. Do not add polling for terminal or Codex run state. The Codex session catalog (disk state) keeps a 30 s poll and refreshes once when a terminal or Codex runtime starts, ends, or changes run state — not on output-driven pushes.
 - `server/agents/codex-sessions.cjs` runs synchronously inside the one server process, and Codex session files reach hundreds of MB. Never read a whole session file: read only the first line (metadata) or a bounded tail, and reuse the per-file cache keyed on size + mtime. `requireSession` runs on every Codex chat request.
+- Read-only session loads in request handlers go through `openSessionForRead()` / `readSessionFileEntries()` (`lib/session-file-cache.ts`), not `SessionManager.open()`. The cache keeps parsed entries per file (LRU, 6 files / 128 MB of file data) and parses only appended bytes. The browser reloads the open session after every turn, so a full parse of a long session would block the server each time. The cache falls back to a full parse when a file was replaced, shrunk, or its first/last-read bytes changed. Never append through the returned manager; writes still use `SessionManager.open()`.
 
 ### Model Bash watchdog
 - Pi's built-in Bash schema accepts an optional timeout but intentionally has no default. TianForge injects the hidden inline extension from `lib/bash-watchdog.ts`, which fills in a 300-second timeout only when the model omitted one.

@@ -13,6 +13,7 @@ import { normalizeToolCalls } from "./normalize";
 import { isModelContextOnlyMessage } from "./model-context-messages";
 import { sessionPathKey } from "./session-path";
 import { resolveProject, type ProjectInfo } from "./worktree";
+import { openSessionForRead } from "./session-file-cache";
 
 export { getAgentDir };
 
@@ -247,7 +248,7 @@ export function readSessionHeader(filePath: string): SessionHeader | null {
 }
 
 export function getSessionEntries(filePath: string): SessionEntry[] {
-  const entries = SessionManager.open(filePath).getEntries();
+  const entries = openSessionForRead(filePath).getEntries();
   return entries as unknown as SessionEntry[];
 }
 

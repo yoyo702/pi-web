@@ -15,6 +15,7 @@ import { sessionPathKey } from "@/lib/session-path";
 import { withoutNonConversationEntries } from "@/lib/session-tree";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { errorResponse } from "@/lib/http-error";
+import { invalidateSessionFileCache, openSessionForRead } from "@/lib/session-file-cache";
 
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
@@ -137,7 +138,7 @@ export async function GET(
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
     }
 
-    const sm = SessionManager.open(filePath);
+    const sm = openSessionForRead(filePath);
     const entries = sm.getEntries() as Array<{ id: string }> as never;
     const latestLeafId = sm.getLeafId();
     const searchParams = new URL(req.url).searchParams;
@@ -278,6 +279,7 @@ export async function DELETE(
 
     getRpcSession(id)?.destroy();
     unlinkSync(filePath);
+    invalidateSessionFileCache(filePath);
     invalidateSessionPathCache(id);
     invalidateSessionListCache();
     return NextResponse.json(reparentFailures.length ? { ok: true, reparentFailures } : { ok: true });
