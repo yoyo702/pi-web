@@ -17,7 +17,7 @@ function failure(error: unknown) {
 export async function GET(request: Request) {
   const cwd = new URL(request.url).searchParams.get("cwd") ?? undefined;
   try {
-    return NextResponse.json({ terminals: listTerminals(cwd), stats: getTerminalStats(cwd) }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({ terminals: listTerminals(cwd), stats: getTerminalStats(cwd), ...(cwd ? { cwd } : {}) }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) { return failure(error); }
 }
 

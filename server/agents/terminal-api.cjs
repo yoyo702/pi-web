@@ -123,7 +123,7 @@ async function handleTerminalRequest(req, res, url) {
     if (url.pathname === "/api/terminals" && req.method === "GET") {
       const requestedCwd = url.searchParams.get("cwd");
       const cwd = requestedCwd ? authorizedCwd(requestedCwd) : undefined;
-      return json(res, 200, { terminals: manager.listTerminals(cwd), stats: manager.terminalStats(cwd) });
+      return json(res, 200, { terminals: manager.listTerminals(cwd), stats: manager.terminalStats(cwd), ...(cwd ? { cwd } : {}) });
     }
     if (url.pathname === "/api/terminals" && req.method === "DELETE") {
       const requestedCwd = url.searchParams.get("cwd");

@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { ensureNodePtySpawnHelper } = require("./ensure-node-pty-helper.cjs");
+const workspaceStatus = require("../workspace-status.cjs");
 
 const MAX_BUFFER_BYTES = 1024 * 1024;
 const MAX_RUNNING_TERMINALS = 20;
@@ -108,6 +109,7 @@ function appendOutput(session, data) {
   for (const subscriber of session.subscribers) {
     try { subscriber(chunk); } catch { /* disconnected subscriber */ }
   }
+  workspaceStatus.notify("terminals", { throttled: true });
 }
 
 function recordTerminalInput(session, data) {
@@ -117,7 +119,10 @@ function recordTerminalInput(session, data) {
   for (const character of data) {
     if (character === "\r" || character === "\n") {
       const command = session.pendingInput.trim();
-      if (command) session.history = [command, ...session.history.filter((item) => item !== command)].slice(0, MAX_COMMAND_HISTORY);
+      if (command) {
+        session.history = [command, ...session.history.filter((item) => item !== command)].slice(0, MAX_COMMAND_HISTORY);
+        workspaceStatus.notify("terminals", { throttled: true });
+      }
       session.pendingInput = "";
     } else if (character === "\x7f" || character === "\b") {
       session.pendingInput = session.pendingInput.slice(0, -1);
@@ -226,6 +231,7 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
     terminal, chunks: [], bufferBytes: 0, truncated: false, subscribers: new Set(), history: [], pendingInput: "",
   };
   state.sessions.set(session.id, session);
+  workspaceStatus.notify("terminals");
   terminal.onData((data) => appendOutput(session, data));
   terminal.onExit(({ exitCode, signal }) => {
     session.state = session.state === "stopped" ? "stopped" : "ended";
@@ -236,6 +242,7 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
     for (const subscriber of session.subscribers) {
       try { subscriber(null); } catch { /* ignore */ }
     }
+    workspaceStatus.notify("terminals");
   });
   return publicSession(session);
 }
@@ -265,7 +272,7 @@ function terminalStats(cwd) {
 }
 
 function getTerminal(id) { return publicSession(lookup(id)); }
-function renameTerminal(id, title) { const session = lookup(id); if (typeof title !== "string" || !title.trim()) throw new TerminalError("invalid_title", "terminal title is required"); session.title = title.trim().slice(0, 80); return publicSession(session); }
+function renameTerminal(id, title) { const session = lookup(id); if (typeof title !== "string" || !title.trim()) throw new TerminalError("invalid_title", "terminal title is required"); session.title = title.trim().slice(0, 80); workspaceStatus.notify("terminals"); return publicSession(session); }
 function getBuffer(id) { const session = lookup(id); return { data: Buffer.concat(session.chunks), truncated: session.truncated, state: session.state }; }
 function runtimeForSession(sourceSessionId) {
   const session = [...state.sessions.values()].find((candidate) => candidate.provider === "codex" && candidate.sourceSessionId === sourceSessionId && candidate.state === "running");
@@ -290,12 +297,14 @@ function resizeTerminal(id, cols, rows) {
   session.cols = cols;
   session.rows = rows;
   session.terminal.resize(cols, rows);
+  workspaceStatus.notify("terminals", { throttled: true });
 }
 
 function stopTerminal(id) {
   const session = lookup(id);
   if (session.state !== "running" || !session.terminal) return publicSession(session);
   session.state = "stopped";
+  workspaceStatus.notify("terminals");
   try {
     if (process.platform !== "win32" && session.pid > 0) process.kill(-session.pid, "SIGTERM");
   } catch { /* pty.kill is the portable fallback */ }
@@ -308,6 +317,7 @@ function removeTerminal(id) {
   if (session.state === "running") throw new TerminalError("still_running", "stop the terminal before removing its record");
   session.subscribers.clear();
   state.sessions.delete(id);
+  workspaceStatus.notify("terminals");
   return publicSession(session);
 }
 
@@ -319,6 +329,7 @@ function clearEndedTerminals({ cwd, provider } = {}) {
     state.sessions.delete(id);
     removedIds.push(id);
   }
+  if (removedIds.length > 0) workspaceStatus.notify("terminals");
   return removedIds;
 }
 
@@ -369,3 +380,5 @@ function shutdownTerminals() {
 }
 
 module.exports = { TerminalError, terminalEnvironment, createTerminal, listTerminals, terminalStats, getTerminal, renameTerminal, getBuffer, runtimeForSession, inputTerminal, resizeTerminal, stopTerminal, removeTerminal, clearEndedTerminals, stopTerminalsForSession, interruptAndStopTerminalsForSession, subscribeTerminal, snapshotAndSubscribeTerminal, shutdownTerminals };
+
+workspaceStatus.registerProvider("terminals", () => ({ terminals: listTerminals(), limits: terminalStats().limits }));
