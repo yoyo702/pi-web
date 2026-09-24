@@ -1,7 +1,7 @@
 # Codex 会话目录与运行时修复设计
 
 日期：2026-09-24
-状态：第 1 批已实施，第 2 批待实施
+状态：第 1、2 批已实施
 
 ## 背景
 
@@ -36,6 +36,17 @@
    - `turn/completed` 带 `turn.error` 时显示失败原因。
    - 允许只发图片。
    - 接口错误按类型返回 400/403/404/409/500，并使用 `server/http-body.cjs` 读取请求体。
+
+第 2 批实施说明：
+- 界面文字为英文，冲突和错误提示均为英文。
+- 冲突提示除“停止终端 / 取消”外还有“Continue anyway”（`terminals: "ignore"`）：终端可能在做别的会话，由用户判断。
+- GET 与 SSE 不接管；若有 `resume` 终端正在写该会话且没有聊天运行时，返回 409 `terminal_owns_session`，前端显示“Stop terminal”，确认后调用新增的 `POST /api/codex/chat/:id/claim`（`{terminals:"ignore"}`，只停止该 `resume` 终端）再重新加载。
+- SSE 等运行时就绪后才返回 200，恢复失败时返回 JSON 错误，避免浏览器反复重连、反复启动进程。
+- 显示给浏览器的 Codex 错误文本中的文件路径替换为 `<path>`。
+- 空闲计时在运行时就绪后才开始；运行时带 `runtimeId`，SSE id 为 `runtimeId:seq`，运行时重启后前端从头重放。
+- 另一 Codex 客户端（如 ChatGPT 桌面端）占用会话时返回 409 `writer_conflict` 并说明原因。
+- 归档/删除期间加删除锁：不启动聊天运行时，也不创建 `resume` 终端。
+- 创建 `resume` 终端时若聊天正在运行一轮，返回 409，不再中断手机上发起的一轮。
 
 ## 非目标
 

@@ -163,3 +163,26 @@ test("terminal stats distinguish workspace usage from global limits", () => {
     else global.__piWebTerminalState = previousState;
   }
 });
+
+test("only resume terminals write their session; other running Codex terminals in the folder are unknown writers", async () => {
+  const modulePath = require.resolve("./terminal-manager.cjs");
+  const previousState = global.__piWebTerminalState;
+  const record = (id, launchMode, extra = {}) => ({ id, provider: "codex", state: "running", cwd: "/one", launchMode, sourceSessionId: "parent", chunks: [], subscribers: new Set(), createdAt: "2026-01-01T00:00:00Z", ...extra });
+  const sessions = [record("resume", "resume"), record("fork", "fork"), record("new", "new", { sourceSessionId: undefined }), record("elsewhere", "resume-last", { cwd: "/two" }), record("ended", "new", { state: "ended" }), record("shell", "new", { provider: "shell" })];
+  global.__piWebTerminalState = { sessions: new Map(sessions.map((session) => [session.id, session])) };
+  delete require.cache[modulePath];
+  try {
+    const manager = require("./terminal-manager.cjs");
+    assert.equal(manager.runtimeForSession("parent").terminalId, "resume");
+    assert.deepEqual(manager.unknownCodexTerminals("/one").map((terminal) => terminal.id), ["fork", "new"]);
+    for (const session of sessions) session.terminal = { write() {}, kill() {} };
+    assert.equal(await manager.interruptAndStopTerminalsForSession("parent"), true);
+    assert.deepEqual(sessions.filter((session) => session.state === "stopped").map((session) => session.id), ["resume"]);
+    assert.equal(await manager.interruptAndStopTerminalsForSession("parent", { cwd: "/one" }), true);
+    assert.deepEqual(sessions.filter((session) => session.state === "stopped").map((session) => session.id), ["resume", "fork", "new"]);
+  } finally {
+    delete require.cache[modulePath];
+    if (previousState === undefined) delete global.__piWebTerminalState;
+    else global.__piWebTerminalState = previousState;
+  }
+});

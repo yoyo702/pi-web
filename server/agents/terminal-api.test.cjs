@@ -107,3 +107,14 @@ test("addRoot and ~/pi-cwd-* directories still authorize", (t) => {
   fs.mkdirSync(scratch);
   assert.equal(api.authorizedCwd(scratch), scratch);
 });
+
+test("an open Codex Chat blocks input only for a terminal resuming the same session", (t) => {
+  const { api } = loadTerminalApi(t);
+  const appServer = require("./codex-app-server.cjs");
+  const original = appServer.isClaimed;
+  appServer.isClaimed = (id) => id === "parent";
+  t.after(() => { appServer.isClaimed = original; });
+  assert.equal(api.chatOwnsInput({ launchMode: "resume", sourceSessionId: "parent" }), true);
+  assert.equal(api.chatOwnsInput({ launchMode: "fork", sourceSessionId: "parent" }), false);
+  assert.equal(api.chatOwnsInput({ launchMode: "resume", sourceSessionId: "other" }), false);
+});

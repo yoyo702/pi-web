@@ -12,7 +12,7 @@ type ModelOption = { id: string; label: string; provider?: string; defaultReason
 type AppItem = Record<string, unknown> & { id?: string; type?: string };
 type TokenCount = { totalTokens?: number; inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; reasoningOutputTokens?: number };
 type TokenUsagePayload = { totalTokens?: number; total?: TokenCount; last?: TokenCount; modelContextWindow?: number };
-type AppEvent = { id?: string | number; piSeq?: number; method?: string; params?: { turnId?: string; requestId?: string | number; delta?: string; command?: string | string[]; cwd?: string; grantRoot?: string; reason?: string; message?: string; error?: { message?: string } | string; status?: { type?: string; activeFlags?: string[] }; tokenUsage?: TokenUsagePayload; modelContextWindow?: number; item?: AppItem } };
+type AppEvent = { id?: string | number; piSeq?: number; piRuntime?: string; method?: string; params?: { turnId?: string; runtimeId?: string; willRetry?: boolean; turn?: { status?: string; error?: { message?: string } | null }; requestId?: string | number; delta?: string; command?: string | string[]; cwd?: string; grantRoot?: string; reason?: string; message?: string; error?: { message?: string } | string; status?: { type?: string; activeFlags?: string[] }; tokenUsage?: TokenUsagePayload; modelContextWindow?: number; item?: AppItem } };
 type ApprovalRequest = { id: string; kind: string; command?: string; cwd?: string; grantRoot?: string; reason?: string };
 function approvalFromEvent(event: AppEvent): ApprovalRequest {
   const method = event.method ?? "";
@@ -43,6 +43,12 @@ function tokenUsageFromEvent(event: AppEvent): { used: number; limit?: number } 
 }
 /** Fallback reconcile while working; pushed runtime status is the fast path. Matches Pi's AGENT_STATE_RECONCILE_MS. */
 const CODEX_RECONCILE_FALLBACK_MS = 15_000;
+type ApiError = { error?: string; code?: string };
+/** A request refused because a Codex terminal may be writing this session. */
+type TerminalConflict = { kind: "owns" | "unknown"; message: string };
+function errorText(event: AppEvent) {
+  return typeof event.params?.error === "string" ? event.params.error : event.params?.error?.message ?? event.params?.message;
+}
 type ThreadRead = {
   name?: string;
   title?: string;
@@ -73,8 +79,14 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
   const [contextUsage, setContextUsage] = useState<{ used: number; limit?: number } | null>(null);
   const [modelNotice, setModelNotice] = useState("");
   const lastEventSeqRef = useRef(0);
+  // Sequence numbers restart with each app-server process (runtime).
+  const runtimeIdRef = useRef("");
+  const [reloadKey, setReloadKey] = useState(0);
+  const [conflict, setConflict] = useState<TerminalConflict | null>(null);
+  // "ignore" once the user chose to write alongside an unknown Codex terminal.
+  const terminalsChoiceRef = useRef<"ignore" | undefined>(undefined);
 
-  useEffect(() => { lastEventSeqRef.current = 0; }, [threadId]);
+  useEffect(() => { lastEventSeqRef.current = 0; runtimeIdRef.current = ""; terminalsChoiceRef.current = undefined; setConflict(null); }, [threadId]);
   useEffect(() => {
     if (!modelNotice) return;
     const timer = window.setTimeout(() => setModelNotice(""), 3_500);
@@ -90,21 +102,26 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
       if (terminal.model) params.set("model", terminal.model);
       if (terminal.serviceTier) params.set("serviceTier", terminal.serviceTier);
       if (terminal.approvalPolicy) params.set("approvalPolicy", terminal.approvalPolicy);
-      if (lastEventSeqRef.current) params.set("after", String(lastEventSeqRef.current));
+      if (lastEventSeqRef.current && runtimeIdRef.current) params.set("after", `${runtimeIdRef.current}:${lastEventSeqRef.current}`);
       source = new EventSource(`/api/codex/chat/${encodeURIComponent(threadId)}/events${params.size ? `?${params}` : ""}`);
       source.onopen = () => { setConnection("connected"); setError((current) => current?.includes("connection") ? null : current); };
       source.onmessage = (raw) => {
         try {
           const event = JSON.parse(raw.data) as AppEvent;
+          const eventRuntime = event.method === "codex/connected" ? event.params?.runtimeId : event.piRuntime;
+          if (eventRuntime && eventRuntime !== runtimeIdRef.current) { runtimeIdRef.current = eventRuntime; lastEventSeqRef.current = 0; }
           if (event.piSeq && event.piSeq <= lastEventSeqRef.current) return;
           if (event.piSeq) lastEventSeqRef.current = event.piSeq;
           const nextUsage = tokenUsageFromEvent(event);
           if (nextUsage) setContextUsage(nextUsage);
           if (event.method === "error") {
-            const eventError = typeof event.params?.error === "string" ? event.params.error : event.params?.error?.message ?? event.params?.message;
-            setError(eventError || "Codex reported an error"); setRunState("idle");
+            // willRetry: Codex retries the request itself; the turn goes on.
+            if (event.params?.willRetry) setError(`Codex is retrying: ${errorText(event) || "temporary error"}`);
+            else { setError(errorText(event) || "Codex reported an error"); setRunState("idle"); }
           }
-          if (event.method === "item/started" || event.method === "turn/started") setRunState("working");
+          if (event.method === "item/started" || event.method === "turn/started") { setRunState("working"); setError((current) => current?.startsWith("Codex is retrying") ? null : current); }
+          if (event.method === "turn/completed" && event.params?.turn?.error?.message) setError(`Turn failed: ${event.params.turn.error.message}`);
+          if (event.method === "codex/closed") { setConnection("reconnecting"); setRunState("idle"); setCurrentActivity(""); setApprovals([]); }
           if (event.method === "item/started") {
             const item = event.params?.item;
             setCurrentActivity(item?.type === "commandExecution" ? `Running: ${String(item.command ?? "command")}` : item?.type === "fileChange" ? "Applying file changes…" : item?.type === "webSearch" ? "Searching the web…" : "Codex is working…");
@@ -123,7 +140,11 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
           setItems((current) => reduceCodexEvent(current, event));
         } catch { setError("Received an unreadable event from Codex"); }
       };
-      source.onerror = () => { setConnection("reconnecting"); setError("Codex chat connection interrupted; retrying…"); };
+      source.onerror = () => {
+        // CLOSED: the server refused the stream (e.g. the session is busy); the browser won't retry.
+        if (source?.readyState === EventSource.CLOSED) { setConnection("failed"); setError("Codex chat disconnected."); return; }
+        setConnection("reconnecting"); setError("Codex chat connection interrupted; retrying…");
+      };
     };
     setConnection("loading");
     const params = new URLSearchParams();
@@ -132,7 +153,8 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
     if (terminal.approvalPolicy) params.set("approvalPolicy", terminal.approvalPolicy);
     void fetch(`/api/codex/chat/${encodeURIComponent(threadId)}${params.size ? `?${params}` : ""}`, { cache: "no-store" })
       .then(async (response) => {
-        const data = await response.json() as { error?: string; history?: HistoryMessage[]; events?: AppEvent[]; thread?: ThreadRead };
+        const data = await response.json() as ApiError & { history?: HistoryMessage[]; events?: AppEvent[]; thread?: ThreadRead };
+        if (data.code === "terminal_owns_session") setConflict({ kind: "owns", message: data.error ?? "This session is running in a Codex terminal." });
         if (!response.ok) throw new Error(data.error ?? `History request failed (${response.status})`);
         return data;
       })
@@ -142,6 +164,7 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
         setSessionName(data.thread?.thread?.name ?? data.thread?.thread?.title ?? data.thread?.name ?? data.thread?.title ?? terminal.sessionName ?? "");
         const turns = data.thread?.thread?.turns ?? data.thread?.turns ?? [];
         lastEventSeqRef.current = Math.max(0, ...(data.events ?? []).map((event) => event.piSeq ?? 0));
+        runtimeIdRef.current = data.events?.at(-1)?.piRuntime ?? "";
         const latestUsage = [...(data.events ?? [])].reverse().map(tokenUsageFromEvent).find(Boolean);
         if (latestUsage) setContextUsage(latestUsage);
         const persistedEvents: AppEvent[] = turns.flatMap((turn) => (turn.items ?? []).map((item) => ({ method: "item/completed", params: { item } })));
@@ -160,7 +183,7 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
       })
       .catch((cause) => { setConnection("failed"); setError(cause instanceof Error ? cause.message : "Unable to load Codex history"); });
     return () => { closed = true; source?.close(); };
-  }, [terminal.approvalPolicy, terminal.model, terminal.serviceTier, terminal.sessionName, threadId]);
+  }, [reloadKey, terminal.approvalPolicy, terminal.model, terminal.serviceTier, terminal.sessionName, threadId]);
 
   // This thread's pushed runtime state as a primitive, so the panel re-renders
   // (and the reconcile trigger below fires) only when it actually changes.
@@ -242,17 +265,19 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
     const clientMessageId = `pi-web-${crypto.randomUUID()}`;
     try {
       if (!images.length && (text === "/compact" || text === "/review")) {
-        const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/command`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: text.slice(1) }) });
-        const data = await response.json() as { result?: { turn?: { id?: string } }; error?: string };
+        const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/command`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: text.slice(1), terminals: terminalsChoiceRef.current }) });
+        const data = await response.json() as ApiError & { result?: { turn?: { id?: string } } };
+        if (data.code === "terminal_conflict") { setConflict({ kind: "unknown", message: data.error ?? "A Codex terminal is running in this folder." }); setRunState("idle"); return false; }
         if (!response.ok) throw new Error(data.error ?? "Codex command failed");
       } else {
-        const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, clientMessageId, images: images.map((image) => `data:${image.mimeType};base64,${image.data}`), model: chatModel || undefined, effort: reasoningEffort || undefined, serviceTier: serviceTier || undefined, approvalPolicy }) });
-        const data = await response.json() as { turn?: { turn?: { id?: string } }; error?: string };
+        const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text, clientMessageId, images: images.map((image) => `data:${image.mimeType};base64,${image.data}`), model: chatModel || undefined, effort: reasoningEffort || undefined, serviceTier: serviceTier || undefined, approvalPolicy, terminals: terminalsChoiceRef.current }) });
+        const data = await response.json() as ApiError & { turn?: { turn?: { id?: string } } };
+        if (data.code === "terminal_conflict") { setConflict({ kind: "unknown", message: data.error ?? "A Codex terminal is running in this folder." }); setRunState("idle"); return false; }
         if (!response.ok) throw new Error(data.error ?? "Unable to send message to Codex");
       }
       setItems((current) => current.some((item) => item.id === clientMessageId) ? current : [...current, { id: clientMessageId, kind: "message", role: "user", text: text || `[${images.length} image${images.length === 1 ? "" : "s"}]`, pending: true }]);
       return true;
-    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to send message to Codex"); return false; }
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to send message to Codex"); setRunState("idle"); return false; }
     finally { setSending(false); }
   }, [approvalPolicy, chatModel, connection, reasoningEffort, serviceTier, threadId]);
 
@@ -260,8 +285,8 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
     if (!threadId) return;
     const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ requestId, decision }) });
     if (!response.ok) {
-      const data = await response.json().catch(() => ({})) as { error?: string };
-      if (data.error === "Approval request is no longer pending") {
+      const data = await response.json().catch(() => ({})) as ApiError;
+      if (data.code === "approval_expired") {
         setApprovals((current) => current.filter((approval) => approval.id !== requestId));
         await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/interrupt`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ recoverStaleApproval: true }) }).catch(() => undefined);
         setRunState("idle");
@@ -297,6 +322,20 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to stop the current turn"); }
     finally { setSending(false); }
   }, [threadId]);
+  const resolveConflict = useCallback(async (choice: "stop" | "ignore" | "cancel") => {
+    const current = conflict;
+    setConflict(null);
+    if (!threadId || !current || choice === "cancel") return;
+    if (choice === "ignore") { terminalsChoiceRef.current = "ignore"; setError("Send your message again to continue."); return; }
+    setSending(true);
+    try {
+      const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/claim`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ terminals: current.kind === "owns" ? "ignore" : "stop" }) });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({})) as ApiError).error ?? "Unable to stop the terminal");
+      if (current.kind === "owns") { setError(null); setReloadKey((key) => key + 1); }
+      else setError("Terminal stopped. Send your message again to continue.");
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to stop the terminal"); }
+    finally { setSending(false); }
+  }, [conflict, threadId]);
   const forkChat = useCallback(async () => {
     if (!threadId || runState !== "idle") return;
     setSending(true); setError(null);
@@ -314,7 +353,12 @@ export function CodexChatPanel({ terminal, workspaceTabId, onOpenFile, onStatusC
     <header style={{ padding: "9px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>
       <strong style={{ color: "var(--text)" }}>Codex Chat{sessionName ? ` · ${sessionName}` : ""}</strong><span title={terminal.cwd}> · {terminal.cwd}</span>
     </header>
-    {error && <div role="alert" style={{ padding: "7px 10px", color: "#fca5a5", fontSize: 12 }}>{error}{error.includes("waiting for an approval") ? <button type="button" onClick={() => void interruptBlockedTurn()} disabled={sending} style={{ ...buttonStyle, marginLeft: 8 }}>Cancel blocked turn</button> : null}</div>}
+    {conflict ? <div role="alert" style={{ padding: "7px 10px", color: "#fbbf24", fontSize: 12 }}>
+      {conflict.message}{conflict.kind === "unknown" ? " Stop it before writing here?" : ""}
+      <button type="button" onClick={() => void resolveConflict("stop")} disabled={sending} style={{ ...buttonStyle, marginLeft: 8 }}>Stop terminal</button>
+      {conflict.kind === "unknown" && <button type="button" onClick={() => void resolveConflict("ignore")} disabled={sending} style={buttonStyle}>Continue anyway</button>}
+      <button type="button" onClick={() => void resolveConflict("cancel")} disabled={sending} style={buttonStyle}>Cancel</button>
+    </div> : error && <div role="alert" style={{ padding: "7px 10px", color: "#fca5a5", fontSize: 12 }}>{error}{error.includes("waiting for an approval") ? <button type="button" onClick={() => void interruptBlockedTurn()} disabled={sending} style={{ ...buttonStyle, marginLeft: 8 }}>Cancel blocked turn</button> : null}{connection === "failed" ? <button type="button" onClick={() => { setError(null); setReloadKey((key) => key + 1); }} style={{ ...buttonStyle, marginLeft: 8 }}>Reconnect</button> : null}</div>}
     <div style={{ flex: 1, minHeight: 0 }}>
       <CodexAssistantThread
         items={items}

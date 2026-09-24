@@ -346,8 +346,16 @@ function stopTerminalsForSession(sourceSessionId) {
   }
 }
 
-async function interruptAndStopTerminalsForSession(sourceSessionId) {
-  const matching = [...state.sessions.values()].filter((session) => writesSession(session, sourceSessionId));
+// Codex terminals whose session is unknown (`new`, `resume-last`, `fork`)
+// may be writing any session in their directory.
+function isUnknownCodexWriter(session, cwd) {
+  return session.provider === "codex" && session.state === "running" && session.launchMode !== "resume" && session.cwd === cwd;
+}
+function unknownCodexTerminals(cwd) {
+  return [...state.sessions.values()].filter((session) => isUnknownCodexWriter(session, cwd)).map(publicSession);
+}
+async function interruptAndStopTerminalsForSession(sourceSessionId, { cwd } = {}) {
+  const matching = [...state.sessions.values()].filter((session) => writesSession(session, sourceSessionId) || (cwd && isUnknownCodexWriter(session, cwd)));
   if (!matching.length) return false;
   // Let Codex cancel and persist an approval/current turn before termination.
   for (const session of matching) {
@@ -384,6 +392,6 @@ function shutdownTerminals() {
   }
 }
 
-module.exports = { TerminalError, terminalEnvironment, createTerminal, listTerminals, terminalStats, getTerminal, renameTerminal, getBuffer, runtimeForSession, inputTerminal, resizeTerminal, stopTerminal, removeTerminal, clearEndedTerminals, stopTerminalsForSession, interruptAndStopTerminalsForSession, subscribeTerminal, snapshotAndSubscribeTerminal, shutdownTerminals };
+module.exports = { TerminalError, terminalEnvironment, createTerminal, listTerminals, terminalStats, getTerminal, renameTerminal, getBuffer, runtimeForSession, inputTerminal, resizeTerminal, stopTerminal, removeTerminal, clearEndedTerminals, stopTerminalsForSession, interruptAndStopTerminalsForSession, unknownCodexTerminals, subscribeTerminal, snapshotAndSubscribeTerminal, shutdownTerminals };
 
 workspaceStatus.registerProvider("terminals", () => ({ terminals: listTerminals(), limits: terminalStats().limits }));

@@ -1,13 +1,17 @@
 /* eslint-disable @typescript-eslint/no-require-imports */
 "use strict"; // Optional Codex app-server process manager.
 const { spawn } = require("node:child_process");
+const crypto = require("node:crypto");
 const workspaceStatus = require("../workspace-status.cjs");
 const sessions = new Map();
 const modelCatalogCache = global.__piWebCodexModelCatalogCache || new Map();
 global.__piWebCodexModelCatalogCache = modelCatalogCache;
 const MODEL_CATALOG_TTL_MS = 10 * 60_000;
 // Leave enough time for thread/resume and EventSource reconnects before releasing ownership.
-const IDLE_SHUTDOWN_MS = 30_000;
+const DEFAULT_RUNTIME_OPTIONS = { command: "codex", args: ["app-server", "--stdio"], env: undefined, idleMs: 30_000 };
+let runtimeOptions = DEFAULT_RUNTIME_OPTIONS;
+/** Tests point runtimes at a fake app-server; `null` restores the defaults. */
+function configure(options) { runtimeOptions = options ? { ...DEFAULT_RUNTIME_OPTIONS, ...options } : DEFAULT_RUNTIME_OPTIONS; }
 if (!global.__piWebCodexAppServerCleanup) { global.__piWebCodexAppServerCleanup = true; process.once("exit", () => { for (const state of sessions.values()) state.child.kill(); }); }
 function cancelIdleShutdown(state) { if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; } }
 function stop(threadId) {
@@ -32,14 +36,34 @@ async function stopAndWait(threadId) {
   });
   return true;
 }
+// A turn or approval keeps the runtime alive without a viewer, so closing the
+// tab (or a phone locking) does not interrupt it; the idle timer restarts
+// when the turn ends.
+function isBusy(state) { return Boolean(state.activeTurnId || state.incoming?.size); }
+function shouldStayUp(state) { return state.listeners.size > 0 || isBusy(state); }
 function scheduleIdleShutdown(state) {
   cancelIdleShutdown(state);
-  if (state.listeners.size) return;
+  if (shouldStayUp(state)) return;
   state.idleTimer = setTimeout(() => {
     state.idleTimer = null;
-    if (!state.listeners.size) stop(state.threadId);
-  }, IDLE_SHUTDOWN_MS);
+    if (!shouldStayUp(state) && sessions.get(state.threadId) === state) stop(state.threadId);
+  }, runtimeOptions.idleMs);
   state.idleTimer.unref?.();
+}
+// Sessions being archived or deleted; no runtime may start for them meanwhile.
+const removing = new Set();
+async function withRemovalLock(threadId, task) {
+  if (removing.has(threadId)) throw Object.assign(new Error("This Codex session is already being archived or deleted"), { code: "session_busy" });
+  removing.add(threadId);
+  try { return await task(); } finally { removing.delete(threadId); }
+}
+function isRemoving(threadId) { return removing.has(threadId); }
+function protocolError(error) {
+  const message = error?.message || "Codex app-server error";
+  if (/already has an active writer/i.test(message)) {
+    return Object.assign(new Error("This session is open in another Codex client (for example the ChatGPT desktop app). Quit that app completely and try again, or fork the session from the Agents panel."), { code: "writer_conflict" });
+  }
+  return Object.assign(new Error(message), { code: "rpc_error", rpcCode: error?.code });
 }
 function handleProtocolMessage(state, message) {
   // JSON-RPC ids are scoped to each direction. A Codex server request may use
@@ -49,17 +73,19 @@ function handleProtocolMessage(state, message) {
     const pending = state.pending.get(message.id);
     state.pending.delete(message.id);
     clearTimeout(pending.timer);
-    if (message.error) pending.reject(new Error(message.error.message || "Codex app-server error"));
+    if (message.error) pending.reject(protocolError(message.error));
     else pending.resolve(message.result);
     return;
   }
-  if (message.method === "turn/started") state.activeTurnId = message.params?.turn?.id || message.params?.turnId || state.activeTurnId;
-  if (message.method === "turn/completed") state.activeTurnId = null;
+  if (message.method === "turn/started") { state.activeTurnId = message.params?.turn?.id || message.params?.turnId || state.activeTurnId; cancelIdleShutdown(state); }
+  // Approvals left open when a turn ends can no longer be answered.
+  if (message.method === "turn/completed") { state.activeTurnId = null; state.incoming.clear(); }
   if (message.method === "serverRequest/resolved" && message.params?.requestId != null) state.incoming.delete(String(message.params.requestId));
   if (message.id != null && message.method) state.incoming.set(String(message.id), message);
   const changed = (message.method === "turn/started" || message.method === "turn/completed" || message.method === "serverRequest/resolved" || (message.id != null && message.method));
   if (changed) workspaceStatus.notify("codex_runtimes");
-  const event = { ...message, piSeq: state.nextEventSeq++ };
+  if ((message.method === "turn/completed" || message.method === "serverRequest/resolved") && !state.idleTimer) scheduleIdleShutdown(state);
+  const event = { ...message, piSeq: state.nextEventSeq++, piRuntime: state.runtimeId };
   state.events.push(event);
   if (state.events.length > 2_000) state.events.splice(0, state.events.length - 2_000);
   for (const listener of state.listeners) listener(event);
@@ -69,39 +95,46 @@ function failState(state, error) {
   state.failure = error instanceof Error ? error : new Error(String(error));
   cancelIdleShutdown(state);
   if (sessions.get(state.threadId) === state) { sessions.delete(state.threadId); workspaceStatus.notify("codex_runtimes"); }
+  // stderr may name local paths; it goes to the server log, not to clients.
   const detail = state.stderrTail?.trim();
-  const failure = new Error(detail ? `${state.failure.message}: ${detail}` : state.failure.message);
+  if (detail) console.warn(`[pi-web] Codex app-server for ${state.threadId}: ${state.failure.message}\n${detail}`);
+  const failure = Object.assign(new Error(state.failure.message), { code: "runtime_unavailable" });
   for (const pending of state.pending.values()) { clearTimeout(pending.timer); pending.reject(failure); }
   state.pending.clear();
   for (const listener of state.listeners) listener({ method: "codex/closed", params: { error: failure.message } });
 }
 function start({ threadId, cwd, model, serviceTier, approvalPolicy = "untrusted" }) {
-  if (sessions.has(threadId)) { const existing = sessions.get(threadId); cancelIdleShutdown(existing); scheduleIdleShutdown(existing); return existing; }
-  const child = spawn("codex", ["app-server", "--stdio"], { cwd, stdio: ["pipe", "pipe", "pipe"] });
-  const state = { child, threadId, cwd, nextId: 1, nextEventSeq: 1, activeTurnId: null, pending: new Map(), incoming: new Map(), listeners: new Set(), buffer: "", stderrTail: "", failure: null, events: [], idleTimer: null };
+  if (sessions.has(threadId)) { const existing = sessions.get(threadId); if (existing.loaded) { cancelIdleShutdown(existing); scheduleIdleShutdown(existing); } return existing; }
+  if (removing.has(threadId)) throw Object.assign(new Error("This Codex session is being archived or deleted"), { code: "session_busy" });
+  const child = spawn(runtimeOptions.command, runtimeOptions.args, { cwd, env: runtimeOptions.env, stdio: ["pipe", "pipe", "pipe"] });
+  // Event sequence numbers restart with each process; runtimeId lets a
+  // reconnecting client tell a new process from the one it last saw.
+  const state = { child, threadId, cwd, runtimeId: crypto.randomUUID().slice(0, 8), nextId: 1, nextEventSeq: 1, activeTurnId: null, pending: new Map(), incoming: new Map(), listeners: new Set(), buffer: "", stderrTail: "", failure: null, events: [], idleTimer: null, loaded: false };
   sessions.set(threadId, state); workspaceStatus.notify("codex_runtimes"); child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => { state.buffer += chunk; let index; while ((index = state.buffer.indexOf("\n")) >= 0) { const line = state.buffer.slice(0, index); state.buffer = state.buffer.slice(index + 1); try { handleProtocolMessage(state, JSON.parse(line)); } catch {} } });
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => { state.stderrTail = `${state.stderrTail}${chunk}`.slice(-16_384); });
   child.on("error", (error) => failState(state, new Error(`Unable to start Codex app-server: ${error.message}`)));
   child.on("exit", () => failState(state, new Error("Codex app-server exited")));
-  state.request = (method, params) => new Promise((resolve, reject) => { if (state.failure) { reject(state.failure); return; } const id = state.nextId++; const timer = setTimeout(() => { if (state.pending.delete(id)) reject(new Error(`${method} timed out`)); }, 60_000); state.pending.set(id, { resolve, reject, timer }); state.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`, (error) => { if (error) failState(state, error); }); });
+  state.request = (method, params) => new Promise((resolve, reject) => { if (state.failure) { reject(state.failure); return; } const id = state.nextId++; const timer = setTimeout(() => { if (state.pending.delete(id)) reject(Object.assign(new Error(`Codex did not answer ${method} in time`), { code: "runtime_timeout" })); }, 60_000); state.pending.set(id, { resolve, reject, timer }); state.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`, (error) => { if (error) failState(state, error); }); });
   state.ready = state.request("initialize", { clientInfo: { name: "pi-web", version: "0.8.1" }, capabilities: {} }).then(() => state.request("thread/resume", { threadId, cwd, model: model || null, serviceTier: serviceTier || null, approvalPolicy }));
-  scheduleIdleShutdown(state);
+  // A runtime that never resumed is useless; drop it so the next request retries.
+  // The idle clock starts once the thread is loaded, not while it is loading.
+  state.ready.then(() => { state.loaded = true; if (!state.idleTimer) scheduleIdleShutdown(state); }, () => { if (sessions.get(threadId) === state) stop(threadId); });
   return state;
 }
-async function prompt(state, text, model = null, approvalPolicy = null, images = [], clientUserMessageId = null, effort = null, serviceTier = null) { await state.ready; const result = await state.request("turn/start", { threadId: state.threadId, cwd: state.cwd, input: [...(text ? [{ type: "text", text }] : []), ...images.map((url) => ({ type: "image", url }))], clientUserMessageId, approvalPolicy, model, effort, serviceTier, summary: "auto" }); state.activeTurnId = result?.turn?.id || result?.id || state.activeTurnId; workspaceStatus.notify("codex_runtimes"); return result; }
+async function prompt(state, text, model = null, approvalPolicy = null, images = [], clientUserMessageId = null, effort = null, serviceTier = null) { await state.ready; const result = await state.request("turn/start", { threadId: state.threadId, cwd: state.cwd, input: [...(text ? [{ type: "text", text }] : []), ...images.map((url) => ({ type: "image", url }))], clientUserMessageId, approvalPolicy, model, effort, serviceTier, summary: "auto" }); state.activeTurnId = result?.turn?.id || result?.id || state.activeTurnId; if (state.activeTurnId) cancelIdleShutdown(state); workspaceStatus.notify("codex_runtimes"); return result; }
 async function readThread(state) { await state.ready; return state.request("thread/read", { threadId: state.threadId, includeTurns: true }); }
-async function command(state, name) { await state.ready; if (name === "compact") return state.request("thread/compact/start", { threadId: state.threadId }); if (name === "review") return state.request("review/start", { threadId: state.threadId, target: { type: "uncommittedChanges" }, delivery: "inline" }); if (name === "models") return state.request("model/list", { cursor: null, includeHidden: false, limit: 100 }); throw new Error(`Unsupported Codex command: /${name}`); }
+async function command(state, name) { await state.ready; if (name === "compact") return state.request("thread/compact/start", { threadId: state.threadId }); if (name === "review") return state.request("review/start", { threadId: state.threadId, target: { type: "uncommittedChanges" }, delivery: "inline" }); if (name === "models") return state.request("model/list", { cursor: null, includeHidden: false, limit: 100 }); throw Object.assign(new Error(`Unsupported Codex command: /${name}`), { code: "invalid_request" }); }
 function respond(state, requestId, result) {
   const request = state.incoming.get(String(requestId));
-  if (!request) throw new Error("Approval request is no longer pending");
+  if (!request) throw Object.assign(new Error("Approval request is no longer pending"), { code: "approval_expired" });
   state.incoming.delete(String(requestId));
   workspaceStatus.notify("codex_runtimes");
   state.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`);
 }
 async function fork(state) { await state.ready; return state.request("thread/fork", { threadId: state.threadId, cwd: state.cwd }); }
-async function interrupt(state, fallbackTurnId = null) { await state.ready; const turnId = state.activeTurnId || fallbackTurnId; if (!turnId) throw new Error("No active turn was found"); return state.request("turn/interrupt", { threadId: state.threadId, turnId }); }
+async function interrupt(state, fallbackTurnId = null) { await state.ready; const turnId = state.activeTurnId || fallbackTurnId; if (!turnId) throw Object.assign(new Error("No active turn was found"), { code: "no_active_turn" }); return state.request("turn/interrupt", { threadId: state.threadId, turnId }); }
 function subscribe(state, listener, afterSeq = 0) { cancelIdleShutdown(state); for (const event of state.events) if ((event.piSeq || 0) > afterSeq) listener(event); state.listeners.add(listener); workspaceStatus.notify("codex_runtimes"); return () => { state.listeners.delete(listener); workspaceStatus.notify("codex_runtimes"); scheduleIdleShutdown(state); }; }
 function isClaimed(threadId) { return sessions.has(threadId); }
 function isAttached(threadId) { return Boolean(sessions.get(threadId)?.listeners.size); }
@@ -184,6 +217,6 @@ async function listModels(cwd) {
   modelCatalogCache.set(cwd, { promise, expiresAt: 0 });
   return promise;
 }
-module.exports = { start, stop, stopAndWait, prompt, readThread, command, respond, fork, interrupt, subscribe, isClaimed, isAttached, snapshot, runtimeForSession, listRuntimes, listModels, handleProtocolMessage, failState };
+module.exports = { configure, withRemovalLock, isRemoving, start, stop, stopAndWait, prompt, readThread, command, respond, fork, interrupt, subscribe, isClaimed, isAttached, snapshot, runtimeForSession, listRuntimes, listModels, handleProtocolMessage, failState };
 
 workspaceStatus.registerProvider("codex_runtimes", () => ({ runtimes: listRuntimes() }));

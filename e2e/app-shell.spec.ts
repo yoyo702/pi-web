@@ -1069,6 +1069,99 @@ test("pages Codex sessions and shows fork source, model and busy errors", async 
   await expect(page.getByText("Parent work", { exact: true })).toBeVisible();
 });
 
+test("shows Codex chat retries, turn failures and the terminal conflict prompt", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const id = "33333333-3333-3333-3333-333333333333";
+  // The chat's event stream is driven from the test through window.__codexStreams.
+  await page.addInitScript(() => {
+    const RealEventSource = window.EventSource;
+    class FakeEventSource extends EventTarget {
+      static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
+      readyState = 0; url: string;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      constructor(url: string) {
+        super();
+        this.url = url;
+        ((window as unknown as { __codexStreams: FakeEventSource[] }).__codexStreams ??= []).push(this);
+        setTimeout(() => { this.readyState = 1; this.onopen?.(new Event("open")); }, 0);
+      }
+      emit(data: unknown) { this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(data) })); }
+      close() { this.readyState = 2; }
+    }
+    window.EventSource = function (url: string | URL, init?: EventSourceInit) {
+      return String(url).includes("/api/codex/chat/") ? new FakeEventSource(String(url)) : new RealEventSource(url, init);
+    } as unknown as typeof EventSource;
+    Object.assign(window.EventSource, { CONNECTING: 0, OPEN: 1, CLOSED: 2 });
+  });
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
+    id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
+    created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
+  }], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
+  await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: { cwd: "/tmp/pi-web-e2e", terminals: [], stats: null } }));
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals: [], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
+  await page.route("**/api/project-scripts?*", async (route) => route.fulfill({ json: { scripts: [], runner: "npm" } }));
+  await page.route("**/api/codex/models?*", async (route) => route.fulfill({ json: { result: { data: [] } } }));
+  await page.route("**/api/codex/sessions?*", async (route) => route.fulfill({ json: { sessions: [{
+    id, name: "Phone work", cwd: "/tmp/pi-web-e2e", updatedAt: "2026-08-03T00:00:00.000Z", lastUserMessage: "hi", archived: false, runtime: null,
+  }], nextCursor: null } }));
+  const sent: Array<Record<string, unknown>> = [];
+  await page.route(`**/api/codex/chat/${id}*`, async (route) => {
+    if (route.request().method() === "GET") return route.fulfill({ json: { thread: { thread: { id, turns: [] } }, history: [], events: [] } });
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    sent.push(body);
+    return body.terminals === "ignore"
+      ? route.fulfill({ status: 202, json: { turn: { turn: { id: "turn-2" } } } })
+      : route.fulfill({ status: 409, json: { error: "A Codex terminal is running in this folder.", code: "terminal_conflict", terminals: [{ id: "term-1", title: "codex", launchMode: "new" }] } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.locator("button[aria-expanded]").filter({ hasText: "Codex" }).last().click();
+  // The action menu closes on scroll; settle the list first.
+  const manage = page.getByRole("button", { name: "Manage Phone work" });
+  await manage.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(300);
+  await manage.click();
+  await page.getByRole("menuitem", { name: "Open in Chat…" }).click();
+  await page.getByRole("button", { name: "Resume in Chat" }).click();
+  await expect(page.getByText("Codex Chat · Phone work")).toBeVisible();
+  const chat = page.locator("section").filter({ hasText: "Codex Chat · Phone work" });
+  const alert = chat.getByRole("alert");
+  const composer = chat.getByPlaceholder("Message… Type / for commands", { exact: true });
+  await expect(composer).toBeVisible();
+
+  const emit = (event: Record<string, unknown>) => page.evaluate((data) => {
+    const streams = (window as unknown as { __codexStreams: Array<{ emit(data: unknown): void }> }).__codexStreams;
+    streams.at(-1)?.emit(data);
+  }, event);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __codexStreams?: unknown[] }).__codexStreams?.length ?? 0)).toBeGreaterThan(0);
+  await emit({ method: "turn/started", params: { turn: { id: "turn-1" } }, piSeq: 1, piRuntime: "run1" });
+  await emit({ method: "error", params: { error: { message: "stream disconnected" }, willRetry: true }, piSeq: 2, piRuntime: "run1" });
+  await expect(alert).toHaveText("Codex is retrying: stream disconnected");
+  await emit({ method: "turn/completed", params: { turn: { id: "turn-1", status: "failed", error: { message: "usage limit reached" } } }, piSeq: 3, piRuntime: "run1" });
+  await expect(alert).toHaveText("Turn failed: usage limit reached");
+
+  // An unknown Codex terminal in the folder: ask, keep the draft, resend on "Continue anyway".
+  await composer.fill("continue from my phone");
+  await composer.press("Enter");
+  const prompt = alert.filter({ hasText: "A Codex terminal is running in this folder." });
+  await expect(prompt.getByRole("button", { name: "Stop terminal" })).toBeVisible();
+  await prompt.getByRole("button", { name: "Continue anyway" }).click();
+  await expect(alert).toHaveText("Send your message again to continue.");
+  await expect(composer).toHaveValue("continue from my phone");
+  await composer.press("Enter");
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent[0].terminals).toBeUndefined();
+  expect(sent[1]).toMatchObject({ text: "continue from my phone", terminals: "ignore" });
+});
+
 test("searches and manages files from Explorer", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.startsWith("mobile"), "desktop Explorer test");
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);

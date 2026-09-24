@@ -71,10 +71,15 @@ test("child process failures reject pending requests and notify listeners", asyn
     failure: null,
     idleTimer: null,
   };
-  appServer.failState(state, new Error("Unable to start Codex app-server"));
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (message) => warnings.push(message);
+  try { appServer.failState(state, new Error("Unable to start Codex app-server")); } finally { console.warn = originalWarn; }
   const error = await pendingResult;
   assert.match(error.message, /Unable to start Codex app-server/);
-  assert.match(error.message, /executable unavailable/);
+  assert.equal(error.code, "runtime_unavailable");
+  assert.doesNotMatch(error.message, /executable unavailable/);
+  assert.match(warnings[0], /executable unavailable/);
   assert.equal(state.pending.size, 0);
   assert.equal(events[0].method, "codex/closed");
 });

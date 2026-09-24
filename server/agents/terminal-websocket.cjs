@@ -3,7 +3,7 @@
 
 const { WebSocketServer } = require("ws");
 const manager = require("./terminal-manager.cjs");
-const codexAppServer = require("./codex-app-server.cjs");
+const terminalApi = require("./terminal-api.cjs");
 
 const state = global.__piWebTerminalWebSocketState || { server: new WebSocketServer({ noServer: true }) };
 global.__piWebTerminalWebSocketState = state;
@@ -34,7 +34,7 @@ function acceptTerminalWebSocket(req, socket, head, id) {
       return;
     }
     ws.on("message", (data) => {
-      try { const terminal = manager.getTerminal(id); if (terminal.sourceSessionId && codexAppServer.isClaimed(terminal.sourceSessionId)) throw new Error("Codex Chat owns input"); manager.inputTerminal(id, data); } catch { ws.close(1011, "terminal input rejected"); }
+      try { if (terminalApi.chatOwnsInput(manager.getTerminal(id))) throw new Error("Codex Chat owns input"); manager.inputTerminal(id, data); } catch { ws.close(1011, "terminal input rejected"); }
     });
     ws.on("close", unsubscribe);
     ws.on("error", unsubscribe);

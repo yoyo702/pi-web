@@ -41,7 +41,7 @@ function assertNotBusy(id) {
 async function releaseForRemoval(id) {
   if (!assertNotBusy(id)) return;
   await codexAppServer.stopAndWait(id);
-  // A writer may have started while the runtime was stopping.
+  // A terminal may have started before the removal lock was taken.
   assertNotBusy(id);
 }
 function isCodexSessionPath(pathname) { return pathname === "/api/codex/runtime" || pathname === "/api/codex/sessions" || /^\/api\/codex\/sessions\/[^/]+(?:\/(?:archive|unarchive|delete|rename))?$/.test(pathname); }
@@ -76,11 +76,15 @@ async function handleCodexSessionRequest(req, res, url) {
     const session = await safeSession(id, body.cwd);
     if (action === "archive") {
       if (session.archived) throw Object.assign(new Error("Codex session is already archived"), { code: "already_archived" });
-      await releaseForRemoval(id);
-      return json(res, 200, { session: withRuntime(await catalog.archive(id)) });
+      // The lock keeps chats and resume terminals from starting until the move is done.
+      const archived = await codexAppServer.withRemovalLock(id, async () => { await releaseForRemoval(id); return catalog.archive(id); });
+      return json(res, 200, { session: withRuntime(archived) });
     }
     if (action === "unarchive") return json(res, 200, { session: withRuntime(await catalog.unarchive(id)) });
-    if (action === "delete") { await releaseForRemoval(id); return json(res, 200, { session: withRuntime(await catalog.remove(id)) }); }
+    if (action === "delete") {
+      const removed = await codexAppServer.withRemovalLock(id, async () => { await releaseForRemoval(id); return catalog.remove(id); });
+      return json(res, 200, { session: withRuntime(removed) });
+    }
     if (action === "rename") return json(res, 200, { session: withRuntime(await catalog.rename(id, body.name)) });
     return json(res, 404, { error: "unknown action" });
   } catch (cause) {
