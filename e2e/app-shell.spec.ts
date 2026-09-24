@@ -794,8 +794,23 @@ test("opens the specific terminal behind a project rail activity item", async ({
   const devServerTab = page.locator('.center-workspace [role="tab"][data-tab-id="terminal:rail-terminal-a"]');
   await expect(devServerTab).toHaveAttribute("aria-label", "Dev server");
   await expect(devServerTab).toHaveAttribute("aria-selected", "true");
-  // A desktop pointer keeps the touch-key bar hidden.
-  await expect(page.getByLabel("Terminal shortcuts")).toBeHidden();
+  // A desktop pointer keeps the touch-key bar hidden (the panel loads lazily;
+  // wait for it so the check and the touch below hit the mounted terminal).
+  const terminalHeader = page.locator(".agent-terminal-header");
+  await expect(terminalHeader).toBeVisible();
+  const touchKeys = page.getByLabel("Terminal shortcuts");
+  await expect(touchKeys).toHaveCount(1);
+  await expect(touchKeys).toBeHidden();
+  // Touch input on a device that reports a fine pointer (a tablet with a
+  // trackpad or stylus) shows the keys; the More menu can force them off/on.
+  await page.evaluate(() => window.dispatchEvent(new PointerEvent("pointerdown", { pointerType: "touch" })));
+  await expect(touchKeys).toBeVisible();
+  await terminalHeader.getByRole("button", { name: "More ▾" }).click();
+  await terminalHeader.getByRole("button", { name: "Hide touch keys" }).click();
+  await expect(touchKeys).toBeHidden();
+  await terminalHeader.getByRole("button", { name: "More ▾" }).click();
+  await terminalHeader.getByRole("button", { name: "Show touch keys" }).click();
+  await expect(touchKeys).toBeVisible();
 
   // Another project: the activity center switches to it first, then opens the
   // terminal on top of that project's restored tabs.

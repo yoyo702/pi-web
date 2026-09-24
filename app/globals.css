@@ -1557,91 +1557,89 @@ html.dark .agent-terminal { background: #11151d; }
   .agent-terminal-viewport { padding: 6px 6px 22px; }
 }
 
-/* Touch keys: phones, and landscape phones/tablets whose width exceeds the
- * mobile breakpoint but still have no Esc, arrows, or modifiers. */
-@media (max-width: 640px), (hover: none) and (pointer: coarse) {
-  .agent-terminal-mobile-dock {
-    position: relative;
-    z-index: 4;
-    display: grid;
-    flex: none;
-    gap: 5px;
-    padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
-    border-top: 1px solid var(--border);
-    background: var(--bg-panel);
-  }
-
-  .agent-terminal-mobile-actions {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
-    gap: 4px;
-  }
-
-  .agent-terminal-mobile-actions button,
-  .agent-terminal-paste button,
-  .agent-terminal-command button {
-    display: grid;
-    min-width: 0;
-    min-height: 42px;
-    place-items: center;
-    padding: 0 4px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    background: var(--bg);
-    font: 12px var(--font-mono);
-  }
-
-  .agent-terminal-mobile-actions button.is-active {
-    border-color: var(--accent);
-    color: var(--accent);
-    background: var(--bg-selected);
-  }
-
-  .agent-terminal-paste {
-    display: grid;
-    gap: 5px;
-  }
-
-  .agent-terminal-paste textarea {
-    box-sizing: border-box;
-    width: 100%;
-    min-height: 72px;
-    resize: vertical;
-    padding: 8px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    background: var(--bg);
-    font: 16px/1.4 var(--font-mono);
-  }
-
-  .agent-terminal-paste > div { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
-  .agent-terminal-paste button:last-child { border-color: var(--accent); color: var(--accent); }
-  .agent-terminal-paste button:disabled { opacity: .45; }
-
-  .agent-terminal-command-panel {
-    position: absolute;
-    right: 8px;
-    bottom: calc(100% + 6px);
-    left: 8px;
-    display: grid;
-    max-height: min(360px, 50dvh);
-    gap: 5px;
-    padding: 8px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    background: var(--bg-panel);
-    box-shadow: 0 10px 30px rgb(0 0 0 / 25%);
-  }
-
-  .agent-terminal-command-panel header { display: flex; align-items: center; min-height: 36px; gap: 8px; }
-  .agent-terminal-command-panel header strong { flex: 1; font-size: 12px; }
-  .agent-terminal-command-panel header button { border: 0; color: var(--text-muted); background: transparent; }
-  .agent-terminal-command-panel > div { display: grid; min-height: 0; gap: 4px; overflow-y: auto; }
-  .agent-terminal-command-panel p { margin: 12px; color: var(--text-muted); text-align: center; font-size: 12px; }
-  .agent-terminal-command { display: grid; grid-template-columns: minmax(0, 1fr) 42px; gap: 4px; }
-  .agent-terminal-command button:first-child { overflow: hidden; justify-content: start; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
-  .agent-terminal-command button.is-favorite { color: var(--accent); }
+/* Touch keys, shown via .is-visible (hooks/useIsMobile.ts useTouchTerminalKeys):
+ * phones, touch devices wider than the mobile breakpoint, or on request. */
+.agent-terminal-mobile-dock.is-visible {
+  position: relative;
+  z-index: 4;
+  display: grid;
+  flex: none;
+  gap: 5px;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom));
+  border-top: 1px solid var(--border);
+  background: var(--bg-panel);
 }
+
+.agent-terminal-mobile-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(44px, 1fr));
+  gap: 4px;
+}
+
+.agent-terminal-mobile-actions button,
+.agent-terminal-paste button,
+.agent-terminal-command button {
+  display: grid;
+  min-width: 0;
+  min-height: 42px;
+  place-items: center;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--bg);
+  font: 12px var(--font-mono);
+}
+
+.agent-terminal-mobile-actions button.is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--bg-selected);
+}
+
+.agent-terminal-paste {
+  display: grid;
+  gap: 5px;
+}
+
+.agent-terminal-paste textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 72px;
+  resize: vertical;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--bg);
+  font: 16px/1.4 var(--font-mono);
+}
+
+.agent-terminal-paste > div { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.agent-terminal-paste button:last-child { border-color: var(--accent); color: var(--accent); }
+.agent-terminal-paste button:disabled { opacity: .45; }
+
+.agent-terminal-command-panel {
+  position: absolute;
+  right: 8px;
+  bottom: calc(100% + 6px);
+  left: 8px;
+  display: grid;
+  max-height: min(360px, 50dvh);
+  gap: 5px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--bg-panel);
+  box-shadow: 0 10px 30px rgb(0 0 0 / 25%);
+}
+
+.agent-terminal-command-panel header { display: flex; align-items: center; min-height: 36px; gap: 8px; }
+.agent-terminal-command-panel header strong { flex: 1; font-size: 12px; }
+.agent-terminal-command-panel header button { border: 0; color: var(--text-muted); background: transparent; }
+.agent-terminal-command-panel > div { display: grid; min-height: 0; gap: 4px; overflow-y: auto; }
+.agent-terminal-command-panel p { margin: 12px; color: var(--text-muted); text-align: center; font-size: 12px; }
+.agent-terminal-command { display: grid; grid-template-columns: minmax(0, 1fr) 42px; gap: 4px; }
+.agent-terminal-command button:first-child { overflow: hidden; justify-content: start; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.agent-terminal-command button.is-favorite { color: var(--accent); }

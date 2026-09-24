@@ -52,25 +52,81 @@ export function useHideDevelopmentTools(): boolean {
   return useSyncExternalStore(subscribeDevToolsVisibility, getDevToolsVisibilitySnapshot, getServerSnapshot);
 }
 
-// Shared with the touch-keys block in app/globals.css.
+// Touch-only devices report a coarse pointer, but a tablet with a keyboard,
+// trackpad, or stylus attached may not, so also count any real touch/pen
+// input seen on this device, and let the user force the keys on or off.
 const TOUCH_KEYS_QUERY = "(max-width: 640px), (hover: none) and (pointer: coarse)";
+const TOUCH_SEEN_KEY = "pi-web:touch-input-seen";
+const TOUCH_KEYS_OVERRIDE_KEY = "pi-web:terminal-touch-keys";
+
+export type TouchKeysOverride = "on" | "off" | null;
+
+const touchKeyListeners = new Set<() => void>();
+let touchWatchInstalled = false;
+
+function readStorage(key: string): string | null {
+  try { return window.localStorage.getItem(key); } catch { return null; }
+}
+
+function writeStorage(key: string, value: string | null): void {
+  try {
+    if (value === null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, value);
+  } catch { /* private mode: the choice lasts for this page only */ }
+}
+
+function notifyTouchKeys(): void {
+  for (const listener of touchKeyListeners) listener();
+}
+
+function installTouchWatch(): void {
+  if (touchWatchInstalled || readStorage(TOUCH_SEEN_KEY) === "1") return;
+  touchWatchInstalled = true;
+  const onPointerDown = (event: PointerEvent) => {
+    if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+    writeStorage(TOUCH_SEEN_KEY, "1");
+    window.removeEventListener("pointerdown", onPointerDown, true);
+    notifyTouchKeys();
+  };
+  window.addEventListener("pointerdown", onPointerDown, true);
+}
 
 function subscribeTouchKeys(cb: () => void): () => void {
   if (typeof window === "undefined" || !window.matchMedia) return () => {};
+  installTouchWatch();
   const mql = window.matchMedia(TOUCH_KEYS_QUERY);
+  touchKeyListeners.add(cb);
   mql.addEventListener("change", cb);
-  return () => mql.removeEventListener("change", cb);
+  return () => {
+    touchKeyListeners.delete(cb);
+    mql.removeEventListener("change", cb);
+  };
+}
+
+function getTouchKeysOverride(): TouchKeysOverride {
+  if (typeof window === "undefined") return null;
+  const value = readStorage(TOUCH_KEYS_OVERRIDE_KEY);
+  return value === "on" || value === "off" ? value : null;
 }
 
 function getTouchKeysSnapshot(): boolean {
   if (typeof window === "undefined" || !window.matchMedia) return false;
-  return window.matchMedia(TOUCH_KEYS_QUERY).matches;
+  const override = getTouchKeysOverride();
+  if (override) return override === "on";
+  return window.matchMedia(TOUCH_KEYS_QUERY).matches || readStorage(TOUCH_SEEN_KEY) === "1";
+}
+
+/** Force the terminal touch keys on or off on this device; null returns to automatic. */
+export function setTouchKeysOverride(value: TouchKeysOverride): void {
+  writeStorage(TOUCH_KEYS_OVERRIDE_KEY, value);
+  notifyTouchKeys();
 }
 
 /**
- * True on phones and on touch-only devices wider than the mobile breakpoint
- * (landscape phones, tablets): they need on-screen terminal keys and a
- * terminal that stays above the on-screen keyboard.
+ * True when the terminal should show on-screen keys (Esc, arrows, modifiers)
+ * and stay above the on-screen keyboard: phones, touch-only devices wider than
+ * the mobile breakpoint, any device where touch input has been seen, or when
+ * the user turned them on.
  */
 export function useTouchTerminalKeys(): boolean {
   return useSyncExternalStore(subscribeTouchKeys, getTouchKeysSnapshot, getServerSnapshot);

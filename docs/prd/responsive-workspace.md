@@ -25,7 +25,7 @@ TianForge pi 同时承载聊天、Session、Explorer、Terminal 和 Git Review�
 - 底部导航切换 Workspace、Agents、Files 和 Git。
 - 对话框限制在可视区域并支持 Esc、遮罩关闭。
 - Terminal、Chat 输入区和工具栏针对窄屏重新排布。
-- Terminal 底部提供触屏按键栏（Esc、方向键、Tab、Shift+Tab、Ctrl+C、Ctrl/Alt 粘滞修饰键、Enter、粘贴、历史与收藏命令）。按设备判断而不只看宽度：窄屏手机，以及宽度超过 640px 的触屏设备（横屏手机、平板）都会显示，并在软键盘弹出时保持在键盘上方。
+- Terminal 底部提供触屏按键栏（Esc、方向键、Tab、Shift+Tab、Ctrl+C、Ctrl/Alt 粘滞修饰键、Enter、粘贴、历史与收藏命令）。按设备判断而不只看宽度：窄屏手机、宽度超过 640px 的纯触屏设备（横屏手机、平板），以及在本设备上出现过手指或触控笔操作时都会显示（接了键盘、触控板或触控笔的平板会被浏览器识别为精确指针，只看媒体查询会漏掉）；终端 More 菜单可手动显示或隐藏，选择保存在本设备。显示时终端会在软键盘弹出时保持在键盘上方。
 
 ## 设计原则
 
