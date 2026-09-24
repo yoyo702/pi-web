@@ -1,4 +1,5 @@
 import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager } from "@earendil-works/pi-coding-agent";
+import { writeUnflushedSession } from "./session-write";
 import { normalizeModelCompat } from "./model-compat";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
@@ -100,6 +101,7 @@ function withExtensionTools(session: AgentSessionLike, toolNames: string[]): str
 // AgentSessionWrapper
 // Wraps AgentSession with the same interface the rest of the app expects
 // ============================================================================
+
 
 export class AgentSessionWrapper {
   private listeners: EventListener[] = [];
@@ -536,21 +538,30 @@ export class AgentSessionWrapper {
 
         const sessionDir = sessionManager.getSessionDir();
         let newSessionFile: string;
+        let newSessionId: string;
 
+        // Take the new id from the manager that created the session instead of
+        // re-opening (fully parsing) the new file. The file may not exist yet:
+        // pi writes a session only once it has an assistant message, and
+        // re-opening a missing path would mint an unrelated id.
         if (!entry.parentId) {
           // Fork before the first message: create an empty session linked to this one
           const newManager = SessionManager.create(sessionManager.getCwd(), sessionDir);
           newManager.newSession({ parentSession: currentSessionFile });
           newSessionFile = newManager.getSessionFile() as string;
+          newSessionId = newManager.getSessionId();
+          writeUnflushedSession(newManager);
         } else {
           // Fork after some history: copy path up to (but not including) the fork point
           const sourceManager = SessionManager.open(currentSessionFile, sessionDir);
           const forkedPath = sourceManager.createBranchedSession(entry.parentId);
           if (!forkedPath) throw new Error("Failed to create forked session");
           newSessionFile = forkedPath;
+          // createBranchedSession switches the manager to the fork.
+          newSessionId = sourceManager.getSessionId();
+          writeUnflushedSession(sourceManager);
         }
 
-        const newSessionId = SessionManager.open(newSessionFile, sessionDir).getSessionId();
         cacheSessionPath(newSessionId, newSessionFile);
         invalidateSessionListCache();
         // Destroying aborts the agent, so keep a still-running source session
