@@ -8,6 +8,7 @@ import { countToolCallBlocks, getDisplayableAssistantBlocks, splitFinalAssistant
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
+import { useWorkspaceActions } from "./workspace/WorkspaceActions";
 import { useAgentSession, type ActiveToolProgress, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
@@ -32,7 +33,6 @@ interface Props {
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
-  onOpenFile?: (filePath: string) => void;
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -255,9 +255,13 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange }: Props) {
   const { soundEnabled, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
+  const actions = useWorkspaceActions();
+  const handleOpenFile = useCallback((filePath: string) => {
+    actions.openFile(filePath, { sourceSessionId: session?.id ?? null });
+  }, [actions, session?.id]);
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
   // wrapping handleAgentEventRef because useAgentSession overwrites that ref
@@ -690,7 +694,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                     toolResults={toolResultsMap}
                     modelNames={modelNames}
                     cwd={messageCwd}
-                    onOpenFile={onOpenFile}
+                    onOpenFile={handleOpenFile}
                     entryId={entryIds[idx]}
                     onFork={sessionBusy || isNew || (idx === 0 && msg.role === "user") ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
@@ -799,7 +803,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
               );
             })()}
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={handleOpenFile} />
             )}
 
             {agentRunning && !streamState.streamingMessage && agentPhase?.kind === "running_tools" && (

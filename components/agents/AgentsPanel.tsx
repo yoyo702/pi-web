@@ -5,16 +5,10 @@ import { createPortal } from "react-dom";
 import type { TerminalPermissionMode, TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
 import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
 import { ProductStatusDot } from "@/components/ProductStatus";
+import type { CodexChatTarget } from "@/components/workspace/WorkspaceActions";
 
-export interface CodexSessionTarget {
-  sessionId: string;
-  sessionName: string;
-  cwd: string;
-  model?: string;
-  reasoningEffort?: string;
-  serviceTier?: string;
-  approvalPolicy: "untrusted" | "on-request" | "never";
-}
+/** Structurally identical to `CodexChatTarget`; kept as a distinct export so AgentsPanel stays usable outside the workspace-actions context. */
+export type CodexSessionTarget = CodexChatTarget;
 
 interface CodexSession {
   id: string;

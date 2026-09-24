@@ -4,10 +4,11 @@ import { memo, useEffect, useLayoutEffect, useState, useCallback, useMemo, useRe
 import type { SessionInfo } from "@/lib/types";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import type { TerminalProvider } from "@/lib/agents/terminal";
-import { AgentsPanel, type CodexSessionTarget } from "./agents/AgentsPanel";
+import { AgentsPanel } from "./agents/AgentsPanel";
 import { applyBackgroundSessionEvent, type BackgroundAgentEvent } from "@/lib/session-background-sync";
 import { getSessionDisplayTitle, resolveSessionLineage, sortSessionsByRecent } from "@/lib/session-list";
 import { getProductStatus } from "@/lib/product-status";
+import { useWorkspaceActions } from "./workspace/WorkspaceActions";
 import { ChevronDown, Settings } from "lucide-react";
 
 declare global {
@@ -29,18 +30,14 @@ interface Props {
   onSessionDeleted?: (sessionId: string) => void;
   selectedCwd?: string | null;
   onCwdChange?: (cwd: string | null, projectRoot?: string | null) => void;
-  onOpenFile?: (filePath: string, fileName: string) => void;
   onExplorerPathRenamed?: (oldPath: string, newPath: string, isDir: boolean) => void;
   onExplorerPathDeleted?: (path: string, isDir: boolean) => void;
   explorerRefreshKey?: number;
   onExplorerRefresh?: () => void;
   onAtMention?: (relativePath: string, isDir: boolean) => void;
   onAtMentions?: (relativePaths: string[]) => void;
-  onOpenGitReview?: () => void;
   gitReviewOpen?: boolean;
   onNewAgent?: (provider: TerminalProvider) => void;
-  onOpenCodexSession?: (target: CodexSessionTarget) => void;
-  onOpenAgentTerminal?: (terminal: import("@/lib/agents/terminal").TerminalSession, label?: string) => void;
   onAgentTerminalRemoved?: (terminalId: string) => void;
   onCodexSessionChanged?: (change: { id: string; action: "rename" | "archive" | "unarchive" | "delete"; name?: string }) => void;
   requestedModule?: "sessions" | "agents" | "explorer";
@@ -327,7 +324,9 @@ function TianForgeTitle({ onOpenSettings }: { onOpenSettings?: () => void }) {
   </div>;
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onExplorerPathRenamed, onExplorerPathDeleted, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onOpenGitReview, gitReviewOpen, onNewAgent, onOpenCodexSession, onOpenAgentTerminal, onAgentTerminalRemoved, onCodexSessionChanged, requestedModule, explorerRevealKey, explorerRevealRequest, cwdResetKey = 0, onOpenSettings }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onExplorerPathRenamed, onExplorerPathDeleted, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, gitReviewOpen, onNewAgent, onAgentTerminalRemoved, onCodexSessionChanged, requestedModule, explorerRevealKey, explorerRevealRequest, cwdResetKey = 0, onOpenSettings }: Props) {
+  const actions = useWorkspaceActions();
+  const openExplorerFile = useCallback((path: string) => actions.openFile(path), [actions]);
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const sessionPane = useVerticalPaneSize("pi-sidebar-sessions-h", 280, 100, 640);
   const [sessionsExpanded, setSessionsExpanded] = useState(true);
@@ -1330,8 +1329,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       </>}
 
       {/* Optional external agents — separate from the Pi session browser and file explorer. */}
-      {sidebarMode === "agents" && (selectedCwdProp || selectedCwd) && (onNewAgent || onOpenCodexSession) && <>
-        <AgentsPanel cwd={(selectedCwdProp || selectedCwd)!} refreshKey={agentsRefreshKey} style={agentsExpanded && explorerOpen ? { flex: `0 1 ${sessionPane.size}px`, height: sessionPane.size, minHeight: 90 } : agentsExpanded ? { flex: "1 1 0", minHeight: 90 } : { flex: "0 0 auto" }} onExpandedChange={setAgentsExpanded} onNewAgent={onNewAgent} onOpenCodexSession={onOpenCodexSession} onOpenTerminal={onOpenAgentTerminal} onTerminalRemoved={onAgentTerminalRemoved} onCodexSessionChanged={onCodexSessionChanged} />
+      {sidebarMode === "agents" && (selectedCwdProp || selectedCwd) && onNewAgent && <>
+        <AgentsPanel cwd={(selectedCwdProp || selectedCwd)!} refreshKey={agentsRefreshKey} style={agentsExpanded && explorerOpen ? { flex: `0 1 ${sessionPane.size}px`, height: sessionPane.size, minHeight: 90 } : agentsExpanded ? { flex: "1 1 0", minHeight: 90 } : { flex: "0 0 auto" }} onExpandedChange={setAgentsExpanded} onNewAgent={onNewAgent} onOpenCodexSession={actions.openCodexChat} onOpenTerminal={actions.openTerminal} onTerminalRemoved={onAgentTerminalRemoved} onCodexSessionChanged={onCodexSessionChanged} />
       </>}
 
       {/* Shared file explorer — remains mounted below either Pi or Agents. */}
@@ -1377,9 +1376,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               </svg>
               Explorer
             </button>
-            {worktreeState?.isGit && onOpenGitReview && (
+            {worktreeState?.isGit && (
               <button
-                onClick={onOpenGitReview}
+                onClick={actions.toggleGitReview}
                 title={gitReviewOpen ? "Close Git Review" : "Open Git Review"}
                 aria-label={gitReviewOpen ? "Close Git Review" : "Open Git Review"}
                 aria-pressed={gitReviewOpen}
@@ -1476,7 +1475,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               <FileExplorer
                 ref={fileExplorerRef}
                 cwd={selectedCwd ?? selectedCwdProp!}
-                onOpenFile={onOpenFile ?? (() => {})}
+                onOpenFile={openExplorerFile}
                 refreshKey={explorerKey}
                 onAtMention={onAtMention}
                 onAtMentions={onAtMentions}

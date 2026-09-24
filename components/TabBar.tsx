@@ -5,33 +5,7 @@ import { createPortal } from "react-dom";
 import { getFileIcon } from "./FileIcons";
 import { ProductBrand } from "./ProductBrand";
 import { ProductStatusDot } from "./ProductStatus";
-import type { TerminalLaunchMode, TerminalPermissionMode, TerminalProvider } from "@/lib/agents/terminal";
-
-export interface Tab {
-  id: string;
-  label: string;
-  kind: "pi" | "file" | "git" | "terminal" | "codex-chat";
-  closable?: boolean;
-  status?: "idle" | "running" | "approval" | "connecting" | "offline" | "failed" | "ended";
-  filePath?: string;
-  sourceSessionId?: string | null;
-  terminalId?: string;
-  terminalProvider?: TerminalProvider;
-  terminalPermissionMode?: TerminalPermissionMode;
-  terminalLaunchMode?: TerminalLaunchMode;
-  terminalNoAltScreen?: boolean;
-  terminalModel?: string | null;
-  terminalWebSearch?: boolean;
-  terminalChatMode?: boolean;
-  cwd?: string;
-  model?: string | null;
-  reasoningEffort?: string;
-  serviceTier?: string;
-  approvalPolicy?: "untrusted" | "on-request" | "never";
-  sessionName?: string;
-  /** Locked tabs are persisted but protected from close buttons and bulk close actions. */
-  locked?: boolean;
-}
+import type { Tab } from "@/lib/workspace/tabs";
 
 interface Props {
   tabs: Tab[];
@@ -253,7 +227,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
               </span>}
               <span
                 style={{ overflow: "hidden", textOverflow: "ellipsis", flex: 1, fontWeight: isActive ? 500 : 400 }}
-                title={tab.filePath}
+                title={tab.kind === "file" ? tab.filePath : undefined}
               >
                 {tab.kind === "pi" ? <ProductBrand size={12} mutedPi={false} style={{ fontWeight: isActive ? 650 : 550 }} /> : tab.label}
               </span>
@@ -302,9 +276,9 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
             top: Math.max(4, Math.min(contextMenu.y, window.innerHeight - 304)),
           }}
         >
-          {contextTab.filePath && onRevealFile && menuItem("Reveal in File Explorer", false, () => onRevealFile(contextTab.filePath!))}
-          {contextTab.filePath && menuItem(copiedFilePath === contextTab.filePath ? "File Path Copied" : "Copy File Path", false, () => { void copyFilePath(contextTab.filePath!); }, false)}
-          {contextTab.filePath && <div role="separator" style={{ height: 1, margin: "4px 3px", background: "var(--border)" }} />}
+          {contextTab.kind === "file" && contextTab.filePath && onRevealFile && menuItem("Reveal in File Explorer", false, () => onRevealFile(contextTab.filePath))}
+          {contextTab.kind === "file" && contextTab.filePath && menuItem(copiedFilePath === contextTab.filePath ? "File Path Copied" : "Copy File Path", false, () => { void copyFilePath(contextTab.filePath); }, false)}
+          {contextTab.kind === "file" && contextTab.filePath && <div role="separator" style={{ height: 1, margin: "4px 3px", background: "var(--border)" }} />}
           {menuItem(contextTab.locked ? "Unlock Tab" : "Lock Tab", false, () => onToggleTabLocked(contextTab.id))}
           <div role="separator" style={{ height: 1, margin: "4px 3px", background: "var(--border)" }} />
           {menuItem("Close Tab", !isTabClosable(contextTab), () => onCloseTabs([contextTab.id]))}

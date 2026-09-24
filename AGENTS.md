@@ -89,6 +89,11 @@ lib/
   types.ts            shared TypeScript types
   normalize.ts        normalizeToolCalls() — field name mismatch between file format and our types
   worktree.ts         project/worktree resolution and git worktree operations
+  workspace/
+    tabs.ts           type definitions for tab kinds
+    tab-kinds.ts      registry of tab kinds with slot and parse
+    panel-state.ts    pure reducer for panel state
+    panel-storage.ts  localStorage persistence with legacy-compatible keys
 
 components/
   AppShell.tsx        layout + URL state + tab management
@@ -109,13 +114,23 @@ components/
   FileExplorer.tsx    file tree inside sidebar
   FileIcons.tsx       file icon helpers
   FileViewer.tsx      file content in a tab
-  TabBar.tsx          tab bar (Chat + open file tabs)
+  TabBar.tsx          shared tab strip for center and right-panel tabs (close/lock/context menu)
+  workspace/
+    tab-views.tsx     view renderers for each tab kind
+    CenterWorkspace.tsx keeps mounted Terminal/Codex tabs alive (Pi tab rendered by AppShell)
+    SidePanel.tsx     renders the active right-panel tab or the "No file open" placeholder
+    WorkspaceActions.tsx useWorkspaceActions hook for opening tabs
+    TopBar.tsx        Pi session top bar (history, auto-name, branches, system prompt, stats)
 
 hooks/
   useAgentSession.ts  messages + streaming + SSE + fork/navigate/reconciliation logic
   useAudio.ts         completion sound + browser AudioContext unlock
   useDragDrop.ts      shared drag/drop state
   useIsMobile.ts      responsive breakpoint hook
+  useMobileOverlayHistory.ts mobile back-button history for overlays
+  usePanelResize.ts   drag-resizable panel widths + persistence
+  useProjectWorkspaces.ts project rail workspace list + active project (localStorage)
+  useSessionMeta.ts   top-bar session stats, context usage, copy feedback, auto-name
   useTheme.ts         theme state
 ```
 
@@ -218,6 +233,11 @@ Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's
 - Explorer hides dotfiles plus generated/dependency directories by default. Its visibility toggle reveals these entries and includes them in non-Git walking search; `.git`, `node_modules`, and macOS `._*` metadata remain bounded/filtered as appropriate.
 - File tabs support wheel-to-horizontal scrolling and a context menu for reveal, path copy, lock/unlock, and close-left/right/others/all. Locked tabs survive bulk-close actions and are persisted with the project panel state.
 - `GET /api/git/repositories` discovers a root repository and nested repositories under the allowed workspace. `GitReviewPanel` scopes all status/diff/history/write operations to the selected repository and persists that choice per workspace.
+
+### Workspace panels and tab kinds
+- Center tabs (Pi, Terminal, Codex Chat, terminal split) persist per **cwd**; right-panel tabs (File, Git Review) persist per **project**. State lives in `lib/workspace/panel-state.ts` (pure reducers) and `lib/workspace/panel-storage.ts` (localStorage, legacy-compatible keys/shapes — never change them without a migration).
+- To add a tab kind: (a) add its type to `lib/workspace/tabs.ts` and include it in `CenterTab` or `SideTab`; (b) add an entry with `slot` and `parse` in `lib/workspace/tab-kinds.ts`; (c) add a reducer action to open it in `lib/workspace/panel-state.ts` (the side reducer only opens tabs via `openFile`/`openGitReview`; the center `open` action is typed `TerminalTab | CodexChatTab`, so a new center kind needs its own action or that union widened) plus reducer tests; (d) add a view component in `components/workspace/tab-views.tsx`; (e) add the kind branch in the matching `CenterWorkspace`/`SidePanel` `renderTab` callback in AppShell (and extend `CenterWorkspace`'s `renderTab` parameter type for new center kinds); (f) add an opener on `WorkspaceActions` if other components need to open it; (g) add the icon branch in `components/TabBar.tsx`.
+- Components open tabs with `useWorkspaceActions()` (`components/workspace/WorkspaceActions.tsx`) instead of callback props. New entry points (status center, command palette) should use it too.
 
 ### Native terminal runtime
 - `node-pty` launches Unix terminals through its packaged `spawn-helper`. Some npm/package extraction paths leave that Mach-O/ELF helper at mode `0644`, which surfaces only as `posix_spawnp failed` even when the configured shell and cwd are valid.
