@@ -28,7 +28,7 @@ function buildActivePath(nodes: SessionTreeNode[], targetId: string | null): Set
   function search(nodes: SessionTreeNode[], path: string[]): string[] | null {
     for (const node of nodes) {
       const next = [...path, node.entry.id];
-      if (node.entry.id === target || node.compressedEntryIds?.includes(target)) {
+      if (node.entry.id === target || node.compressedEntryIds?.includes(target) || node.hiddenEntryIds?.includes(target)) {
         return next;
       }
       const found = search(node.children, next);

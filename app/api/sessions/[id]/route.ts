@@ -12,6 +12,7 @@ import {
   readSessionHeader,
 } from "@/lib/session-reader";
 import { sessionPathKey } from "@/lib/session-path";
+import { withoutNonConversationEntries } from "@/lib/session-tree";
 import { getRpcSession } from "@/lib/rpc-manager";
 import { errorResponse } from "@/lib/http-error";
 
@@ -22,9 +23,10 @@ const MAX_PROJECTED_TREE_DEPTH = 200;
  * Project the session tree into the shallow navigation tree sent to the client.
  * Keeps roots, branch points, and leaves while contracting single-child chains
  * without recursive traversal. Contracted entry IDs are attached to the next
- * visible node so the UI can still recognize an active leaf inside the chain.
+ * visible node so the UI can still recognize an active leaf inside the chain;
+ * `hiddenEntryIds` of contracted nodes move along with them.
  */
-function projectTreeForResponse<T extends { entry: { id: string }; children: T[]; compressedEntryIds?: string[] }>(
+function projectTreeForResponse<T extends { entry: { id: string }; children: T[]; compressedEntryIds?: string[]; hiddenEntryIds?: string[] }>(
   nodes: T[]
 ): T[] {
   const keep = new Set<T>();
@@ -49,11 +51,15 @@ function projectTreeForResponse<T extends { entry: { id: string }; children: T[]
     }
   }
 
-  const cloneNode = (node: T, compressedEntryIds?: string[]): T => ({
-    ...node,
-    children: [],
-    ...(compressedEntryIds?.length ? { compressedEntryIds } : {}),
-  });
+  const cloneNode = (node: T, compressedEntryIds?: string[], carriedHiddenIds: string[] = []): T => {
+    const hiddenEntryIds = [...carriedHiddenIds, ...(node.hiddenEntryIds ?? [])];
+    return {
+      ...node,
+      children: [],
+      ...(compressedEntryIds?.length ? { compressedEntryIds } : {}),
+      ...(hiddenEntryIds.length ? { hiddenEntryIds } : {}),
+    };
+  };
   const projectedRoots = nodes.map((node) => cloneNode(node));
   const tasks = nodes.map((source, index) => ({
     source,
@@ -62,16 +68,16 @@ function projectTreeForResponse<T extends { entry: { id: string }; children: T[]
   }));
 
   const appendFlattenedKeptDescendants = (source: T, projectedParent: T) => {
-    const pending = [{ node: source, compressedEntryIds: [] as string[] }];
+    const pending = [{ node: source, compressedEntryIds: [] as string[], hiddenEntryIds: [] as string[] }];
     const flattenedSeen = new Set<T>();
 
     while (pending.length > 0) {
-      const { node, compressedEntryIds } = pending.pop()!;
+      const { node, compressedEntryIds, hiddenEntryIds } = pending.pop()!;
       if (flattenedSeen.has(node)) continue;
       flattenedSeen.add(node);
 
       if (keep.has(node)) {
-        projectedParent.children.push(cloneNode(node, compressedEntryIds));
+        projectedParent.children.push(cloneNode(node, compressedEntryIds, hiddenEntryIds));
       }
 
       for (let i = node.children.length - 1; i >= 0; i--) {
@@ -80,6 +86,9 @@ function projectTreeForResponse<T extends { entry: { id: string }; children: T[]
           compressedEntryIds: keep.has(node)
             ? []
             : [...compressedEntryIds, node.entry.id],
+          hiddenEntryIds: keep.has(node)
+            ? []
+            : [...hiddenEntryIds, ...(node.hiddenEntryIds ?? [])],
         });
       }
     }
@@ -97,8 +106,10 @@ function projectTreeForResponse<T extends { entry: { id: string }; children: T[]
       }
 
       const compressedEntryIds: string[] = [];
+      const hiddenEntryIds: string[] = [];
       while (!keep.has(child) && child.children.length === 1) {
         compressedEntryIds.push(child.entry.id);
+        hiddenEntryIds.push(...(child.hiddenEntryIds ?? []));
         child = child.children[0];
       }
 
@@ -106,7 +117,7 @@ function projectTreeForResponse<T extends { entry: { id: string }; children: T[]
         continue;
       }
 
-      const projectedChild = cloneNode(child, compressedEntryIds);
+      const projectedChild = cloneNode(child, compressedEntryIds, hiddenEntryIds);
       projected.children.push(projectedChild);
       tasks.push({ source: child, projected: projectedChild, depth: depth + 1 });
     }
@@ -134,7 +145,8 @@ export async function GET(
     const leafId = requestedLeafId && (entries as Array<{ id: string }>).some((entry) => entry.id === requestedLeafId)
       ? requestedLeafId
       : latestLeafId;
-    const tree = projectTreeForResponse(sm.getTree());
+    // System prompt/tool messages and usage records are not conversation turns.
+    const tree = projectTreeForResponse(withoutNonConversationEntries(sm.getTree()));
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
     const limit = Number.parseInt(searchParams.get("limit") ?? "", 10);

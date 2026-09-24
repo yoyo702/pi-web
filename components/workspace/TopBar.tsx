@@ -24,6 +24,7 @@ export interface TopBarProps {
   activeTopPanel: "branches" | "system" | "session" | null;
   toggleTopPanel: (panel: "branches" | "system" | "session") => void;
   systemPrompt: string | null;
+  systemPromptLoading: boolean;
   contextUsage: ContextUsage | null;
   rightPanelOpen: boolean;
   copiedSessionField: SessionCopyField | null;
@@ -52,6 +53,7 @@ export function TopBar({
   activeTopPanel,
   toggleTopPanel,
   systemPrompt,
+  systemPromptLoading,
   contextUsage,
   rightPanelOpen,
   copiedSessionField,
@@ -390,7 +392,7 @@ export function TopBar({
                     </div>
                   ) : (
                     <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--text-muted)", fontStyle: "italic" }}>
-                      Send a message to load the system prompt
+                      {systemPromptLoading ? "Loading system prompt…" : "Send a message to load the system prompt"}
                     </div>
                   )}
                 </div>

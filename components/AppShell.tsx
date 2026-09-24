@@ -109,6 +109,31 @@ export function AppShell() {
     setSystemPrompt(prompt);
   }, []);
 
+  // The system prompt is only known once the session's agent is running.
+  // Opening a saved session does not start it (that parses the whole session
+  // file), so the System panel starts it on demand instead of asking the user
+  // to send a message first.
+  const [systemPromptLoading, setSystemPromptLoading] = useState(false);
+  const selectedSessionIdRef = useRef<string | null>(null);
+  selectedSessionIdRef.current = selectedSession?.id ?? null;
+  const loadSystemPrompt = useCallback(async (sessionId: string) => {
+    setSystemPromptLoading(true);
+    try {
+      const response = await fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "get_state" }),
+      });
+      const body = await response.json().catch(() => ({})) as { data?: { systemPrompt?: unknown } };
+      if (response.ok && typeof body.data?.systemPrompt === "string" && selectedSessionIdRef.current === sessionId) {
+        setSystemPrompt(body.data.systemPrompt);
+      }
+    } catch {
+      // Leave the prompt unknown; the panel keeps its "send a message" hint.
+    } finally {
+      setSystemPromptLoading(false);
+    }
+  }, []);
 
   // Single active panel — only one dropdown open at a time
   const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | null>(null);
@@ -117,8 +142,12 @@ export function AppShell() {
 
   const toggleTopPanel = useCallback((panel: "branches" | "system" | "session") => {
     if (isMobile) setSidebarOpen(false);
-    setActiveTopPanel((cur) => cur === panel ? null : panel);
-  }, [isMobile]);
+    const opening = activeTopPanel !== panel;
+    setActiveTopPanel(opening ? panel : null);
+    if (opening && panel === "system" && systemPrompt === null && selectedSession && !systemPromptLoading) {
+      void loadSystemPrompt(selectedSession.id);
+    }
+  }, [activeTopPanel, isMobile, loadSystemPrompt, selectedSession, systemPrompt, systemPromptLoading]);
 
   const openSessionStatsPanel = useCallback(() => {
     if (isMobile) setSidebarOpen(false);
@@ -1062,6 +1091,7 @@ export function AppShell() {
           activeTopPanel={activeTopPanel}
           toggleTopPanel={toggleTopPanel}
           systemPrompt={systemPrompt}
+          systemPromptLoading={systemPromptLoading}
           contextUsage={contextUsage}
           rightPanelOpen={rightPanelOpen}
           copiedSessionField={copiedSessionField}

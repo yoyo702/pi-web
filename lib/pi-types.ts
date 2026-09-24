@@ -127,7 +127,10 @@ export interface AgentSessionLike {
   };
   readonly sessionManager: SessionManager;
   readonly settingsManager: SettingsManager;
-  readonly agent: { state?: { systemPrompt?: string; thinkingLevel?: string } };
+  /** agent.state.systemPrompt is read-only since pi-agent-core 0.87 (derived from the transcript). */
+  readonly agent: { state?: { readonly systemPrompt?: string; thinkingLevel?: string } };
+  /** Effective system prompt for the next run, including changes not yet sent. */
+  readonly systemPrompt?: string;
   readonly extensionRunner: ExtensionRunnerLike;
   readonly promptTemplates: readonly PromptTemplateLike[];
   readonly resourceLoader: ResourceLoaderLike;

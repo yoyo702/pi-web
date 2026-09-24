@@ -410,6 +410,55 @@ test("renders math in chat messages after KaTeX loads on demand", async ({ page 
   await expect.poll(() => page.locator(".markdown-body .katex").first().evaluate((element) => getComputedStyle(element).fontFamily)).toContain("KaTeX_Main");
 });
 
+test("loads the system prompt on demand for a session that is not running", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop top bar test");
+  const session = {
+    id: "prompt-session",
+    path: "/tmp/pi-web-prompt/session.jsonl",
+    cwd: "/tmp/pi-web-prompt",
+    projectRoot: "/tmp/pi-web-prompt",
+    created: "2026-08-03T00:00:00.000Z",
+    modified: "2026-08-03T00:01:00.000Z",
+    messageCount: 2,
+    firstMessage: "Hello",
+  };
+  let stateRequests = 0;
+  await page.route("**/api/sessions/prompt-session/state", async (route) => route.fulfill({ json: { running: false } }));
+  await page.route("**/api/sessions/prompt-session?*", async (route) => route.fulfill({ json: {
+    sessionId: session.id,
+    filePath: session.path,
+    modified: session.modified,
+    info: session,
+    leafId: "answer",
+    tree: [],
+    context: {
+      messages: [
+        { role: "user", content: "Hello", timestamp: 1 },
+        { role: "assistant", content: [{ type: "text", text: "Hi" }], stopReason: "stop", timestamp: 2 },
+      ],
+      entryIds: ["prompt", "answer"],
+      thinkingLevel: "medium",
+      model: { provider: "openai-codex", modelId: "gpt-5.6-sol" },
+      page: { hasMore: false, beforeEntryId: null, totalMessages: 2 },
+    },
+  } }));
+  await page.route("**/api/agent/prompt-session", async (route) => {
+    if (route.request().method() !== "POST") return route.fulfill({ json: { running: false } });
+    expect(route.request().postDataJSON()).toEqual({ type: "get_state" });
+    stateRequests += 1;
+    return route.fulfill({ json: { success: true, data: { systemPrompt: "You are a careful coding agent." } } });
+  });
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [session], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: session.cwd } }));
+
+  await page.goto("/?session=prompt-session");
+  await expect(page.getByText("Hi", { exact: true })).toBeVisible();
+  expect(stateRequests).toBe(0);
+  await page.getByRole("button", { name: "System prompt" }).click();
+  await expect(page.getByText("You are a careful coding agent.")).toBeVisible();
+  expect(stateRequests).toBe(1);
+});
+
 test("renders a usable mobile shell", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith("mobile"), "mobile project only");
   await page.goto("/");

@@ -42,12 +42,17 @@ function createShadowTools(tools: AgentTool[]): AgentTool[] {
  * Build a temporary Agent configuration whose provider-facing prefix matches
  * the source Agent. Tool implementations are replaced without changing their
  * names, descriptions, or schemas, so a naming run cannot mutate the project.
+ *
+ * Since pi-agent-core 0.87 `state.systemPrompt` is derived from system
+ * messages in the transcript, so it is empty for a session whose transcript
+ * predates them until its next request; `fallbackSystemPrompt` (the owning
+ * AgentSession's effective prompt) keeps the prefix aligned in that case.
  */
-export function buildSessionTitleAgentOptions(source: Agent): AgentOptions {
+export function buildSessionTitleAgentOptions(source: Agent, fallbackSystemPrompt?: string): AgentOptions {
   const state = source.state;
   return {
     initialState: {
-      systemPrompt: state.systemPrompt,
+      systemPrompt: state.systemPrompt || fallbackSystemPrompt || state.systemPrompt,
       model: state.model,
       thinkingLevel: state.thinkingLevel,
       tools: createShadowTools(state.tools),
@@ -218,7 +223,7 @@ export async function generateSessionTitle(source: AgentSession): Promise<Genera
     throw new Error("The session has no user messages to name");
   }
 
-  const options = buildSessionTitleAgentOptions(sourceAgent);
+  const options = buildSessionTitleAgentOptions(sourceAgent, source.systemPrompt);
   options.initialState!.messages = sanitizedMessages;
   const continuesFromTrailingUser = sanitizedMessages.at(-1)?.role === "user";
   if (continuesFromTrailingUser) {

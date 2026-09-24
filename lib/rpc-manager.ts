@@ -14,6 +14,8 @@ import { createHeadlessCustomUiTui, DEFAULT_CUSTOM_UI_COLUMNS } from "./custom-u
 import { terminalTools } from "./agents/terminal-tools";
 import { projectBackgroundSessionEvent } from "./background-session-event";
 import { createBashWatchdogExtension } from "./bash-watchdog";
+import { createEmptySystemPromptExtension } from "./empty-system-prompt";
+import { isModelContextOnlyMessageEvent } from "./model-context-messages";
 import { readActiveToolCommand, readActiveToolOutput } from "./tool-progress";
 import { createPlainTextTheme } from "./plain-text-theme";
 import { getResourceConfigFingerprint } from "./resource-config-fingerprint";
@@ -180,7 +182,10 @@ export class AgentSessionWrapper {
         invalidateSessionListCache();
         this.captureFileMtime();
       }
-      this.emit(event);
+      // System prompt/tool messages are model context only; forwarding them
+      // made the client append one between its optimistic user bubble and the
+      // delivered prompt, duplicating the prompt.
+      if (!isModelContextOnlyMessageEvent(event)) this.emit(event);
       // Streaming / compaction / tool events flow through here; re-broadcast
       // the running-status snapshot so the sidebar can update live.
       notifyRunningChange();
@@ -234,7 +239,6 @@ export class AgentSessionWrapper {
     if (typeof this.inner.bindExtensions !== "function") {
       this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
     }
-    this.applyForcedEmptySystemPrompt();
     this.captureFileMtime();
     this.resourceConfigFingerprint = getResourceConfigFingerprint(this.inner.sessionManager.getCwd(), getAgentDir());
   }
@@ -254,7 +258,6 @@ export class AgentSessionWrapper {
 
   setForceEmptySystemPrompt(force: boolean): void {
     this.forceEmptySystemPrompt = force;
-    this.applyForcedEmptySystemPrompt();
   }
 
   beginExtensionBinding(options: ExtensionBindingOptions = {}): void {
@@ -270,7 +273,6 @@ export class AgentSessionWrapper {
   private ensureExtensionsBound(options: ExtensionBindingOptions = {}): Promise<void> {
     if (options.forceEmptySystemPrompt) this.forceEmptySystemPrompt = true;
     if (this.extensionsBound) {
-      this.applyForcedEmptySystemPrompt();
       return Promise.resolve();
     }
     if (this.extensionBindingPromise) return this.extensionBindingPromise;
@@ -309,7 +311,6 @@ export class AgentSessionWrapper {
         this.inner.extensionRunner.setUIContext?.(uiContext, "rpc");
       }
       this.extensionsBound = true;
-      this.applyForcedEmptySystemPrompt();
       console.log(`[pi-web] session_start dispatched to extensions for session ${this.inner.sessionId}`);
     })().catch((err) => {
       this.extensionBindingError = err;
@@ -344,10 +345,9 @@ export class AgentSessionWrapper {
     }
   }
 
-  private applyForcedEmptySystemPrompt(): void {
-    if (this.forceEmptySystemPrompt && this.inner.agent.state) {
-      this.inner.agent.state.systemPrompt = "";
-    }
+  /** Read live by the empty-system-prompt extension on every agent run. */
+  get forcesEmptySystemPrompt(): boolean {
+    return this.forceEmptySystemPrompt;
   }
 
   private emit(event: AgentEvent): void {
@@ -496,7 +496,10 @@ export class AgentSessionWrapper {
           contextUsage: contextUsage
             ? { percent: contextUsage.percent, contextWindow: contextUsage.contextWindow, tokens: contextUsage.tokens }
             : null,
-          systemPrompt: this.inner.agent.state?.systemPrompt ?? "",
+          // agent.state.systemPrompt only reflects prompts already sent in this
+          // process (empty for a freshly loaded session); inner.systemPrompt is
+          // the effective prompt the next run will use.
+          systemPrompt: this.forceEmptySystemPrompt ? "" : this.inner.systemPrompt ?? "",
           thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
           extensionStatuses: this.getExtensionStatuses(),
           extensionWidgets: this.getExtensionWidgets(),
@@ -672,7 +675,6 @@ export class AgentSessionWrapper {
         const toolNames = command.toolNames as string[];
         this.setForceEmptySystemPrompt(toolNames.length === 0);
         this.inner.setActiveToolsByName(withExtensionTools(this.inner, toolNames));
-        this.applyForcedEmptySystemPrompt();
         return null;
       }
 
@@ -1088,7 +1090,6 @@ export class AgentSessionWrapper {
             this.inner.extensionRunner.setUIContext?.(this.createExtensionUiContext(), "rpc");
           },
         });
-        this.applyForcedEmptySystemPrompt();
       },
     };
   }
@@ -1254,11 +1255,15 @@ export async function startRpcSession(
 
     // Build services first so extension-registered providers are available
     // before the SDK restores the saved model from the session file.
+    let wrapperRef: AgentSessionWrapper | null = null;
     const services = await createAgentSessionServices({
       cwd,
       agentDir,
       resourceLoaderOptions: {
-        extensionFactories: [createBashWatchdogExtension()],
+        extensionFactories: [
+          createBashWatchdogExtension(),
+          createEmptySystemPromptExtension(() => wrapperRef?.forcesEmptySystemPrompt ?? toolNames?.length === 0),
+        ],
       },
     });
     const { session: inner } = await createAgentSessionFromServices({
@@ -1280,9 +1285,9 @@ export async function startRpcSession(
     }
 
     const wrapper = new AgentSessionWrapper(inner);
-    // When all tools are disabled, clear the system prompt entirely.
-    // pi's buildSystemPrompt always produces a non-empty prompt even with no tools;
-    // keep this forced after extension resource discovery and reloads as well.
+    wrapperRef = wrapper;
+    // When all tools are disabled, send an empty system prompt (see
+    // lib/empty-system-prompt.ts); pi would otherwise still render one.
     if (toolNames?.length === 0) {
       wrapper.setForceEmptySystemPrompt(true);
     }

@@ -280,6 +280,8 @@ export interface SessionTreeNode {
   children: SessionTreeNode[];
   label?: string;
   compressedEntryIds?: string[];
+  /** Non-conversation entries (system prompt/tool messages, usage) folded into this node. */
+  hiddenEntryIds?: string[];
 }
 
 export interface SessionInfo {
