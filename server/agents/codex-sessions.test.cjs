@@ -89,6 +89,39 @@ test("backward message reads preserve UTF-8 characters split across chunk bounda
   }
 }));
 
+const ACTIVE_ID = "11111111-1111-1111-1111-111111111111";
+const activeFile = () => path.join(os.homedir(), ".codex", "sessions", "2026", "active.jsonl");
+const record = (payload, type = "response_item") => `${JSON.stringify({ type, payload })}\n`;
+
+test("reads session metadata whose first line is larger than one read chunk", () => withCatalog((catalog) => {
+  const file = activeFile();
+  const rest = fs.readFileSync(file, "utf8").split("\n").slice(1).join("\n");
+  const meta = record({ session_id: ACTIVE_ID, cwd: "/workspace", cli_version: "1.0.0", model_provider: "openai", base_instructions: "界".repeat(100 * 1024) }, "session_meta");
+  fs.writeFileSync(file, meta + rest);
+  fs.utimesSync(file, new Date("2026-01-03T00:00:00Z"), new Date("2026-01-03T00:00:00Z"));
+  const [session] = catalog.listSessions({ cwd: "/workspace", archived: false });
+  assert.equal(session?.id, ACTIVE_ID);
+  assert.equal(session.lastUserMessage, "Explain this project");
+}));
+
+test("cached session details refresh when the session file changes", () => withCatalog((catalog) => {
+  assert.equal(catalog.listSessions({ archived: false })[0].lastUserMessage, "Explain this project");
+  const file = activeFile();
+  fs.appendFileSync(file, record({ type: "message", role: "user", content: [{ type: "input_text", text: "A newer question" }] }));
+  fs.utimesSync(file, new Date("2026-01-04T00:00:00Z"), new Date("2026-01-04T00:00:00Z"));
+  const [session] = catalog.listSessions({ archived: false });
+  assert.equal(session.lastUserMessage, "A newer question");
+  assert.equal(session.updatedAt, "2026-01-04T00:00:00.000Z");
+}));
+
+test("finds the latest turn id by reading backward across chunk boundaries", () => withCatalog((catalog) => {
+  const file = activeFile();
+  assert.equal(catalog.latestTurnId(ACTIVE_ID), null);
+  fs.appendFileSync(file, record({ type: "task_started", turn_id: "turn-1" }) + record({ type: "task_started", turn_id: "turn-2", note: "界".repeat(100 * 1024) }));
+  for (let index = 0; index < 40; index += 1) fs.appendFileSync(file, record({ type: "function_call_output", output: "y".repeat(16 * 1024) }));
+  assert.equal(catalog.latestTurnId(ACTIVE_ID), "turn-2");
+}));
+
 test("renames only the target Codex session index entry", () => withCatalog((catalog) => {
   const renamed = catalog.rename("11111111-1111-1111-1111-111111111111", "Renamed");
   assert.equal(renamed.name, "Renamed");

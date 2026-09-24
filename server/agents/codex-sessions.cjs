@@ -26,9 +26,47 @@ function indexEntries() {
     throw error("index_unavailable", "Unable to read the Codex session index");
   }
 }
+// Session files grow to hundreds of MB and every read here blocks the one
+// server process (chat streams, terminals, status SSE). Read only the bytes a
+// caller needs, and cache per-file results until the file's size or mtime
+// changes. Entries for files that disappear are dropped on the next scan.
+const FIRST_LINE_CHUNK = 64 * 1024;
+const FIRST_LINE_MAX = 8 * 1024 * 1024;
+const metaCache = new Map();
+const summaryCache = new Map();
+
+function readFirstLine(target) {
+  const handle = fs.openSync(target, "r");
+  try {
+    const buffers = [];
+    let bytes = 0;
+    while (bytes < FIRST_LINE_MAX) {
+      const buffer = Buffer.alloc(FIRST_LINE_CHUNK);
+      const read = fs.readSync(handle, buffer, 0, buffer.length, bytes);
+      if (read === 0) break;
+      const newline = buffer.subarray(0, read).indexOf(10);
+      if (newline !== -1) { buffers.push(buffer.subarray(0, newline)); break; }
+      buffers.push(buffer.subarray(0, read));
+      bytes += read;
+    }
+    return Buffer.concat(buffers).toString("utf8");
+  } finally { fs.closeSync(handle); }
+}
+function cachedFor(cache, target, stat, read) {
+  const cached = cache.get(target);
+  if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.value;
+  const value = read();
+  cache.set(target, { size: stat.size, mtimeMs: stat.mtimeMs, value });
+  return value;
+}
+function sessionMeta(target) {
+  const meta = JSON.parse(readFirstLine(target));
+  return meta.type === "session_meta" ? meta.payload : null;
+}
 function sessionFiles() {
   const roots = [[path.join(CODEX_HOME, "sessions"), false], [path.join(CODEX_HOME, "archived_sessions"), true]];
   const result = new Map();
+  const seen = new Set();
   const visit = (directory, archived) => {
     let entries = [];
     try { entries = fs.readdirSync(directory, { withFileTypes: true }); } catch { return; }
@@ -38,20 +76,20 @@ function sessionFiles() {
       else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
         try {
           const stat = fs.statSync(target);
-          const first = fs.readFileSync(target, "utf8").split("\n", 1)[0];
-          const meta = JSON.parse(first);
-          const payload = meta.type === "session_meta" ? meta.payload : null;
+          seen.add(target);
+          const payload = cachedFor(metaCache, target, stat, () => { try { return sessionMeta(target); } catch { return null; } });
           const id = payload?.session_id || payload?.id;
           if (typeof id === "string") {
             const candidate = { path: target, cwd: payload.cwd, timestamp: payload.timestamp, updatedAt: stat.mtime.toISOString(), updatedAtMs: stat.mtimeMs, size: stat.size, cliVersion: payload.cli_version, modelProvider: payload.model_provider, archived };
             const current = result.get(id);
             if (!current || candidate.updatedAtMs > current.updatedAtMs) result.set(id, candidate);
           }
-        } catch { /* skip malformed or concurrently-written files */ }
+        } catch { /* skip unreadable or concurrently-removed files */ }
       }
     }
   };
   for (const [root, archived] of roots) visit(root, archived);
+  for (const cache of [metaCache, summaryCache]) for (const target of cache.keys()) if (!seen.has(target)) cache.delete(target);
   return result;
 }
 function readRecentMessages(detail, maxBytes = 2 * 1024 * 1024, desiredMessages = 6) {
@@ -101,6 +139,10 @@ function parseMessages(text, startsMidRecord = false) {
   return messages;
 }
 function sessionSummary(detail) {
+  if (!detail?.path) return readSessionSummary(detail);
+  return cachedFor(summaryCache, detail.path, { size: detail.size, mtimeMs: detail.updatedAtMs }, () => readSessionSummary(detail));
+}
+function readSessionSummary(detail) {
   const messages = readRecentMessages(detail, 2 * 1024 * 1024, 2);
   let model = null;
   if (detail?.path) {
@@ -157,14 +199,35 @@ function getSessionPreview(id) {
 function latestTurnId(id) {
   const detail = sessionFiles().get(id);
   if (!detail?.path) return null;
+  const turnIdOf = (line) => {
+    if (line.indexOf("turn_id") === -1) return null;
+    try { const payload = JSON.parse(line.toString("utf8")).payload; return typeof payload?.turn_id === "string" ? payload.turn_id : null; } catch { return null; }
+  };
+  // The latest turn is near the end: read backward and stop at the last record
+  // that carries a turn id. Splitting on the newline byte is UTF-8 safe.
+  let handle;
   try {
-    const text = fs.readFileSync(detail.path, "utf8");
-    let turnId = null;
-    for (const line of text.split("\n")) {
-      try { const payload = JSON.parse(line).payload; if (typeof payload?.turn_id === "string") turnId = payload.turn_id; } catch { /* skip malformed lines */ }
+    handle = fs.openSync(detail.path, "r");
+    let position = fs.fstatSync(handle).size;
+    let carry = Buffer.alloc(0);
+    while (position > 0) {
+      const length = Math.min(256 * 1024, position);
+      position -= length;
+      const buffer = Buffer.alloc(length);
+      fs.readSync(handle, buffer, 0, length, position);
+      const data = Buffer.concat([buffer, carry]);
+      let end = data.length;
+      let newline;
+      while ((newline = end > 0 ? data.lastIndexOf(10, end - 1) : -1) !== -1) {
+        const turnId = turnIdOf(data.subarray(newline + 1, end));
+        if (turnId) return turnId;
+        end = newline;
+      }
+      carry = data.subarray(0, end);
     }
-    return turnId;
+    return turnIdOf(carry);
   } catch { return null; }
+  finally { if (handle !== undefined) try { fs.closeSync(handle); } catch { /* already closed */ } }
 }
 function requireSession(id) {
   if (typeof id !== "string" || !/^[0-9a-f-]{16,}$/i.test(id)) throw error("invalid_session", "Invalid Codex session id");
