@@ -8,6 +8,7 @@ import { DirectoryPicker } from "./DirectoryPicker";
 import type { ProjectWorkspace } from "@/lib/project-workspaces";
 import type { GitStatusResponse } from "@/lib/git-types";
 import { getProductStatus, type ProductStatusId } from "@/lib/product-status";
+import { useWorkspaceStatus } from "@/hooks/useWorkspaceStatus";
 
 interface ProjectStatus {
   branch: string | null;
@@ -50,6 +51,7 @@ function initials(label: string): string {
 const contextMenuButtonStyle: CSSProperties = { minHeight: 32, display: "flex", alignItems: "center", gap: 9, padding: "0 9px", border: 0, borderRadius: 5, background: "transparent", color: "var(--text)", cursor: "pointer", font: "12px/1.2 inherit", textAlign: "left" };
 
 export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, onRestore, onReorder, onOpenTerminal, onRename, onTogglePinned, onOpenSettings }: Props) {
+  const workspaceStatus = useWorkspaceStatus();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerBusy, setPickerBusy] = useState(false);
   const [pickerError, setPickerError] = useState<string | null>(null);
@@ -68,6 +70,7 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
   const [activityMenu, setActivityMenu] = useState<{ workspace: ProjectWorkspace; x: number; y: number } | null>(null);
   const [activityCenterOpen, setActivityCenterOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [tick, setTick] = useState(0);
   const mobileRef = useRef<HTMLDivElement>(null);
   const previousRunningRef = useRef<Map<string, string> | null>(null);
   const completedUntilRef = useRef<Map<string, number>>(new Map());
@@ -126,32 +129,32 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
   }, [mobileOpen]);
   useEffect(() => {
     let cancelled = false;
-    const refresh = async () => {
+    let expiryTimer: ReturnType<typeof setTimeout> | null = null;
+    const compute = async () => {
       try {
-        const readJson = async <T,>(url: string): Promise<T | null> => {
-          try { const response = await fetch(url, { cache: "no-store" }); return response.ok ? await response.json() as T : null; } catch { return null; }
-        };
-        const [terminalResult, runningResult, codexResult] = await Promise.all([
-          readJson<{ terminals?: Array<{ id: string; cwd: string; state: string; endedAt?: string | null; exitCode?: number | null }> }>("/api/terminals"),
-          readJson<{ runningSessionIds?: string[] }>("/api/sessions?running=1"),
-          readJson<{ runtimes?: Array<{ threadId: string; cwd: string; state: "idle" | "running" | "approval" }> }>("/api/codex/runtime"),
-        ]);
-        const terminalData = terminalResult ?? {};
-        const runningSessionIds = runningResult?.runningSessionIds ?? [];
+        const terminals = workspaceStatus.terminals ?? [];
+        const runningSessionIds = workspaceStatus.runningSessionIds ?? [];
+        const codexRuntimes = workspaceStatus.codexRuntimes ?? [];
         // The full session list requires a server-side scan of every session
         // file, so only fetch it when a running session's project is unknown.
         // Throttled because a brand-new session may not be listed yet.
         if (runningSessionIds.some((id) => !sessionRootByIdRef.current.has(id)) && Date.now() - sessionRootsFetchedAtRef.current >= 30_000) {
           sessionRootsFetchedAtRef.current = Date.now();
-          const sessionData = await readJson<{ sessions?: Array<{ id: string; cwd: string; projectRoot?: string | null }> }>("/api/sessions");
-          if (sessionData?.sessions) sessionRootByIdRef.current = new Map(sessionData.sessions.map((session) => [session.id, session.projectRoot || session.cwd]));
+          try {
+            const response = await fetch("/api/sessions", { cache: "no-store" });
+            const sessionData = response.ok ? await response.json() as { sessions?: Array<{ id: string; cwd: string; projectRoot?: string | null }> } : null;
+            if (sessionData?.sessions) sessionRootByIdRef.current = new Map(sessionData.sessions.map((session) => [session.id, session.projectRoot || session.cwd]));
+          } catch { /* status badges are best effort */ }
+          // Status frames arrive back to back on connect, so a newer compute has
+          // usually replaced this one by now (and was throttled out of its own
+          // lookup); recompute so the roots just fetched are used.
+          if (cancelled) { setTick((current) => current + 1); return; }
         }
-        const codexData = codexResult ?? {};
         const counts: Record<string, number> = {};
         const runningNow = new Map<string, string>();
-        for (const terminal of terminalData.terminals ?? []) if (terminal.state === "running") { counts[terminal.cwd] = (counts[terminal.cwd] ?? 0) + 1; runningNow.set(`terminal:${terminal.id}`, terminal.cwd); }
+        for (const terminal of terminals) if (terminal.state === "running") { counts[terminal.cwd] = (counts[terminal.cwd] ?? 0) + 1; runningNow.set(`terminal:${terminal.id}`, terminal.cwd); }
         for (const id of runningSessionIds) { const root = sessionRootByIdRef.current.get(id); if (root) runningNow.set(`pi:${id}`, root); }
-        for (const runtime of codexData.runtimes ?? []) if (runtime.state !== "idle") runningNow.set(`codex:${runtime.threadId}`, runtime.cwd);
+        for (const runtime of codexRuntimes) if (runtime.state !== "idle") runningNow.set(`codex:${runtime.threadId}`, runtime.cwd);
         const now = Date.now();
         if (previousRunningRef.current) for (const [key, cwd] of previousRunningRef.current) if (!runningNow.has(key)) completedUntilRef.current.set(cwd, now + 30_000);
         previousRunningRef.current = runningNow;
@@ -162,24 +165,39 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
         for (const [key, cwd] of runningNow) {
           const workspace = matchingWorkspace(cwd); if (!workspace) continue;
           const activity = activities[workspace.id];
-          const runtime = key.startsWith("codex:") ? codexData.runtimes?.find((item) => `codex:${item.threadId}` === key) : null;
+          const runtime = key.startsWith("codex:") ? codexRuntimes.find((item) => `codex:${item.threadId}` === key) : null;
           if (runtime?.state === "approval") activity.approval += 1; else activity.working += 1;
         }
-        for (const terminal of terminalData.terminals ?? []) {
-          if (terminal.state === "running" || !terminal.endedAt || now - Date.parse(terminal.endedAt) > 5 * 60_000) continue;
+        // Terminals ended within the last 5 minutes still count as completed/failed
+        // activity; track the soonest moment one of them (or a "recently completed"
+        // entry below) falls out of its window so we can schedule a recompute.
+        let nextExpiry = Infinity;
+        // A running session whose project is still unknown (brand-new, or its
+        // lookup was throttled) gets another lookup once the throttle lapses.
+        if (runningSessionIds.some((id) => !sessionRootByIdRef.current.has(id))) nextExpiry = sessionRootsFetchedAtRef.current + 30_000;
+        for (const terminal of terminals) {
+          if (terminal.state === "running" || !terminal.endedAt) continue;
+          const endedAt = Date.parse(terminal.endedAt);
+          if (now - endedAt > 5 * 60_000) continue;
+          nextExpiry = Math.min(nextExpiry, endedAt + 5 * 60_000);
           const workspace = matchingWorkspace(terminal.cwd); if (!workspace) continue;
           if (terminal.exitCode != null && terminal.exitCode !== 0) activities[workspace.id].failed += 1;
           else activities[workspace.id].completed += 1;
         }
-        for (const [cwd] of completedUntilRef.current) { const workspace = matchingWorkspace(cwd); if (workspace) activities[workspace.id].completed += 1; }
+        for (const [cwd, until] of completedUntilRef.current) {
+          nextExpiry = Math.min(nextExpiry, until);
+          const workspace = matchingWorkspace(cwd); if (workspace) activities[workspace.id].completed += 1;
+        }
         for (const activity of Object.values(activities)) activity.state = activity.approval ? "approval" : activity.failed ? "failed" : activity.working ? "working" : activity.completed ? "completed" : "idle";
-        if (!cancelled) { setRunningByCwd(counts); setActivityById(activities); }
+        if (cancelled) return;
+        setRunningByCwd(counts);
+        setActivityById(activities);
+        if (Number.isFinite(nextExpiry)) expiryTimer = setTimeout(() => { if (!cancelled) setTick((current) => current + 1); }, Math.max(0, nextExpiry - now));
       } catch { /* status badges are best effort */ }
     };
-    void refresh();
-    const timer = window.setInterval(() => { if (!document.hidden) void refresh(); }, 5000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [workspaces]);
+    void compute();
+    return () => { cancelled = true; if (expiryTimer) clearTimeout(expiryTimer); };
+  }, [workspaceStatus.terminals, workspaceStatus.runningSessionIds, workspaceStatus.codexRuntimes, workspaces, tick]);
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {

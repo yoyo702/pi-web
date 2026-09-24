@@ -1,8 +1,19 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// The real server also pushes terminal/session/Codex status over
+// **/api/agent/running/events. Routes that mock **/api/terminals?* (or rely on
+// /api/codex/runtime) must also fulfill this stream themselves, or the live
+// snapshot (with no terminals) would arrive and overwrite the mocked list.
+async function mockStatusStream(page: Page, frames: Array<Record<string, unknown>>) {
+  await page.route("**/api/agent/running/events", (route) => route.fulfill({
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+    body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+  }));
+}
 
 test("shares workspace authorization across the proxy, Files, Git, and terminals", async ({ request }, testInfo) => {
   const workspace = mkdtempSync(join(tmpdir(), `pi-web-e2e-workspace-${testInfo.project.name}-`));
@@ -275,6 +286,8 @@ test("keeps a running session snapshot synchronized while another session is ope
             message: { role: "assistant", content: [{ type: "text", text: "Background synced answer" }], stopReason: "stop", timestamp: 2 },
           },
         })}`,
+        `data: ${JSON.stringify({ type: "terminals", terminals: [], limits: { running: 20, records: 100 } })}`,
+        `data: ${JSON.stringify({ type: "codex_runtimes", runtimes: [] })}`,
         "",
       ].join("\n\n"),
     });
@@ -537,7 +550,15 @@ test("switches between persisted project workspaces", async ({ page }, testInfo)
     authorizedCwds.add(body.cwd);
     return route.fulfill({ json: { success: true, cwd: body.cwd } });
   });
-  await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: { terminals: [], stats: null } }));
+  await page.route("**/api/terminals?*", async (route) => {
+    const cwd = new URL(route.request().url()).searchParams.get("cwd") ?? "";
+    return route.fulfill({ json: { cwd, terminals: [], stats: null } });
+  });
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals: [], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
   await page.route("**/api/worktrees?*", async (route) => route.fulfill({ json: { projectRoot: new URL(route.request().url()).searchParams.get("cwd"), isGit: false, isTopLevel: true, worktrees: [] } }));
   await page.route("**/api/git/status?*", async (route) => {
     const cwd = new URL(route.request().url()).searchParams.get("cwd");
@@ -644,6 +665,72 @@ test("switches between persisted project workspaces", async ({ page }, testInfo)
   await expect(page.getByRole("button", { name: "Expand project bar" })).toBeVisible();
 });
 
+test("drives project rail activity from pushed terminal status without polling", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop project rail push test");
+  const cwd = "/tmp/pi-web-push-rail";
+  await page.addInitScript((snapshot) => {
+    if (!localStorage.getItem("pi-web:project-workspaces:v1")) localStorage.setItem("pi-web:project-workspaces:v1", JSON.stringify(snapshot));
+  }, {
+    activeId: cwd,
+    workspaces: [{ id: cwd, projectRoot: cwd, cwd, label: "push-rail", sessionId: null, lastActive: 1 }],
+  });
+  const terminal = {
+    id: "push-terminal", title: "Dev server", provider: "shell", state: "running", exitCode: null, cwd,
+    pid: 111, permissionMode: "confirm", launchMode: "new", noAltScreen: false, cols: 80, rows: 24,
+    createdAt: "2026-08-03T00:00:00.000Z", endedAt: null, signal: null, bufferBytes: 0, bufferTruncated: false, history: [],
+  };
+  let terminalRequests = 0;
+  let codexRuntimeRequests = 0;
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd } }));
+  await page.route("**/api/git/status?*", async (route) => route.fulfill({ json: { isGitRepository: false, files: [] } }));
+  await page.route("**/api/worktrees?*", async (route) => route.fulfill({ json: { projectRoot: cwd, isGit: false, isTopLevel: true, worktrees: [] } }));
+  // `**` (not `?*`) so a query-less /api/terminals poll would be counted too.
+  // The GET reports no terminals: only the pushed frame knows about one.
+  await page.route("**/api/terminals**", async (route) => {
+    terminalRequests += 1;
+    return route.fulfill({ json: {
+      cwd,
+      terminals: [],
+      stats: { workspace: { running: 0, records: 0, bufferBytes: 0 }, global: { running: 0, records: 0, bufferBytes: 0 }, limits: { running: 20, records: 100 } },
+    } });
+  });
+  await page.route("**/api/codex/runtime", async (route) => { codexRuntimeRequests += 1; return route.fulfill({ json: { runtimes: [] } }); });
+  // Hold the status stream until the GET has been served, so the pushed frame
+  // is applied after (and not overwritten by) the GET's empty list.
+  let releaseStream!: () => void;
+  const streamReleased = new Promise<void>((resolve) => { releaseStream = resolve; });
+  await page.route("**/api/agent/running/events", async (route) => {
+    await streamReleased;
+    return route.fulfill({
+      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+      body: [
+        { type: "running", runningSessionIds: [] },
+        { type: "terminals", terminals: [terminal], limits: { running: 20, records: 100 } },
+        { type: "codex_runtimes", runtimes: [] },
+      ].map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+    });
+  });
+
+  const terminalsServed = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/terminals");
+  await page.goto("/");
+  const rail = page.getByRole("navigation", { name: "Project workspaces" });
+  await terminalsServed;
+  await expect.poll(() => terminalRequests).toBe(1);
+  // The dot on the project tab reports its counts through its aria-label. The
+  // GET returned no terminals, so "Running: 1 working" can only come from the
+  // pushed "terminals" frame.
+  await expect(rail.getByLabel("Running: 1 working")).toHaveCount(0);
+  releaseStream();
+  await expect(rail.getByLabel("Running: 1 working")).toBeVisible();
+
+  // No 5 s poll should follow: neither /api/terminals nor /api/codex/runtime
+  // should be requested again while the pushed status stays the same.
+  await page.waitForTimeout(11_000);
+  expect(terminalRequests).toBe(1);
+  expect(codexRuntimeRequests).toBe(0);
+});
+
 test("switches project workspaces from the mobile picker", async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.startsWith("mobile"), "mobile project picker test");
   const sessions = [
@@ -664,7 +751,15 @@ test("switches project workspaces from the mobile picker", async ({ page }, test
       ? route.fulfill({ json: { success: true, cwd: body.cwd } })
       : route.fulfill({ status: 400, json: { error: "cwd required" } });
   });
-  await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: { terminals: [], stats: null } }));
+  await page.route("**/api/terminals?*", async (route) => {
+    const cwd = new URL(route.request().url()).searchParams.get("cwd") ?? "";
+    return route.fulfill({ json: { cwd, terminals: [], stats: null } });
+  });
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals: [], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
   await page.route("**/api/worktrees?*", async (route) => route.fulfill({ json: { projectRoot: new URL(route.request().url()).searchParams.get("cwd"), isGit: false, isTopLevel: true, worktrees: [] } }));
   await page.goto("/");
   await page.getByRole("button", { name: "Switch project" }).click();
@@ -692,9 +787,15 @@ test("summarizes collapsed agent groups and keeps completed tasks reachable", as
   }], runningSessionIds: [] } }));
   await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
   await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: {
+    cwd: "/tmp/pi-web-e2e",
     terminals,
     stats: { workspace: { running: 2, records: 3, bufferBytes: 36 }, global: { running: 2, records: 3, bufferBytes: 36 }, limits: { running: 20, records: 100 } },
   } }));
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals, limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
   await page.route("**/api/project-scripts?*", async (route) => route.fulfill({ json: { scripts: [], runner: "npm" } }));
   await page.route("**/api/codex/sessions?*", async (route) => route.fulfill({ json: { sessions: [] } }));
 

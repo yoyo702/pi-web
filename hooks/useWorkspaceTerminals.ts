@@ -1,91 +1,81 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import type { TerminalSession, TerminalStats } from "@/lib/agents/terminal";
+import { terminalsForCwd, terminalStatsForCwd } from "@/lib/workspace-status-store";
+import { useWorkspaceStatus, workspaceStatusStore } from "./useWorkspaceStatus";
 
-interface TerminalSnapshot {
-  terminals: TerminalSession[];
-  stats: TerminalStats | null;
-  loaded: boolean;
-}
-
-interface WorkspaceTerminalStore extends TerminalSnapshot {
-  listeners: Set<(snapshot: TerminalSnapshot) => void>;
-  timer: ReturnType<typeof setInterval> | null;
-  request: Promise<void> | null;
-}
-
-const stores = new Map<string, WorkspaceTerminalStore>();
-
-function getStore(cwd: string): WorkspaceTerminalStore {
-  let store = stores.get(cwd);
-  if (!store) {
-    store = { terminals: [], stats: null, loaded: false, listeners: new Set(), timer: null, request: null };
-    stores.set(cwd, store);
-  }
-  return store;
-}
-
-function snapshot(store: WorkspaceTerminalStore): TerminalSnapshot {
-  return { terminals: store.terminals, stats: store.stats, loaded: store.loaded };
-}
-
-function emit(store: WorkspaceTerminalStore) {
-  const next = snapshot(store);
-  store.listeners.forEach((listener) => listener(next));
-}
+// Requested cwd -> canonical cwd, as resolved by the last successful
+// GET /api/terminals?cwd=. The pushed snapshot is keyed by canonical cwd, so
+// every reader needs this mapping to find its slice of it. It is always written
+// before the store notifies, so reading it during render is never stale.
+const canonicalCwd = new Map<string, string>();
+const pendingRequests = new Map<string, Promise<void>>();
+const lastAttemptAt = new Map<string, number>();
+/** Minimum spacing between retries of a GET that has not succeeded yet. */
+const RETRY_MS = 5_000;
 
 export function refreshWorkspaceTerminals(cwd: string): Promise<void> {
   if (!cwd) return Promise.resolve();
-  const store = getStore(cwd);
-  if (store.request) return store.request;
-  store.request = fetch(`/api/terminals?${new URLSearchParams({ cwd })}`, { cache: "no-store" })
+  const pending = pendingRequests.get(cwd);
+  if (pending) return pending;
+  lastAttemptAt.set(cwd, Date.now());
+  const request = fetch(`/api/terminals?${new URLSearchParams({ cwd })}`, { cache: "no-store" })
     .then(async (response) => {
       if (!response.ok) return;
-      const data = await response.json() as { terminals?: TerminalSession[]; stats?: TerminalStats };
-      store.terminals = data.terminals ?? [];
-      store.stats = data.stats ?? null;
-      store.loaded = true;
-      emit(store);
+      const data = await response.json() as { terminals?: TerminalSession[]; stats?: TerminalStats; cwd?: string };
+      const canonical = data.cwd ?? cwd;
+      canonicalCwd.set(cwd, canonical);
+      workspaceStatusStore.replaceTerminalsForCwd(canonical, data.terminals ?? [], data.stats?.limits ?? null);
     })
     .catch(() => undefined)
-    .finally(() => { store.request = null; });
-  return store.request;
+    .finally(() => { pendingRequests.delete(cwd); });
+  pendingRequests.set(cwd, request);
+  return request;
 }
 
 export function updateWorkspaceTerminals(cwd: string, update: (current: TerminalSession[]) => TerminalSession[]) {
   if (!cwd) return;
-  const store = getStore(cwd);
-  store.terminals = update(store.terminals);
-  // Mutations are immediately visible to every consumer. Discard the old
-  // aggregate because its counts no longer describe the optimistic list.
-  store.stats = null;
-  store.loaded = true;
-  emit(store);
+  const canonical = canonicalCwd.get(cwd);
+  // Until the canonical cwd is known an optimistic edit would land under the
+  // wrong key and duplicate the records the next snapshot brings; fetch the
+  // authoritative list instead.
+  if (canonical === undefined) {
+    void refreshWorkspaceTerminals(cwd);
+    return;
+  }
+  workspaceStatusStore.updateTerminalsForCwd(canonical, update);
 }
 
 export function useWorkspaceTerminals(cwd: string, refreshKey?: number) {
-  const [state, setState] = useState<TerminalSnapshot>(() => cwd ? snapshot(getStore(cwd)) : { terminals: [], stats: null, loaded: false });
+  const status = useWorkspaceStatus();
+  const canonical = canonicalCwd.get(cwd) ?? cwd;
 
   useEffect(() => {
-    if (!cwd) { setState({ terminals: [], stats: null, loaded: false }); return; }
-    const store = getStore(cwd);
-    store.listeners.add(setState);
-    setState(snapshot(store));
-    void refreshWorkspaceTerminals(cwd);
-    if (!store.timer) store.timer = setInterval(() => { if (!document.hidden) void refreshWorkspaceTerminals(cwd); }, 5000);
-    return () => {
-      store.listeners.delete(setState);
-      if (store.listeners.size === 0 && store.timer) {
-        clearInterval(store.timer);
-        store.timer = null;
-      }
-    };
-  }, [cwd]);
+    if (cwd) void refreshWorkspaceTerminals(cwd);
+  }, [cwd, refreshKey]);
 
-  useEffect(() => { if (cwd) void refreshWorkspaceTerminals(cwd); }, [cwd, refreshKey]);
+  // A failed first GET (403 while the grant is re-established after a server
+  // restart, a network blip) would otherwise leave `loaded` false forever.
+  // Retry whenever a pushed snapshot arrives, at most once per RETRY_MS.
+  useEffect(() => {
+    if (!cwd || canonicalCwd.has(cwd)) return;
+    const wait = Math.max(0, (lastAttemptAt.get(cwd) ?? 0) + RETRY_MS - Date.now());
+    const timer = setTimeout(() => { if (!canonicalCwd.has(cwd)) void refreshWorkspaceTerminals(cwd); }, wait);
+    return () => clearTimeout(timer);
+  }, [cwd, status]);
+
+  // terminalsForCwd/terminalStatsForCwd derive a fresh array/object from the
+  // shared snapshot on every call; memoize on the snapshot object itself
+  // (stable between pushes: useSyncExternalStore only returns a new `status`
+  // when the store actually notifies) so consumers that key effects off the
+  // returned terminal list don't re-run on every unrelated render.
+  const terminals = useMemo(() => (cwd ? terminalsForCwd(status, canonical) : []), [cwd, canonical, status]);
+  const stats = useMemo(() => (cwd ? terminalStatsForCwd(status, canonical) : null), [cwd, canonical, status]);
+  const loaded = status.terminals !== null && canonicalCwd.has(cwd);
 
   const update = useCallback((updater: (current: TerminalSession[]) => TerminalSession[]) => updateWorkspaceTerminals(cwd, updater), [cwd]);
   const refresh = useCallback(() => refreshWorkspaceTerminals(cwd), [cwd]);
-  return { ...state, update, refresh };
+
+  return { terminals, stats, loaded, update, refresh };
 }

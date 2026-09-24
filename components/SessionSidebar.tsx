@@ -9,6 +9,7 @@ import { applyBackgroundSessionEvent, type BackgroundAgentEvent } from "@/lib/se
 import { getSessionDisplayTitle, resolveSessionLineage, sortSessionsByRecent } from "@/lib/session-list";
 import { getProductStatus } from "@/lib/product-status";
 import { useWorkspaceActions } from "./workspace/WorkspaceActions";
+import { useWorkspaceStatusMessages } from "@/hooks/useWorkspaceStatus";
 import { ChevronDown, Settings } from "lucide-react";
 
 declare global {
@@ -450,33 +451,23 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     saveUnreadSessionIds(unreadSessionIds);
   }, [unreadSessionIds]);
 
-  useEffect(() => {
-    // Live running status via SSE — no polling. The server pushes the current
-    // set of running session ids whenever any session starts/stops working.
-    const source = new EventSource("/api/agent/running/events");
-
-    source.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data) as {
-          type?: string;
-          runningSessionIds?: string[];
-          sessionId?: string;
-          event?: BackgroundAgentEvent;
-        };
-        if (data.type === "running") {
-          sseAuthoritativeRef.current = true;
-          setRunningSessionIds(new Set(data.runningSessionIds ?? []));
-        } else if (data.type === "session_event" && data.sessionId && data.event) {
-          applyBackgroundSessionEvent(data.sessionId, data.event);
-        }
-      } catch {
-        // ignore malformed frames
-      }
+  // Live running status via SSE — no polling. The server pushes the current
+  // set of running session ids whenever any session starts/stops working.
+  // The connection itself is shared across the tab; see useWorkspaceStatus.
+  useWorkspaceStatusMessages((data) => {
+    const message = data as {
+      type?: string;
+      runningSessionIds?: string[];
+      sessionId?: string;
+      event?: BackgroundAgentEvent;
     };
-
-    // On error EventSource auto-reconnects; keep the last known state meanwhile.
-    return () => source.close();
-  }, []);
+    if (message.type === "running") {
+      sseAuthoritativeRef.current = true;
+      setRunningSessionIds(new Set(message.runningSessionIds ?? []));
+    } else if (message.type === "session_event" && message.sessionId && message.event) {
+      applyBackgroundSessionEvent(message.sessionId, message.event);
+    }
+  });
 
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
