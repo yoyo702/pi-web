@@ -11,6 +11,8 @@ export async function POST(req: Request) {
   try {
     const { package: pkg, scope, cwd } = await req.json() as { package?: string; scope?: string; cwd?: string };
     if (!pkg?.trim()) return NextResponse.json({ error: "package required" }, { status: 400 });
+    // Reject values that `npx skills add` would parse as options.
+    if (pkg.trim().startsWith("-") || /\s/.test(pkg.trim())) return NextResponse.json({ error: "invalid package name" }, { status: 400 });
 
     const isGlobal = scope !== "project";
     if (!isGlobal) {

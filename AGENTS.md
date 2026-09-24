@@ -10,6 +10,8 @@ Typecheck: `node_modules/.bin/tsc --noEmit`
 Lint: `npm run lint`  
 **Never run `next build` during dev** — pollutes `.next/` and breaks `npm run dev`.
 
+Pi runtime packages (`pi-agent-core`, `pi-ai`, `pi-coding-agent`, `pi-tui`) are pinned together at **0.87.1** in `package.json` and `package-lock.json`. Restart the server after dependency upgrades so existing in-process sessions do not retain the old SDK. This version adds built-in Opus 5.5 support; an intermediary's Claude Code version rejection can still occur independently of the installed Pi version.
+
 ---
 
 ## Architecture
@@ -90,7 +92,7 @@ lib/
 
 components/
   AppShell.tsx        layout + URL state + tab management
-  MobileAccessDialog.tsx LAN/Tailscale URL picker, copy action, and QR code
+  MobileAccessDialog.tsx Settings-embedded LAN/Tailscale URL picker, copy action, and QR code
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper
   ChatInput.tsx       input bar + model/thinking/tools/compact controls
@@ -99,9 +101,11 @@ components/
   BranchNavigator.tsx in-session branch switcher
   ChatMinimap.tsx     scroll minimap alongside the message list
   MarkdownBody.tsx    markdown renderer
-  ModelsConfig.tsx    modal for editing models.json (opened from sidebar bottom)
-  PluginsConfig.tsx   modal for installed package plugins
-  SkillsConfig.tsx    modal for loaded/search/installable skills
+  SettingsPanel.tsx   single settings shell for appearance, models, skills, plugins, and status help
+  ProductStatus.tsx   shared semantic status indicator and settings guide
+  ModelsConfig.tsx    models.json editor (standalone or embedded in Settings)
+  PluginsConfig.tsx   package plugin manager (standalone or embedded in Settings)
+  SkillsConfig.tsx    loaded/search/installable skills (standalone or embedded in Settings)
   FileExplorer.tsx    file tree inside sidebar
   FileIcons.tsx       file icon helpers
   FileViewer.tsx      file content in a tab
@@ -123,11 +127,13 @@ hooks/
 - One `AgentSessionWrapper` per session id, keyed in `globalThis.__piSessions`
 - `globalThis` survives Next.js hot-reload; plain module-level Map does not
 - Idle timeout: 10 minutes. Concurrent `startRpcSession()` calls share a single start Promise (`globalThis.__piStartLocks`)
+- `destroy()` must call the SDK's `inner.dispose()`: it aborts in-flight prompts/bash/compaction and detaches the agent. Without it a destroyed wrapper keeps streaming and appending to its session file, which recreates a file the user just deleted.
+- `onDestroy(cb)` supports multiple listeners, returns an unsubscribe function, and fires immediately if the wrapper is already dead. The registry uses it to drop the entry; `/api/agent/[id]/events` uses it to send `{ type: "session_closed" }` and end the SSE stream. The client closes its `EventSource` on that event instead of letting it auto-reconnect (which would immediately restart the idle session); the next prompt reconnects via `ensureEventsConnected`.
 
-### Fork must destroy the wrapper immediately
-`AgentSession.fork()` **mutates the wrapper's inner state in-place** — after fork, `inner.sessionId` is the *new* session's id. If the wrapper stays alive in the registry under the old id, the next request gets the already-forked state and subsequent forks produce a corrupt `parentSession` chain.
+### Fork creates the branch from a separate SessionManager
+`send("fork")` builds the new session file with a fresh `SessionManager` (`SessionManager.create` or `SessionManager.open(...).createBranchedSession`), so the wrapper's own `inner` session is never mutated. Older code called `AgentSession.fork()`, which mutated `inner` in place and forced an immediate `destroy()`; do not reintroduce it.
 
-**Fix**: `send("fork")` captures `newSessionId`, then calls `this.destroy()` before returning. The next request for the original session reloads a clean AgentSession from the original file.
+After forking, an idle source wrapper is destroyed so the next request reloads it cleanly. A wrapper that is still running is kept alive — destroying it would abort the running prompt — and its idle timer disposes it once the run finishes.
 
 ### Two kinds of branching — don't confuse them
 - **Fork** (Fork button on user message): creates a new independent `.jsonl` file. Shown as a child in the sidebar tree via `parentSession` header field.
@@ -183,12 +189,24 @@ Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's
 - `SessionContext.page` carries `{ hasMore, beforeEntryId, totalMessages }`, while `SessionContext.stats` covers the full session so UI totals do not shrink to the rendered page.
 - Thinking and media-heavy blocks can stay deferred on paged reads. Do not restore eager full-file context loading in the client; large linear JSONL files previously pushed the dev server past the V8 heap limit.
 
+### Session sidebar views
+- The Pi session pane supports a fork tree and a flat recent view. Desktop defaults to the tree; a mobile browser with no saved preference defaults to recent. The choice persists as `pi-web:session-view`.
+- Recent view sorts every session by `modified` descending instead of grouping children beneath old roots. Each row shows its direct fork source and known lineage depth; the tooltip carries the original or earliest available ancestor. Missing/deleted parents must remain explicit rather than making the fork look like an original session.
+- Resolve lineage against `allSessions`, not only the currently selected project, because a fork can retain a parent outside the filtered set.
+
 ### Worktrees and project grouping
 - `lib/worktree.ts` resolves linked worktree top-levels back to the main repo `projectRoot`; `listAllSessions()` attaches that to each `SessionInfo` so all worktrees for one repo are grouped together in the sidebar.
 - Worktree operations are served by `/api/worktrees` and guarded by the same allowed-root rules as `/api/files`.
 - New worktrees are created under `<repoRoot>-worktrees/<sanitized-branch>`. Existing branches are reused; otherwise `git worktree add -b` creates the branch.
 - Removing a dirty worktree returns `409` with `{ dirty: true }` so the UI can ask before retrying with `force`.
 - Sessions whose cwd points at a removed worktree are inferred back into the main project instead of becoming a phantom project row.
+- Git dirtiness is a per-project status, unrelated to agent activity. Expanded project rows and the mobile project menu show `<count> Git changes` only on the affected project. The yellow dot is reserved for the collapsed rail where text cannot fit; never show a global dirty legend that could be mistaken for the active project's state.
+
+### Unified settings and product statuses
+- The `TianForge pi` brand in the session sidebar opens the application menu containing global Settings and app/Pi versions. The project rail header also exposes a visible gear shortcut beside search and activity; both entries open the same Settings shell. Project and session/file sidebars have no Settings row because that adds visual weight and implies module-local scope. `SettingsPanel` keeps Appearance, Remote access, Models, Skills, Plugins, and Status & indicators as peer navigation items and renders their content in one persistent shell; do not reintroduce separate footer buttons or nested configuration modals.
+- `ModelsConfig`, `SkillsConfig`, and `PluginsConfig` support an `embedded` mode for the settings shell while preserving standalone mode for reuse. Embedded views must fill the settings content area and omit their own backdrop/close controls.
+- `lib/product-status.ts` is the authoritative registry for semantic status ids, labels, descriptions, colors, and guide grouping. Tabs, projects, files, sessions, and agent activity use `ProductStatusDot` or values derived from `getProductStatus()` instead of redefining status colors locally.
+- Status explanations live under `Settings → Status & indicators`; do not add isolated help/legend buttons to individual modules. Color remains supplemental to visible text, accessible labels, or tooltips.
 
 ### File access allow-list
 - `/api/files` is intentionally not a general filesystem browser. Allowed roots come from session cwds, their resolved project roots, `~/pi-cwd-*`, and roots explicitly added with `allowFileRoot()`.
@@ -206,14 +224,23 @@ Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's
 - The package `postinstall` and `getPty()` both call `ensureNodePtySpawnHelper()` to restore execute bits on the exact regular helper file. Keep the runtime check: it repairs existing installations without requiring a reinstall.
 
 ### Mobile access links
-- The QR button in the top-right opens `MobileAccessDialog`, which loads `/api/access` and lists current LAN/Tailscale addresses without exposing `PI_WEB_PASSWORD`.
+- Settings → Remote access embeds `MobileAccessDialog`, which loads `/api/access` and lists current LAN/Tailscale addresses without exposing `PI_WEB_PASSWORD`. Remote access is kept out of the workspace toolbar because it is a low-frequency application setting.
 - For password-protected servers, authenticated desktop browsers `POST /api/auth/pair` to create a five-minute, single-use bearer token. The QR targets `/pair?token=...`; redemption deletes the token before issuing the normal signed session cookie. Password login remains the fallback.
 - `server/pi-web-server.js` passes its actual bind host, port, and protocol to the route through `PI_WEB_RUNTIME_*`; addresses remain visible while a loopback bind is clearly marked as requiring restart.
+- Every HTTP request and WebSocket upgrade must carry an allowed `Host` header, or the server answers `421`. Allowed: loopback names, the bind host, the machine hostname and `<hostname>.local`, any current interface address (snapshotted every 30 s), and `PI_WEB_ALLOWED_HOSTS` (comma-separated, `*.` prefix matches subdomains, default `*.ts.net`). This blocks DNS rebinding, which same-origin checks alone cannot: a rebound page sends matching `Origin` and `Host`.
+- Secrets never live in `process.env` after startup, because the agent's bash tool and spawned CLIs inherit it. `server/auth.cjs` moves `PI_WEB_PASSWORD` into `global.__piWebAuthState` and signs sessions with a key derived from it; the internal terminal token lives on `global.__piWebInternalTerminalToken`. Next route handlers run in the same process and read these globals — use `auth.configured()`, never `process.env.PI_WEB_PASSWORD`.
+- Request bodies read by the custom server (login, terminal and Codex APIs) go through `server/http-body.cjs`, which stops buffering once the limit is exceeded. Login rate limiting keys on the socket address; `X-Forwarded-For` is client-controlled when the server is exposed directly.
+- Session cookies are stateless signed tokens, so logout is recorded in `~/.pi-web/revoked-sessions.json` (override with `PI_WEB_REVOKED_SESSIONS_FILE`) until each token's own expiry, and survives restarts. Only SHA-256 hashes of tokens are stored, with mode `0600`.
+- Without a session, only `/_next/static/` is public — not all of `/_next/`, because other Next endpoints such as the image optimizer can fetch protected local routes.
+- The server warns at startup when bound to a non-loopback host without TLS, since the password and cookie would cross the network in plain text.
+- Session export HTML (`/api/sessions/[id]/export`) is served with `Content-Security-Policy: sandbox allow-scripts …` (no `allow-same-origin`). It renders model output, so its scripts must run in an opaque origin that cannot use the app's cookies or APIs. Workspace files from `/api/files` get the same treatment via `untrustedFileHeaders` (PDFs excepted, because sandboxing disables the built-in viewer).
 - `npm run dev:https` regenerates its mkcert certificate when a newly assigned IPv4 address is missing from the SAN list. `next.config.ts` also allows the machine's current interface addresses for development HMR.
 - For Android/PWA access over Tailscale, prefer persistent Tailscale Serve: `tailscale serve --bg https+insecure://127.0.0.1:30141`. Direct `100.x` access still presents the local mkcert certificate. Next development origins must use `**.ts.net`; `*.ts.net` does not match `<device>.<tailnet>.ts.net`.
 - Next's lazy upgrade listener owns `/_next/webpack-hmr`; TianForge's server listener must return immediately for non-terminal upgrade paths and only own `/api/terminals/:id/stream`. Manually forwarding HMR through `app.getUpgradeHandler()` duplicates the handshake after Next installs its own listener, while suppressing Next's listener prevents hydration entirely.
 - Client bundles target Safari/iOS 14 and newer through `package.json#browserslist`. `server/patch-mobile-compat.cjs` replaces the current GFM email-autolink lookbehind during `postinstall`; keep this check because unsupported regex literals prevent older Safari from parsing the entire chunk before React starts.
 - `MobileFullscreenPrompt` always exposes the PWA installation path on mobile: Android uses the captured `beforeinstallprompt` event when available, while iOS shows Share → Add to Home Screen instructions. `requestFullscreen()` is a separate optional action when supported, never a replacement for the install prompt.
+- `AgentationDevTools` waits for client hydration and stays unmounted for narrow screens, installed PWA display mode, and coarse-pointer touch devices, so its development toolbar and portal overlays cannot cover phone controls. Desktop development keeps Agentation enabled.
+- `MobileDevToolsGuard` injects a narrowly scoped style into Next.js's open `nextjs-portal` shadow root under the same phone/PWA/touch conditions. It hides only the floating N/devtools indicator, not Next error dialogs, and removes the style again when returning to a desktop environment.
 - The manifest, service worker, and PWA icons are public authentication-layer assets only. Project pages, APIs, sessions, and terminals remain protected.
 
 ### Plugins and skills
@@ -227,10 +254,12 @@ Provider/API errors (e.g. a 400) do **not** reject `AgentSession.prompt()`. pi's
 - `ModelsConfig` combines models from `~/.pi/agent/models.json` with provider auth status from pi's `AuthStorage`/`ModelRegistry`.
 - OAuth/device-code/manual-code flows are streamed by `GET /api/auth/login/[provider]`; manual code responses POST back with a short-lived token stored in `globalThis.__piLoginCallbacks`.
 - API-key routes store and remove keys through `AuthStorage`. Status endpoints must never return the raw key.
+- `GET /api/models-config` returns `models.json` with literal `apiKey` and header values replaced by `REDACTED_SECRET` (`lib/models-config-secrets.ts`). `$ENV` and `!command` references are configuration, not secrets, and stay visible. `PUT` and the model test route restore placeholders from the saved file, so the settings UI can edit and test providers without ever receiving keys. `models.json` is written with mode `0600`.
 - The model test route is `app/api/models-config/test/route.ts`; `app/api/models/test/` is not a real route.
+- `lib/model-compat.ts` applies Opus 5.5's required adaptive-thinking metadata to custom Anthropic models when testing, saving, listing, loading a session, and switching models. Thinking `off` is unsupported. Model tests explicitly request `low` reasoning with a sufficient output budget; omitting reasoning makes Pi send `thinking.type.disabled`.
 
 ### Completion sound
-- `hooks/useAudio.ts` stores the toggle in `localStorage` as `pi-sound-enabled` and reuses one `AudioContext`.
+- Settings → Appearance owns the completion-sound preference. `hooks/useAudio.ts` stores it in `localStorage` as `pi-sound-enabled`, synchronizes mounted consumers with a same-tab event, and reuses one `AudioContext` per hook instance.
 - Browser autoplay policy means sound must be unlocked from a user gesture; `ChatInput` calls the unlock hook from interactive controls, and `ChatWindow` plays the tone from `onAgentEnd`.
 
 ### Exported session HTML

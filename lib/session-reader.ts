@@ -5,7 +5,8 @@ import {
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
 import { closeSync, openSync, readSync } from "fs";
-import { normalize as normalizePath } from "path";
+import { readdir, stat } from "fs/promises";
+import { join, normalize as normalizePath } from "path";
 import type { AgentMessage, AssistantMessage, SessionEntry, SessionHeader, SessionInfo, SessionContext } from "./types";
 import type { SessionEntry as PiSessionEntry, SessionInfo as PiSessionInfo } from "@earendil-works/pi-coding-agent";
 import { normalizeToolCalls } from "./normalize";
@@ -14,8 +15,55 @@ import { resolveProject, type ProjectInfo } from "./worktree";
 
 export { getAgentDir };
 
+/**
+ * Pi stores sessions in one directory per cwd. Parsing every session file is
+ * the expensive part of listing, and a finished prompt only changes one
+ * directory, so reuse each directory's parsed sessions until its files'
+ * names, sizes, or mtimes change.
+ */
+async function listPiSessionsByDirectory(): Promise<PiSessionInfo[]> {
+  const sessionsDir = join(getAgentDir(), "sessions");
+  let dirs: string[];
+  try {
+    const entries = await readdir(sessionsDir, { withFileTypes: true });
+    dirs = entries.filter((entry) => entry.isDirectory() || entry.isSymbolicLink()).map((entry) => join(sessionsDir, entry.name));
+  } catch {
+    return [];
+  }
+
+  if (!globalThis.__piSessionDirCache) globalThis.__piSessionDirCache = new Map();
+  const cache = globalThis.__piSessionDirCache;
+  const perDirectory = await Promise.all(dirs.map(async (dir) => {
+    let signature: string;
+    try {
+      const files = (await readdir(dir)).filter((file) => file.endsWith(".jsonl")).sort();
+      const stats = await Promise.all(files.map(async (file) => {
+        try {
+          const fileStat = await stat(join(dir, file));
+          return `${file}:${fileStat.size}:${fileStat.mtimeMs}`;
+        } catch {
+          return `${file}:missing`;
+        }
+      }));
+      signature = stats.join("|");
+    } catch {
+      cache.delete(dir);
+      return [];
+    }
+    const cached = cache.get(dir);
+    if (cached?.signature === signature) return cached.sessions;
+    const sessions = await SessionManager.listAll(dir);
+    cache.set(dir, { signature, sessions });
+    return sessions;
+  }));
+
+  const liveDirs = new Set(dirs);
+  for (const dir of cache.keys()) if (!liveDirs.has(dir)) cache.delete(dir);
+  return perDirectory.flat().sort((left, right) => right.modified.getTime() - left.modified.getTime());
+}
+
 async function loadAllSessions(): Promise<SessionInfo[]> {
-  const piSessions: PiSessionInfo[] = await SessionManager.listAll();
+  const piSessions: PiSessionInfo[] = await listPiSessionsByDirectory();
   const pathToId = new Map<string, string>();
   for (const s of piSessions) pathToId.set(sessionPathKey(s.path), s.id);
 
@@ -91,6 +139,7 @@ declare global {
   var __piSessionListPromiseGeneration: number | undefined;
   var __piSessionListGeneration: number | undefined;
   var __piSessionListCache: { data: SessionInfo[]; ts: number } | undefined;
+  var __piSessionDirCache: Map<string, { signature: string; sessions: PiSessionInfo[] }> | undefined;
 }
 
 const SESSION_LIST_CACHE_TTL_MS = 30_000;

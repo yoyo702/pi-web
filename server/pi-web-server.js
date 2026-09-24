@@ -7,8 +7,10 @@ const https = require("node:https");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const path = require("node:path");
+const os = require("node:os");
 const next = require("next");
 const auth = require("./auth.cjs");
+const { readJsonBody, readFormBody } = require("./http-body.cjs");
 
 const root = path.resolve(__dirname, "..");
 const args = process.argv.slice(2);
@@ -20,9 +22,11 @@ const hostname = hostIndex >= 0 ? args[hostIndex + 1] : process.env.HOSTNAME || 
 const loopbackHosts = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const isLoopback = loopbackHosts.has(hostname);
 const tls = process.env.PI_WEB_HTTPS_CERT && process.env.PI_WEB_HTTPS_KEY ? { cert: fs.readFileSync(process.env.PI_WEB_HTTPS_CERT), key: fs.readFileSync(process.env.PI_WEB_HTTPS_KEY) } : null;
-// This capability is inherited by Next worker processes so Pi custom tools
-// can call the terminal owner without exposing an unauthenticated web route.
-process.env.PI_WEB_INTERNAL_TERMINAL_TOKEN ||= crypto.randomBytes(32).toString("base64url");
+// Pi custom tools (running in this process via Next route handlers) use this
+// capability to call the terminal owner. It lives on `global` rather than
+// process.env so agent bash commands and spawned CLIs cannot read it.
+global.__piWebInternalTerminalToken ||= crypto.randomBytes(32).toString("base64url");
+delete process.env.PI_WEB_INTERNAL_TERMINAL_TOKEN;
 process.env.PI_WEB_INTERNAL_PORT = String(port);
 // Expose only non-secret runtime binding metadata to Next route workers. The
 // access-link dialog uses this to avoid claiming an address is reachable when
@@ -57,31 +61,50 @@ function writePairingErrorPage(res, message) {
 }
 
 function readJson(req) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    req.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > 16 * 1024) reject(new Error("request too large"));
-    });
-    req.on("end", () => {
-      try { resolve(JSON.parse(body)); } catch { reject(new Error("invalid request body")); }
-    });
-    req.on("error", reject);
-  });
+  return readJsonBody(req, 16 * 1024);
 }
 
 function readForm(req) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    req.on("data", (chunk) => {
-      body += chunk;
-      if (body.length > 16 * 1024) reject(new Error("request too large"));
-    });
-    req.on("end", () => {
-      try { resolve(Object.fromEntries(new URLSearchParams(body))); } catch { reject(new Error("invalid form body")); }
-    });
-    req.on("error", reject);
-  });
+  return readFormBody(req, 16 * 1024);
+}
+
+// DNS rebinding defense: a hostile page whose domain resolves to 127.0.0.1
+// sends matching Origin/Host headers, so same-origin checks alone are not
+// enough. Only accept Host names that actually belong to this machine, plus
+// anything listed in PI_WEB_ALLOWED_HOSTS (defaults to Tailscale Serve names;
+// entries starting with "*." match any subdomain).
+const extraAllowedHosts = String(process.env.PI_WEB_ALLOWED_HOSTS ?? "*.ts.net").split(",").map((value) => value.trim().toLowerCase()).filter(Boolean);
+// isAllowedHost runs for every request, so snapshot this machine's names and
+// interface addresses instead of querying the OS each time. Refreshing keeps
+// newly acquired LAN/Tailscale addresses working without a restart.
+const LOCAL_HOST_REFRESH_MS = 30_000;
+let localHostNames = null;
+let localHostNamesAt = 0;
+function getLocalHostNames() {
+  const now = Date.now();
+  if (localHostNames && now - localHostNamesAt < LOCAL_HOST_REFRESH_MS) return localHostNames;
+  const machine = os.hostname().toLowerCase();
+  const names = new Set([...loopbackHosts, hostname.toLowerCase(), machine, `${machine.replace(/\.local$/, "")}.local`]);
+  for (const addresses of Object.values(os.networkInterfaces())) {
+    for (const address of addresses || []) {
+      const value = address.address.toLowerCase();
+      names.add(address.family === "IPv6" ? `[${value}]` : value);
+    }
+  }
+  localHostNames = names;
+  localHostNamesAt = now;
+  return names;
+}
+function hostnameOf(hostHeader) {
+  const value = String(hostHeader || "").toLowerCase();
+  if (value.startsWith("[")) return value.slice(0, value.indexOf("]") + 1);
+  return value.replace(/:\d+$/, "");
+}
+function isAllowedHost(hostHeader) {
+  const name = hostnameOf(hostHeader);
+  if (!name) return false;
+  if (getLocalHostNames().has(name)) return true;
+  return extraAllowedHosts.some((allowed) => allowed.startsWith("*.") ? name.endsWith(allowed.slice(1)) : name === allowed);
 }
 
 function loginRequestMetadata(req) {
@@ -134,7 +157,7 @@ async function handleAuthRequest(req, res, url) {
       return writeLoginPage(res, 403, "This browser sent an unexpected origin. Reload this login page and try again.");
     }
     if (!auth.configured()) { res.writeHead(303, { Location: "/" }); res.end(); return; }
-    const key = auth.clientKey(req.headers);
+    const key = auth.clientKey(req);
     if (auth.isRateLimited(key)) return writeLoginPage(res, 429, "Too many failed login attempts; try again later.");
     let body;
     try { body = await readForm(req); } catch (error) { return writeLoginPage(res, 400, error.message); }
@@ -160,7 +183,7 @@ async function handleAuthRequest(req, res, url) {
   if (url.pathname === "/api/auth/login" && req.method === "POST") {
     if (!auth.isSameOrigin(req)) return writeJson(res, 403, { error: "cross-origin mutation rejected" });
     if (!auth.configured()) return writeJson(res, 200, { authenticated: true, passwordRequired: false });
-    const key = auth.clientKey(req.headers);
+    const key = auth.clientKey(req);
     if (auth.isRateLimited(key)) return writeJson(res, 429, { error: "too many failed login attempts; try again later" });
     let body;
     try { body = await readJson(req); } catch (error) { return writeJson(res, 400, { error: error.message }); }
@@ -175,6 +198,19 @@ async function handleAuthRequest(req, res, url) {
   writeJson(res, 405, { error: "method not allowed" });
 }
 const server = (tls ? https : http).createServer(tls || undefined, (req, res) => {
+  // Route handlers return their promises so both synchronous throws and
+  // rejected async work (e.g. auth handlers after an await) land here.
+  Promise.resolve().then(() => handleRequest(req, res)).catch((error) => {
+    console.error("[pi-web] request failed", error);
+    if (!res.headersSent) writeJson(res, 500, { error: "internal server error" });
+    else res.destroy();
+  });
+});
+
+function handleRequest(req, res) {
+  if (!isAllowedHost(req.headers.host)) {
+    return writeJson(res, 421, { error: "unrecognized Host header; set PI_WEB_ALLOWED_HOSTS to allow it" });
+  }
   if (!handle) {
     res.statusCode = 503;
     res.end("TianForge pi is starting");
@@ -196,20 +232,20 @@ const server = (tls ? https : http).createServer(tls || undefined, (req, res) =>
   }
   const isPiWebAuthRoute = url.pathname === "/api/auth/session" || url.pathname === "/api/auth/login" || url.pathname === "/api/auth/logout" || url.pathname === "/api/auth/pair" || url.pathname === "/login" || url.pathname === "/pair";
   if (isPiWebAuthRoute) {
-    void handleAuthRequest(req, res, url);
-    return;
+    return handleAuthRequest(req, res, url);
   }
   const terminalApi = require("./agents/terminal-api.cjs");
   if (terminalApi.isTerminalPath(url.pathname)) {
-    const internal = req.headers["x-pi-web-internal"] === process.env.PI_WEB_INTERNAL_TERMINAL_TOKEN;
+    const internal = auth.safeEqual(req.headers["x-pi-web-internal"], global.__piWebInternalTerminalToken);
     if (!internal && auth.configured() && !auth.getSessionFromRequest(req)) return writeJson(res, 401, { error: "authentication required" });
     if (!internal && !auth.isSameOrigin(req)) return writeJson(res, 403, { error: "cross-origin mutation rejected" });
-    void terminalApi.handleTerminalRequest(req, res, url);
-    return;
+    return terminalApi.handleTerminalRequest(req, res, url);
   }
   const publicPath = url.pathname === "/login"
     || isPiWebAuthRoute
-    || url.pathname.startsWith("/_next/")
+    // Only immutable build assets are public. Other /_next/ endpoints (e.g.
+    // the image optimizer, which can fetch local API routes) need a session.
+    || url.pathname.startsWith("/_next/static/")
     || url.pathname === "/favicon.ico"
     || url.pathname === "/manifest.webmanifest"
     || url.pathname === "/sw.js"
@@ -236,16 +272,14 @@ const server = (tls ? https : http).createServer(tls || undefined, (req, res) =>
   }
   const codexSessionsApi = require("./agents/codex-sessions-api.cjs");
   if (codexSessionsApi.isCodexSessionPath(url.pathname)) {
-    void codexSessionsApi.handleCodexSessionRequest(req, res, url);
-    return;
+    return codexSessionsApi.handleCodexSessionRequest(req, res, url);
   }
   const codexAppApi = require("./agents/codex-app-api.cjs");
   if (codexAppApi.isPath(url.pathname)) {
-    void codexAppApi.handle(req, res, url);
-    return;
+    return codexAppApi.handle(req, res, url);
   }
-  handle(req, res);
-});
+  return handle(req, res);
+}
 
 // Next lazily installs its own upgrade listener when the first page request is
 // handled. This listener only claims Next HMR sockets and deliberately leaves
@@ -258,7 +292,13 @@ function isTerminalStream(url) {
 }
 
 server.on("upgrade", (req, socket, head) => {
-  const url = new URL(req.url || "/", `http://${req.headers.host || hostname}`);
+  if (!isAllowedHost(req.headers.host)) {
+    socket.write("HTTP/1.1 421 Misdirected Request\r\nConnection: close\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+  let url;
+  try { url = new URL(req.url || "/", `http://${req.headers.host || hostname}`); } catch { socket.destroy(); return; }
   if (!isTerminalStream(url)) return;
 
   if (auth.configured() && !auth.getSessionFromRequest(req)) {
@@ -287,6 +327,9 @@ app.prepare().then(() => {
   server.listen(port, hostname, () => {
     const authStatus = auth.configured() ? "password authentication enabled" : "no password configured (loopback only)";
     console.log(`Ready on ${tls ? "https" : "http"}://${hostname}:${port} (${authStatus})`);
+    if (!isLoopback && !tls) {
+      console.warn("WARNING: TianForge pi is reachable from the network over plain HTTP. The password and session cookie can be read by anyone on the same network. Use `npm run dev:https`, set PI_WEB_HTTPS_CERT/PI_WEB_HTTPS_KEY, or bind to 127.0.0.1 behind Tailscale Serve.");
+    }
   });
 }).catch((error) => {
   console.error(error);
@@ -299,6 +342,9 @@ function shutdown() {
     shutdownTerminals();
   } catch { /* terminal runtime may not have loaded */ }
   server.close(() => process.exit(0));
+  // SSE streams and terminal WebSockets never end on their own, so close()
+  // would otherwise always wait for the forced-exit timeout below.
+  server.closeAllConnections();
   setTimeout(() => process.exit(1), 5000).unref();
 }
 process.once("SIGINT", shutdown);

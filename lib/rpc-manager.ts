@@ -1,4 +1,5 @@
 import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager } from "@earendil-works/pi-coding-agent";
+import { normalizeModelCompat } from "./model-compat";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { randomUUID } from "crypto";
 import { existsSync, statSync, writeFileSync } from "fs";
@@ -112,7 +113,7 @@ export class AgentSessionWrapper {
   private forceEmptySystemPrompt = false;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
-  private onDestroyCallback: (() => void) | null = null;
+  private destroyListeners = new Set<() => void>();
   private _alive = true;
   // Last session-file mtime this wrapper is known to be in sync with. Used to
   // detect edits made by another process (e.g. the terminal `pi`) to the same
@@ -393,8 +394,17 @@ export class AgentSessionWrapper {
     };
   }
 
-  onDestroy(cb: () => void): void {
-    this.onDestroyCallback = cb;
+  /**
+   * Run `cb` once this wrapper is destroyed (immediately if it already is).
+   * Returns an unsubscribe function.
+   */
+  onDestroy(cb: () => void): () => void {
+    if (!this._alive) {
+      cb();
+      return () => {};
+    }
+    this.destroyListeners.add(cb);
+    return () => { this.destroyListeners.delete(cb); };
   }
 
   async send(command: Record<string, unknown>): Promise<unknown> {
@@ -500,7 +510,7 @@ export class AgentSessionWrapper {
           model = this.inner.modelRuntime.getModel(provider, modelId);
         }
         if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-        await this.inner.setModel(model, { persist: true });
+        await this.inner.setModel(normalizeModelCompat(model), { persist: true });
         invalidateModelsCache();
         invalidateSessionListCache();
         return { id: model.id, provider: model.provider };
@@ -539,7 +549,9 @@ export class AgentSessionWrapper {
         const newSessionId = SessionManager.open(newSessionFile, sessionDir).getSessionId();
         cacheSessionPath(newSessionId, newSessionFile);
         invalidateSessionListCache();
-        this.destroy();
+        // Destroying aborts the agent, so keep a still-running source session
+        // alive; its idle timer disposes it once the run finishes.
+        if (!this.isRunning()) this.destroy();
         return { cancelled: false, newSessionId };
       }
 
@@ -723,14 +735,28 @@ export class AgentSessionWrapper {
     if (!this._alive) return;
     this._alive = false;
     if (this.idleTimer) clearTimeout(this.idleTimer);
-    if (this.inner.isBashRunning) this.inner.abortBash();
     this.unsubscribe?.();
     for (const pending of this.pendingUiResponses.values()) pending.cancel();
     for (const id of Array.from(this.activeCustomUis.keys())) this.closeCustomUi(id, undefined);
     this.pendingUiResponses.clear();
     this.pendingUiRequests.clear();
     this.activeToolCalls.clear();
-    this.onDestroyCallback?.();
+    // dispose() aborts any in-flight prompt/bash/compaction and detaches the
+    // SDK session from its agent. Without it, a destroyed wrapper could keep
+    // streaming and appending to its session file (recreating a deleted file).
+    try {
+      this.inner.dispose();
+    } catch (error) {
+      console.error("[rpc-manager] failed to dispose agent session", error);
+    }
+    // Destroy listeners include open SSE streams, which close so they stop
+    // holding this dead wrapper (and its full transcript) in memory.
+    this.listeners.length = 0;
+    const destroyListeners = [...this.destroyListeners];
+    this.destroyListeners.clear();
+    for (const listener of destroyListeners) {
+      try { listener(); } catch (error) { console.error("[rpc-manager] destroy listener failed", error); }
+    }
     notifyRunningChange();
   }
 
@@ -1227,6 +1253,10 @@ export async function startRpcSession(
       customTools: terminalTools,
       ...(toolsOption !== undefined ? { tools: toolsOption } : {}),
     });
+    if (inner.model) {
+      const model = normalizeModelCompat(inner.model);
+      if (model !== inner.model) await inner.setModel(model);
+    }
 
     // If specific tool names were requested (non-empty), set the active tools to the
     // requested builtin coding tools PLUS all extension/package tools, so installed

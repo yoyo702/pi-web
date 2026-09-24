@@ -68,3 +68,11 @@ child.stdout.on("data", (chunk) => {
 });
 
 child.on("exit", (code) => process.exit(code ?? 0));
+
+// Forward termination signals so `kill <launcher>` does not orphan the server
+// (which would keep the port, PTYs, and agent sessions alive).
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(signal, () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+  });
+}

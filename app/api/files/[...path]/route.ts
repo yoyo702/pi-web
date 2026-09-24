@@ -319,12 +319,25 @@ function getContentDisposition(filePath: string, asDownload = false): string {
   return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encodeHeaderValue(fileName)}`;
 }
 
+// Workspace files are untrusted. Opening one directly (e.g. an SVG in a new
+// tab) must not run script with this app's origin, which could drive the
+// terminal API. PDFs are exempt because a sandboxed response disables the
+// browser's built-in PDF viewer, and PDF viewers do not share the page origin.
+function untrustedFileHeaders(contentType: string): Record<string, string> {
+  const headers: Record<string, string> = { "X-Content-Type-Options": "nosniff" };
+  if (contentType !== "application/pdf") {
+    headers["Content-Security-Policy"] = "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'";
+  }
+  return headers;
+}
+
 function streamFile(filePath: string, stat: fs.Stats, contentType: string, rangeHeader: string | null, asDownload = false): Response {
   const headers = {
     "Content-Type": contentType,
     "Cache-Control": "no-cache",
     "Accept-Ranges": "bytes",
     "Content-Disposition": getContentDisposition(filePath, asDownload),
+    ...untrustedFileHeaders(contentType),
   };
 
   if (!rangeHeader) {
@@ -555,23 +568,41 @@ export async function GET(
       if (!stat.isFile()) {
         return NextResponse.json({ error: "Not a file" }, { status: 400 });
       }
-      let watcher: fs.FSWatcher | null = null;
       let lastMtimeMs = stat.mtimeMs;
       let lastSize = stat.size;
+      let cleanup = () => {};
       const stream = new ReadableStream({
         start(controller) {
-          const send = (eventName: string, data: Record<string, unknown>) => {
-            const payload = `event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`;
-            try {
-              controller.enqueue(new TextEncoder().encode(payload));
-            } catch {
-              // client disconnected
-            }
+          let closed = false;
+          let watcher: fs.FSWatcher | null = null;
+          let heartbeat: ReturnType<typeof setInterval> | null = null;
+          const enqueue = (text: string) => {
+            if (closed) return;
+            try { controller.enqueue(new TextEncoder().encode(text)); } catch { cleanup(); }
           };
+          const send = (eventName: string, data: Record<string, unknown>) => {
+            enqueue(`event: ${eventName}\ndata: ${JSON.stringify(data)}\n\n`);
+          };
+          // One idempotent teardown for every exit path (client abort, stream
+          // cancel, watcher error) so the watcher and heartbeat never leak.
+          cleanup = () => {
+            if (closed) return;
+            closed = true;
+            if (heartbeat) clearInterval(heartbeat);
+            try { watcher?.close(); } catch { /* ignore */ }
+            try { controller.close(); } catch { /* already closed */ }
+          };
+          request.signal.addEventListener("abort", cleanup);
+
           // Send initial ping so client knows connection is live
           send("connected", { filePath });
+          const fileName = path.basename(filePath);
           try {
-            watcher = fs.watch(filePath, () => {
+            // Watch the parent directory: editors often save by writing a temp
+            // file and renaming it over the original, which detaches a watcher
+            // bound to the original file's inode.
+            watcher = fs.watch(path.dirname(filePath), (_event, changedName) => {
+              if (changedName && changedName.toString() !== fileName) return;
               try {
                 const s = fs.statSync(filePath);
                 // Some platforms emit watch events for file reads/attribute
@@ -584,16 +615,18 @@ export async function GET(
                 send("change", { mtime: new Date().toISOString(), size: 0 });
               }
             });
-            watcher.on("error", () => {
-              try { controller.close(); } catch { /* ignore */ }
-            });
+            watcher.on("error", cleanup);
           } catch {
             send("error", { message: "Failed to watch file" });
-            controller.close();
+            cleanup();
+            return;
           }
+          // Keep proxies from timing out the idle stream, and surface dead
+          // connections through a failed enqueue.
+          heartbeat = setInterval(() => enqueue(":\n\n"), 30_000);
         },
         cancel() {
-          try { watcher?.close(); } catch { /* ignore */ }
+          cleanup();
         },
       });
       return new Response(stream, {

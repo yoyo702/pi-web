@@ -268,6 +268,11 @@ export async function GET(
           "Content-Type": "text/html; charset=utf-8",
           "Content-Disposition": getContentDisposition(fileName, inline),
           "Cache-Control": "no-cache",
+          // The export renders session content (model output, tool results).
+          // Run it in an opaque origin so its scripts work but can never use
+          // this app's cookies or APIs. Its storage access is try/catch-guarded.
+          "Content-Security-Policy": "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads",
+          "X-Content-Type-Options": "nosniff",
         },
       });
     } finally {

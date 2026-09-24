@@ -17,7 +17,15 @@ function patchAutolinkSource(source) {
 }
 
 function patchInstalledAutolink(projectRoot = path.resolve(__dirname, "..")) {
-  const gfmEntry = require.resolve("mdast-util-gfm", { paths: [projectRoot] });
+  let gfmEntry;
+  try {
+    gfmEntry = require.resolve("mdast-util-gfm", { paths: [projectRoot] });
+  } catch {
+    // Published installs ship a prebuilt .next and omit devDependencies, so
+    // the Markdown toolchain is absent and there is nothing to patch. Any
+    // other resolution failure below still fails loudly.
+    return { sourceFile: null, changed: false, skipped: true };
+  }
   const autolinkEntry = require.resolve("mdast-util-gfm-autolink-literal", { paths: [path.dirname(gfmEntry)] });
   const sourceFile = path.join(path.dirname(autolinkEntry), "lib", "index.js");
   const source = fs.readFileSync(sourceFile, "utf8");
@@ -30,7 +38,8 @@ function patchInstalledAutolink(projectRoot = path.resolve(__dirname, "..")) {
 if (require.main === module) {
   try {
     const result = patchInstalledAutolink();
-    console.log(`${result.changed ? "Patched" : "Verified"} Safari-compatible GFM autolinks: ${result.sourceFile}`);
+    if (result.skipped) console.log("Skipped Safari-compatible GFM autolink patch: mdast-util-gfm is not installed");
+    else console.log(`${result.changed ? "Patched" : "Verified"} Safari-compatible GFM autolinks: ${result.sourceFile}`);
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;

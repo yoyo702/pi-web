@@ -1,9 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import { Noto_Sans_Mono } from "next/font/google";
 import "katex/dist/katex.min.css";
-import "@xterm/xterm/css/xterm.css";
 import "./globals.css";
 import { AgentationDevTools } from "@/components/AgentationDevTools";
+import { MobileDevToolsGuard } from "@/components/MobileDevToolsGuard";
 import { MobileFullscreenPrompt } from "@/components/MobileFullscreenPrompt";
 
 const notoSansMono = Noto_Sans_Mono({
@@ -63,6 +63,7 @@ export default function RootLayout({
       <body translate="no" className="notranslate" style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
         {children}
         <MobileFullscreenPrompt />
+        <MobileDevToolsGuard />
         <AgentationDevTools />
       </body>
     </html>

@@ -143,6 +143,7 @@ export interface AgentSessionLike {
   abort(): Promise<void>;
   executeBash(command: string, onChunk?: (chunk: string) => void, options?: { excludeFromContext?: boolean }): Promise<{ output: string; exitCode?: number; cancelled?: boolean; truncated?: boolean; fullOutputPath?: string }>;
   abortBash(): void;
+  dispose(): void;
   readonly isBashRunning: boolean;
   setModel(model: ModelLike, options?: { persist?: boolean }): Promise<void>;
   navigateTree(targetId: string, options?: { summarize?: boolean }): Promise<NavigateTreeResult>;

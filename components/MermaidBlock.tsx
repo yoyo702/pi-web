@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
+import { PrismAsyncLight as SyntaxHighlighter } from "react-syntax-highlighter";
+import vs from "react-syntax-highlighter/dist/esm/styles/prism/vs";
+import vscDarkPlus from "react-syntax-highlighter/dist/esm/styles/prism/vsc-dark-plus";
 import { useTheme } from "@/hooks/useTheme";
+import { prismLanguage } from "@/lib/code-language";
 import { copyText } from "@/lib/clipboard";
 
 interface MermaidBlockProps {
@@ -253,7 +254,7 @@ export function CodeBlock({ code, lang, headerAction }: CodeBlockProps) {
         </div>
       </div>
       <SyntaxHighlighter
-        language={lang || "text"}
+        language={prismLanguage(lang)}
         style={isDark ? vscDarkPlus : vs}
         showLineNumbers
         lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}

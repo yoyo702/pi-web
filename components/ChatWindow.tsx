@@ -189,6 +189,29 @@ function withAssistantBlocks(
   return next;
 }
 
+// Split derived messages are cached per source message object so completed
+// turns keep a stable identity across streaming re-renders. Without this,
+// MessageView's memo misses on every update and all historical answers
+// re-parse their Markdown ~13 times per second while a reply streams.
+const finalAssistantPartsCache = new WeakMap<AssistantMessage, {
+  processMessage: AssistantMessage | null;
+  answerMessage: AssistantMessage | null;
+  processBlocks: AssistantContentBlock[];
+}>();
+
+function finalAssistantParts(message: AssistantMessage) {
+  const cached = finalAssistantPartsCache.get(message);
+  if (cached) return cached;
+  const split = splitFinalAssistantBlocks(message);
+  const parts = {
+    processMessage: split.processBlocks.length > 0 ? withAssistantBlocks(message, split.processBlocks, { omitUsage: true }) : null,
+    answerMessage: split.answerBlocks.length > 0 || message.errorMessage ? withAssistantBlocks(message, split.answerBlocks) : null,
+    processBlocks: split.processBlocks,
+  };
+  finalAssistantPartsCache.set(message, parts);
+  return parts;
+}
+
 function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messageCount: number; toolCallCount: number; children: ReactNode }) {
   const [expanded, setExpanded] = useState(false);
   const parts = ["Process details", `${messageCount} ${messageCount === 1 ? "message" : "messages"}`];
@@ -233,7 +256,7 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
 }
 
 export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile }: Props) {
-  const { soundEnabled, onSoundToggle, playDoneSound, unlockAudio } = useAudio();
+  const { soundEnabled, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
@@ -464,8 +487,6 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
       onBuiltinCommand={handleBuiltinSlashCommand}
-      soundEnabled={soundEnabled}
-      onSoundToggle={onSoundToggle}
       onAudioUnlock={unlockAudio}
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
@@ -729,13 +750,9 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 }
                 const visibleProcessIndices = processIndices.filter((processIdx) => hasDisplayableProcessMessage(messages[processIdx]));
                 const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
-                const finalSplit = splitFinalAssistantBlocks(finalAssistant);
-                const finalProcessMessage = finalSplit.processBlocks.length > 0
-                  ? withAssistantBlocks(finalAssistant, finalSplit.processBlocks, { omitUsage: true })
-                  : null;
-                const finalAnswerMessage = finalSplit.answerBlocks.length > 0 || finalAssistant.errorMessage
-                  ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
-                  : null;
+                const finalSplit = finalAssistantParts(finalAssistant);
+                const finalProcessMessage = finalSplit.processMessage;
+                const finalAnswerMessage = finalSplit.answerMessage;
 
                 const processCount = visibleProcessIndices.length + (finalProcessMessage ? 1 : 0);
                 if (processCount > 0) {

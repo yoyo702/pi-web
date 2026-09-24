@@ -5,13 +5,14 @@ const catalog = require("./codex-sessions.cjs");
 const terminalApi = require("./terminal-api.cjs");
 const terminalManager = require("./terminal-manager.cjs");
 const codexAppServer = require("./codex-app-server.cjs");
+const { readBody } = require("../http-body.cjs");
 
 function withRuntime(session) {
   return { ...session, runtime: codexAppServer.runtimeForSession(session.id) || terminalManager.runtimeForSession(session.id) };
 }
 
 function json(res, status, body) { res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify(body)); }
-function readJson(req) { return new Promise((resolve, reject) => { let text = ""; req.on("data", (chunk) => { text += chunk; if (text.length > 16 * 1024) reject(new Error("request too large")); }); req.on("end", () => { try { resolve(text ? JSON.parse(text) : {}); } catch { reject(new Error("invalid request body")); } }); req.on("error", reject); }); }
+async function readJson(req) { const text = await readBody(req, 16 * 1024); try { return text ? JSON.parse(text) : {}; } catch { throw new Error("invalid request body"); } }
 function safeSession(id, cwd) {
   const session = catalog.requireSession(id);
   if (!session.cwd) throw Object.assign(new Error("Codex session has no workspace metadata"), { code: "invalid_session" });

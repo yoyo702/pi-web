@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProp
 import { createPortal } from "react-dom";
 import type { TerminalPermissionMode, TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
 import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
+import { ProductStatusDot } from "@/components/ProductStatus";
 
 export interface CodexSessionTarget {
   sessionId: string;
@@ -414,7 +415,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     </button>
     {open && <div style={agentsBodyStyle}>
       <div style={resourceSummaryStyle}>
-        <span style={overviewStatusStyle}><span style={{ ...overviewDotStyle, background: workspaceStats.running > 0 ? "#22c55e" : "var(--text-dim)" }} />{workspaceStats.running > 0 ? `${workspaceStats.running} running` : "Workspace idle"}</span>
+        <span style={overviewStatusStyle}><ProductStatusDot status={workspaceStats.running > 0 ? "running" : "idle"} size={7} />{workspaceStats.running > 0 ? `${workspaceStats.running} running` : "Workspace idle"}</span>
         <span title={`Global: ${globalStats.running}/${limits.running} running · ${globalStats.records}/${limits.records} records · ${formatBytes(globalStats.bufferBytes)}`} style={overviewMetaStyle}>{globalStats.records} sessions · {formatBytes(globalStats.bufferBytes)}</span>
         {endedTerminalCount > 0 && <button type="button" onClick={() => setPendingAction({ kind: "clear", count: endedTerminalCount })} style={resourceClearStyle}>Clear {endedTerminalCount}</button>}
       </div>
@@ -721,8 +722,7 @@ function Chevron({ open }: { open: boolean }) {
 }
 
 function StatusDot({ state }: { state?: "idle" | "running" | "approval" }) {
-  const color = state === "approval" ? "#d97706" : state === "running" ? "#22c55e" : "var(--text-dim)";
-  return <span title={state ?? "idle"} style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: color, boxShadow: state === "running" ? `0 0 0 2px color-mix(in srgb, ${color} 18%, transparent)` : undefined }} />;
+  return <ProductStatusDot status={state ?? "idle"} size={6} halo={state === "running"} />;
 }
 
 function InlineMessage({ children }: { children: React.ReactNode }) {
@@ -755,12 +755,11 @@ const headerStyle: CSSProperties = { display: "flex", alignItems: "center", gap:
 const agentsBodyStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 5, flex: 1, minHeight: 0, overflowY: "auto", padding: "0 8px 10px" };
 const resourceSummaryStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 8, minHeight: 32, margin: "0 1px 3px", padding: "0 9px", border: "1px solid var(--border)", borderRadius: 8, background: "color-mix(in srgb, var(--bg) 76%, transparent)", color: "var(--text-dim)", fontSize: 10, lineHeight: 1.3 };
 const overviewStatusStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 6, color: "var(--text-muted)", whiteSpace: "nowrap" };
-const overviewDotStyle: CSSProperties = { width: 7, height: 7, borderRadius: "50%", flexShrink: 0 };
 const overviewMetaStyle: CSSProperties = { minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", textAlign: "right" };
 const resourceClearStyle: CSSProperties = { flexShrink: 0, padding: "3px 6px", border: 0, borderRadius: 4, background: "var(--bg-hover)", color: "var(--text-muted)", cursor: "pointer", font: "9.5px/1.2 inherit" };
 const providerStyle: CSSProperties = { display: "flex", alignItems: "center", minHeight: 36, marginTop: 1, border: "1px solid transparent", borderRadius: 8, background: "transparent" };
 const providerToggleStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 4, alignSelf: "stretch", minWidth: 0, flex: 1, padding: "0 4px 0 7px", border: 0, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", font: "inherit" };
-const providerRunningStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 4, padding: "2px 5px", borderRadius: 999, background: "color-mix(in srgb, #22c55e 10%, transparent)", color: "#16a34a", fontSize: 10, fontVariantNumeric: "tabular-nums" };
+const providerRunningStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 4, padding: "2px 5px", borderRadius: 999, background: "color-mix(in srgb, var(--status-running) 10%, transparent)", color: "var(--status-running)", fontSize: 10, fontVariantNumeric: "tabular-nums" };
 const providerCountStyle: CSSProperties = { minWidth: 18, color: "var(--text-dim)", fontSize: 10, textAlign: "right", fontVariantNumeric: "tabular-nums" };
 const sessionListStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 2, margin: "0 0 5px", padding: "1px 3px 4px 17px", borderLeft: "1px solid color-mix(in srgb, var(--border) 72%, transparent)" };
 const projectScriptsStyle: CSSProperties = { display: "grid", gap: 6, margin: "3px 0 5px", padding: "8px", border: "1px solid var(--border)", borderRadius: 8, background: "color-mix(in srgb, var(--bg) 76%, transparent)" };

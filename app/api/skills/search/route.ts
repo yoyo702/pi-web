@@ -98,7 +98,8 @@ export async function POST(req: Request) {
       const results = await searchSkillsApi(query.trim(), limit);
       return NextResponse.json({ results });
     } catch {
-      const { stdout, stderr } = await runNpx(["skills", "find", query.trim()], {
+      // "--" keeps a query like "--help" from being parsed as a CLI option.
+      const { stdout, stderr } = await runNpx(["skills", "find", "--", query.trim()], {
         timeout: 20000,
         env: { ...process.env, FORCE_COLOR: "0" },
       });

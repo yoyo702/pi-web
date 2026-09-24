@@ -393,6 +393,9 @@ test("fullscreen right panel covers mobile navigation", async ({ page }, testInf
     created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
   }], runningSessionIds: [] } }));
   await page.route("**/api/git/status?*", async (route) => route.fulfill({ json: { isGitRepository: false, files: [] } }));
+  // The mocked project path does not exist on disk; without this, workspace
+  // activation fails validation and no project is selected.
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
   await page.goto("/");
   const navigation = page.getByRole("navigation", { name: "Mobile navigation" });
   await navigation.getByRole("button", { name: "Git" }).click();
@@ -470,7 +473,8 @@ test("switches between persisted project workspaces", async ({ page }, testInfo)
   await expect(rail.getByText("project-a", { exact: true })).toBeVisible();
   await expect(rail.getByText("project-b", { exact: true })).toBeVisible();
   await expect(rail.getByTitle("/tmp/project-a")).toHaveAttribute("aria-current", "page");
-  await expect(rail.getByText("feature/a · 1 changed", { exact: true })).toBeVisible();
+  await expect(rail.getByText("feature/a", { exact: true })).toBeVisible();
+  await expect(rail.getByText("1 Git changes", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Copy project path: /tmp/project-a" }).click();
   await expect(page.getByRole("button", { name: "Project path copied" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("/tmp/project-a");
@@ -596,6 +600,7 @@ test("summarizes collapsed agent groups and keeps completed tasks reachable", as
     id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
     created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
   }], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
   await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: {
     terminals,
     stats: { workspace: { running: 2, records: 3, bufferBytes: 36 }, global: { running: 2, records: 3, bufferBytes: 36 }, limits: { running: 20, records: 100 } },
@@ -646,6 +651,7 @@ test("searches and manages files from Explorer", async ({ page }, testInfo) => {
       : { isGitRepository: false, repositoryRoot: null, branch: null, files: [] } });
   });
   await page.route("**/api/workspace-files", async (route) => route.fulfill({ json: { path: "README-renamed.md" } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
 
   await page.goto("/");
   const search = page.getByRole("combobox", { name: "Search files" });

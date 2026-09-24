@@ -4,6 +4,9 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { completeSimple, type AssistantMessage } from "@earendil-works/pi-ai/compat";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { normalizeModelCompat } from "@/lib/model-compat";
+import { readModelsJson } from "@/lib/models-config-file";
+import { providerHasRedactedSecret, restoreProviderSecrets } from "@/lib/models-config-secrets";
 
 export const dynamic = "force-dynamic";
 
@@ -37,13 +40,19 @@ export async function POST(req: Request) {
     const modelId = typeof body.model.id === "string" ? body.model.id.trim() : "";
     if (!modelId) return NextResponse.json({ ok: false, error: "Model ID is required" }, { status: 400 });
 
+    // The settings UI only ever sees redacted keys; restore saved values so
+    // testing an existing provider does not require re-entering its key.
+    const provider = providerHasRedactedSecret(body.provider)
+      ? restoreProviderSecrets(body.provider, providerName, readModelsJson())
+      : body.provider;
+
     tempDir = mkdtempSync(join(tmpdir(), "pi-web-model-test-"));
     const modelsPath = join(tempDir, "models.json");
     writeFileSync(modelsPath, JSON.stringify({
       providers: {
         [providerName]: {
-          ...body.provider,
-          models: [{ ...body.model, id: modelId }],
+          ...provider,
+          models: [normalizeModelCompat({ ...body.model, id: modelId }, typeof provider.api === "string" ? provider.api : undefined)],
         },
       },
     }, null, 2), "utf8");
@@ -75,7 +84,8 @@ export async function POST(req: Request) {
       }, {
         apiKey: resolved.auth.apiKey,
         headers: resolved.auth.headers,
-        maxTokens: 16,
+        reasoning: model.reasoning ? "low" : undefined,
+        maxTokens: model.reasoning ? 2048 : 16,
         timeoutMs: TEST_TIMEOUT_MS,
         maxRetries: 0,
         cacheRetention: "none",

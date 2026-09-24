@@ -2,6 +2,9 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 
+const SOUND_STORAGE_KEY = "pi-sound-enabled";
+const SOUND_CHANGE_EVENT = "tianforge:sound-preference-change";
+
 function playTone(ctx: AudioContext) {
   const now = ctx.currentTime;
   const freqs = [523.25, 659.25];
@@ -24,12 +27,27 @@ function playTone(ctx: AudioContext) {
 export function useAudio() {
   const [enabled, setEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
-    const stored = localStorage.getItem("pi-sound-enabled");
+    const stored = localStorage.getItem(SOUND_STORAGE_KEY);
     return stored === null ? true : stored === "true";
   });
 
   const enabledRef = useRef(enabled);
   useEffect(() => { enabledRef.current = enabled; }, [enabled]);
+  useEffect(() => {
+    const sync = (event: Event) => {
+      const next = event instanceof CustomEvent && typeof event.detail === "boolean"
+        ? event.detail
+        : localStorage.getItem(SOUND_STORAGE_KEY) !== "false";
+      enabledRef.current = next;
+      setEnabled(next);
+    };
+    window.addEventListener(SOUND_CHANGE_EVENT, sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener(SOUND_CHANGE_EVENT, sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, []);
 
   // Reuse a single AudioContext so it can be resumed if the browser
   // autoplay policy suspends it (contexts created outside user gestures
@@ -56,8 +74,9 @@ export function useAudio() {
     const next = !enabledRef.current;
     if (next) unlockAudio(true);
     enabledRef.current = next;
-    localStorage.setItem("pi-sound-enabled", String(next));
+    localStorage.setItem(SOUND_STORAGE_KEY, String(next));
     setEnabled(next);
+    window.dispatchEvent(new CustomEvent(SOUND_CHANGE_EVENT, { detail: next }));
   }, [unlockAudio]);
 
   const playDone = useCallback(() => {

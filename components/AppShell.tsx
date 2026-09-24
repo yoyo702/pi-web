@@ -1,22 +1,25 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
+import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { ProjectRail } from "./ProjectRail";
 import { ChatWindow } from "./ChatWindow";
-import { FileViewer } from "./FileViewer";
-import { GitReviewPanel } from "./GitReviewPanel";
-import { AgentTerminalPanel } from "./agents/AgentTerminalPanel";
-import { CodexChatPanel } from "./agents/codex/CodexChatPanel";
 import { NewAgentDialog } from "./agents/NewAgentDialog";
-import { MobileAccessDialog } from "./MobileAccessDialog";
 import { TabBar, type Tab } from "./TabBar";
 import { getMissingSplitTerminalTabs } from "@/lib/terminal-restore";
-import { ModelsConfig } from "./ModelsConfig";
-import { SkillsConfig } from "./SkillsConfig";
-import { PluginsConfig } from "./PluginsConfig";
+
+// Panels below pull in heavy dependencies (xterm, assistant-ui, provider icon
+// sets, diff/preview renderers) and are only shown on demand, so keep them out
+// of the initial chat bundle.
+const FileViewer = dynamic(() => import("./FileViewer").then((m) => m.FileViewer), { ssr: false });
+const GitReviewPanel = dynamic(() => import("./GitReviewPanel").then((m) => m.GitReviewPanel), { ssr: false });
+const AgentTerminalPanel = dynamic(() => import("./agents/AgentTerminalPanel").then((m) => m.AgentTerminalPanel), { ssr: false });
+const CodexChatPanel = dynamic(() => import("./agents/codex/CodexChatPanel").then((m) => m.CodexChatPanel), { ssr: false });
+const SettingsPanel = dynamic(() => import("./SettingsPanel").then((m) => m.SettingsPanel), { ssr: false });
+import { ProductStatusDot } from "./ProductStatus";
 import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
@@ -30,8 +33,9 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
 import type { TerminalConnectionState } from "@/hooks/useTerminalSocket";
 import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
-import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PanelsTopLeft, Plus, QrCode, TerminalSquare } from "lucide-react";
+import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PanelsTopLeft, Plus, TerminalSquare } from "lucide-react";
 import { PROJECT_WORKSPACES_STORAGE_KEY, RECENT_PROJECTS_STORAGE_KEY, parseProjectWorkspaceSnapshot, parseRecentProjects, projectLabel, recoverProjectWorkspaceSnapshot, updateRecentProjects, upsertProjectWorkspace, type ProjectWorkspace } from "@/lib/project-workspaces";
+import { getProductStatus } from "@/lib/product-status";
 
 type SessionCopyField = "file" | "id";
 type AutoNameStatus =
@@ -70,11 +74,8 @@ export function AppShell() {
   const [refreshKey, setRefreshKey] = useState(0);
   const [sessionKey, setSessionKey] = useState(0);
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
-  const [modelsConfigOpen, setModelsConfigOpen] = useState(false);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
-  const [skillsConfigOpen, setSkillsConfigOpen] = useState(false);
-  const [pluginsConfigOpen, setPluginsConfigOpen] = useState(false);
-  const [mobileAccessOpen, setMobileAccessOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const [mobileSidebarModule, setMobileSidebarModule] = useState<"sessions" | "agents" | "explorer">("sessions");
@@ -418,6 +419,29 @@ export function AppShell() {
     if (Number.isFinite(r) && r >= 320) setRightPanelWidth(Math.min(r, window.innerWidth - 200));
   }, []);
 
+  // While dragging, write the width CSS variable straight to the layout root
+  // once per frame and commit React state only on release. Setting state on
+  // every mousemove re-rendered the whole shell (sidebar, chat, Markdown).
+  const layoutRootRef = useRef<HTMLDivElement>(null);
+  const createWidthPreview = useCallback((cssVar: string) => {
+    let frame = 0;
+    let pending = 0;
+    return {
+      set(width: number) {
+        pending = width;
+        if (frame) return;
+        frame = requestAnimationFrame(() => {
+          frame = 0;
+          layoutRootRef.current?.style.setProperty(cssVar, `${pending}px`);
+        });
+      },
+      cancel() {
+        if (frame) cancelAnimationFrame(frame);
+        frame = 0;
+      },
+    };
+  }, []);
+
   // Generic edge-drag: `dir` is +1 when dragging the element's right edge
   // (sidebar) and -1 when dragging its left edge (right panel).
   const beginResize = useCallback((
@@ -426,6 +450,8 @@ export function AppShell() {
     setWidth: (w: number) => void,
     storageKey: string,
     clampMax: () => number,
+    cssVar: string,
+    minWidth = 180,
   ) => (event: React.MouseEvent) => {
     event.preventDefault();
     const startX = event.clientX;
@@ -434,9 +460,10 @@ export function AppShell() {
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     let latest = startW;
+    const preview = createWidthPreview(cssVar);
     const onMove = (ev: MouseEvent) => {
-      latest = Math.min(clampMax(), Math.max(180, startW + dir * (ev.clientX - startX)));
-      setWidth(latest);
+      latest = Math.min(clampMax(), Math.max(minWidth, startW + dir * (ev.clientX - startX)));
+      preview.set(latest);
     };
     const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") finish();
@@ -449,8 +476,10 @@ export function AppShell() {
       document.removeEventListener("mouseup", finish);
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("blur", finish);
+      preview.cancel();
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      setWidth(latest);
       setIsResizing(false);
       try { localStorage.setItem(storageKey, String(Math.round(latest))); } catch {}
     };
@@ -458,7 +487,7 @@ export function AppShell() {
     document.addEventListener("mouseup", finish);
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("blur", finish);
-  }, []);
+  }, [createWidthPreview]);
 
   const beginSidebarResize = beginResize(
     1,
@@ -466,6 +495,7 @@ export function AppShell() {
     setSidebarWidth,
     "pi-sidebar-w",
     () => 640,
+    "--sidebar-w",
   );
   const beginRightPanelResize = beginResize(
     -1,
@@ -473,46 +503,18 @@ export function AppShell() {
     setRightPanelWidth,
     "pi-right-panel-w",
     () => window.innerWidth - 200,
+    "--right-panel-w",
   );
   // In focus mode the right panel fills the chat's old slot, so it no longer
   // has an edge to resize. Dragging its visible left divider restores chat and
   // continues as a normal right-panel resize in one gesture.
   const restoreChatFromResize = useCallback((event: React.MouseEvent) => {
-    event.preventDefault();
     const max = () => window.innerWidth - 200;
-    const startX = event.clientX;
-    const startW = Math.min(max(), Math.max(300, window.innerWidth - startX));
-    let latest = startW;
+    const startW = Math.min(max(), Math.max(300, window.innerWidth - event.clientX));
     setChatCollapsed(false);
     setRightPanelWidth(startW);
-    setIsResizing(true);
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    const onMove = (moveEvent: MouseEvent) => {
-      latest = Math.min(max(), Math.max(300, startW - (moveEvent.clientX - startX)));
-      setRightPanelWidth(latest);
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "hidden") finish();
-    };
-    let finished = false;
-    const finish = () => {
-      if (finished) return;
-      finished = true;
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", finish);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-      window.removeEventListener("blur", finish);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      setIsResizing(false);
-      try { localStorage.setItem("pi-right-panel-w", String(Math.round(latest))); } catch {}
-    };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", finish);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    window.addEventListener("blur", finish);
-  }, []);
+    beginResize(-1, () => startW, setRightPanelWidth, "pi-right-panel-w", max, "--right-panel-w", 300)(event);
+  }, [beginResize]);
 
   const chatHidden = chatCollapsed && rightPanelOpen && !isMobile;
   // Same @mention format as the chat input's @ autocomplete, so the agent's
@@ -1226,27 +1228,17 @@ export function AppShell() {
   const activityCount = runningTerminals.length + activeCodexChats.length;
   const showWorkspaceTabBar = workspaceTabs.length > 1;
   const activityControl = <div ref={activityPanelRef} style={{ position: "relative", alignSelf: "stretch", flexShrink: 0 }}>
-    <button type="button" aria-label="Workspace activity" title="Workspace activity" aria-expanded={activityPanelOpen} onClick={() => setActivityPanelOpen((open) => !open)} style={{ display: "flex", alignItems: "center", gap: 5, height: "100%", padding: "0 10px", border: 0, borderLeft: "1px solid var(--border)", background: activityPanelOpen ? "var(--bg-selected)" : "transparent", color: approvalCount > 0 ? "#f59e0b" : activityCount > 0 ? "var(--accent)" : "var(--text-dim)", cursor: "pointer", font: "10.5px/1 inherit" }}>
-      <Activity size={15} /><span>{activityCount}</span>{approvalCount > 0 && <span title={`${approvalCount} approval pending`} style={{ width: 6, height: 6, borderRadius: "50%", background: "#f59e0b" }} />}
+    <button type="button" aria-label="Workspace activity" title="Workspace activity" aria-expanded={activityPanelOpen} onClick={() => setActivityPanelOpen((open) => !open)} style={{ display: "flex", alignItems: "center", gap: 5, height: "100%", padding: "0 10px", border: 0, borderLeft: "1px solid var(--border)", background: activityPanelOpen ? "var(--bg-selected)" : "transparent", color: approvalCount > 0 ? getProductStatus("approval").color : activityCount > 0 ? "var(--accent)" : "var(--text-dim)", cursor: "pointer", font: "10.5px/1 inherit" }}>
+      <Activity size={15} /><span>{activityCount}</span>{approvalCount > 0 && <ProductStatusDot status="approval" size={6} title={`${approvalCount} approval pending`} />}
     </button>
     {activityPanelOpen && <div role="dialog" aria-label="Workspace activity" style={{ position: "absolute", zIndex: 500, top: 40, right: 4, width: "min(330px, calc(100vw - 16px))", maxHeight: "min(480px, calc(100dvh - 100px))", overflowY: "auto", padding: 7, border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", boxShadow: "0 16px 44px rgb(0 0 0 / 38%)" }}>
       <div style={{ padding: "5px 7px 7px", color: "var(--text-dim)", fontSize: 10 }}>Workspace activity · {activityCount} active</div>
       {activityCount === 0 && <div style={{ padding: "14px 10px", color: "var(--text-dim)", fontSize: 11, textAlign: "center" }}>No tasks or agents are running</div>}
-      {[...runningTasks, ...runningAgents, ...runningShells].map((terminal) => <button key={terminal.id} type="button" onClick={() => { handleTerminalCreated(terminal, terminal.title); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: "#22c55e", flexShrink: 0 }} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{terminal.title || `${terminal.provider} terminal`}</span><small style={{ color: "var(--text-dim)" }}>{terminal.provider}</small></button>)}
-      {activeCodexChats.map((tab) => <button key={tab.id} type="button" onClick={() => { setActiveWorkspaceTabId(tab.id); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><span style={{ width: 7, height: 7, borderRadius: "50%", background: tab.status === "approval" ? "#f59e0b" : "var(--accent)", flexShrink: 0 }} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tab.label}</span><small style={{ color: tab.status === "approval" ? "#f59e0b" : "var(--text-dim)" }}>{tab.status}</small></button>)}
+      {[...runningTasks, ...runningAgents, ...runningShells].map((terminal) => <button key={terminal.id} type="button" onClick={() => { handleTerminalCreated(terminal, terminal.title); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><ProductStatusDot status="running" size={7} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{terminal.title || `${terminal.provider} terminal`}</span><small style={{ color: "var(--text-dim)" }}>{terminal.provider}</small></button>)}
+      {activeCodexChats.map((tab) => <button key={tab.id} type="button" onClick={() => { setActiveWorkspaceTabId(tab.id); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><ProductStatusDot status={tab.status === "approval" ? "approval" : "running"} size={7} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tab.label}</span><small style={{ color: tab.status === "approval" ? getProductStatus("approval").color : "var(--text-dim)" }}>{tab.status}</small></button>)}
     </div>}
   </div>;
-  const topRightControls = <div style={{ display: "flex", alignSelf: "stretch", flexShrink: 0, marginLeft: "auto" }}>
-    <button
-      type="button"
-      aria-label="Mobile access"
-      title="Mobile access"
-      aria-pressed={mobileAccessOpen}
-      onClick={() => setMobileAccessOpen(true)}
-      style={{ display: "grid", placeItems: "center", width: 36, height: "100%", padding: 0, border: 0, borderLeft: "1px solid var(--border)", background: mobileAccessOpen ? "var(--bg-selected)" : "transparent", color: mobileAccessOpen ? "var(--accent)" : "var(--text-muted)", cursor: "pointer" }}
-    >
-      <QrCode size={15} />
-    </button>
+  const topRightControls = <div style={{ display: "flex", alignSelf: "stretch", flexShrink: 0, marginLeft: "auto", marginRight: rightPanelOpen ? 0 : 36 }}>
     {activityControl}
   </div>;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
@@ -1294,69 +1286,8 @@ export function AppShell() {
         explorerRevealKey={isMobile ? mobileExplorerRevealKey : undefined}
         explorerRevealRequest={explorerRevealRequest}
         cwdResetKey={sidebarCwdResetKey}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
-      <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
-        {([
-          {
-            label: "Models",
-            onClick: () => setModelsConfigOpen(true),
-            disabled: false,
-            icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" />
-                <line x1="9" y1="1" x2="9" y2="4" /><line x1="15" y1="1" x2="15" y2="4" />
-                <line x1="9" y1="20" x2="9" y2="23" /><line x1="15" y1="20" x2="15" y2="23" />
-                <line x1="20" y1="9" x2="23" y2="9" /><line x1="20" y1="14" x2="23" y2="14" />
-                <line x1="1" y1="9" x2="4" y2="9" /><line x1="1" y1="14" x2="4" y2="14" />
-              </svg>
-            ),
-          },
-          {
-            label: "Skills",
-            onClick: () => setSkillsConfigOpen(true),
-            disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd,
-            icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                <path d="M2 17l10 5 10-5" />
-                <path d="M2 12l10 5 10-5" />
-              </svg>
-            ),
-          },
-          {
-            label: "Plugins",
-            onClick: () => setPluginsConfigOpen(true),
-            disabled: !activeCwd && !selectedSession?.cwd && !newSessionCwd,
-            icon: (
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M9 7V2" />
-                <path d="M15 7V2" />
-                <path d="M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0Z" />
-                <path d="M12 19v3" />
-              </svg>
-            ),
-          },
-        ] as { label: string; onClick: () => void; disabled: boolean; icon: React.ReactNode }[]).map(({ label, onClick, disabled, icon }) => (
-          <button
-            key={label}
-            onClick={onClick}
-            disabled={disabled}
-            title={label}
-            style={{
-              flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
-              height: 32, padding: 0, background: "none", border: "none",
-              borderRadius: 9, color: "var(--text-muted)", cursor: disabled ? "default" : "pointer",
-              fontSize: 12, opacity: disabled ? 0.35 : 1,
-              transition: "background 0.12s, color 0.12s",
-            }}
-            onMouseEnter={(e) => { if (!disabled) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
-            onMouseLeave={(e) => { e.currentTarget.style.background = "none"; e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {icon}
-            {label}
-          </button>
-        ))}
-      </div>
     </>
   );
 
@@ -1434,6 +1365,7 @@ export function AppShell() {
       }
     `}</style>
     <div
+      ref={layoutRootRef}
       className={isResizing ? "layout-resizing" : undefined}
       style={{
         display: "flex",
@@ -1469,6 +1401,7 @@ export function AppShell() {
         onReorder={handleReorderProjectWorkspaces}
         onRename={handleRenameProjectWorkspace}
         onTogglePinned={handleTogglePinnedProjectWorkspace}
+        onOpenSettings={() => setSettingsOpen(true)}
         onOpenTerminal={(workspace) => {
           void activateProjectWorkspace(workspace);
           setNewTerminalProvider("shell");
@@ -1548,37 +1481,6 @@ export function AppShell() {
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
             )}
           </button>}
-          <button
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              toggleTheme({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-            }}
-            title={isDark ? "Switch to light mode" : "Switch to dark mode"}
-            aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-            aria-pressed={isDark}
-            style={{
-              display: "flex", alignItems: "center", justifyContent: "center",
-              width: 36, height: 36, padding: 0,
-              background: "none", border: "none", borderRight: "1px solid var(--border)",
-              color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, transition: "color 0.12s",
-            }}
-            onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-            onMouseLeave={(e) => { e.currentTarget.style.color = "var(--text-muted)"; }}
-          >
-            {isDark ? (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="5" />
-                <line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" />
-                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-                <line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" />
-                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-              </svg>
-            ) : (
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-              </svg>
-            )}
-          </button>
           {showChat && (
             <div style={{ display: "flex", alignItems: "stretch", height: "100%" }}>
               <button
@@ -2101,7 +2003,7 @@ export function AppShell() {
                   <div style={{ fontSize: 18, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>Get Started</div>
                   <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.8 }}>
                     <span style={{ color: "var(--text-dim)", marginRight: 6 }}>1.</span>Select a project directory from the sidebar<br />
-                    <span style={{ color: "var(--text-dim)", marginRight: 6 }}>2.</span>Add models via the <strong style={{ color: "var(--text)" }}>Models</strong> button at the bottom
+                    <span style={{ color: "var(--text-dim)", marginRight: 6 }}>2.</span>Add models via <strong style={{ color: "var(--text)" }}>Settings → Models</strong>
                   </div>
                 </div>
               </div>
@@ -2305,19 +2207,15 @@ export function AppShell() {
       />
     )}
     {pendingTerminalClose && <TerminalCloseDialog terminal={pendingTerminalClose.terminal} busy={terminalCloseBusy} error={terminalCloseError} onCancel={() => { if (!terminalCloseBusy) setPendingTerminalClose(null); }} onKeepRunning={() => void closeTerminalTab(false)} onStop={() => void closeTerminalTab(true)} />}
-    {modelsConfigOpen && <ModelsConfig onClose={() => { setModelsConfigOpen(false); setModelsRefreshKey((k) => k + 1); }} />}
-    {skillsConfigOpen && (activeCwd ?? selectedSession?.cwd ?? newSessionCwd) && (
-      <SkillsConfig cwd={(activeCwd ?? selectedSession?.cwd ?? newSessionCwd)!} onClose={() => setSkillsConfigOpen(false)} />
-    )}
-    {pluginsConfigOpen && (activeCwd ?? selectedSession?.cwd ?? newSessionCwd) && (
-      <PluginsConfig
-        cwd={(activeCwd ?? selectedSession?.cwd ?? newSessionCwd)!}
-        sessionId={selectedSession?.id ?? null}
-        onClose={() => setPluginsConfigOpen(false)}
-        onReloaded={() => setSessionKey((k) => k + 1)}
-      />
-    )}
-    <MobileAccessDialog open={mobileAccessOpen} onClose={() => setMobileAccessOpen(false)} />
+    {settingsOpen && <SettingsPanel
+      isDark={isDark}
+      cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd}
+      sessionId={selectedSession?.id ?? null}
+      onClose={() => { setSettingsOpen(false); setModelsRefreshKey((key) => key + 1); }}
+      onToggleTheme={() => toggleTheme()}
+      onModelsChanged={() => setModelsRefreshKey((key) => key + 1)}
+      onPluginsReloaded={() => setSessionKey((key) => key + 1)}
+    />}
     </>
   );
 }

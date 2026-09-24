@@ -1,15 +1,20 @@
 import type { TerminalSession } from "./terminal";
 
+// Set by server/pi-web-server.js; kept off process.env so agent shells cannot read it.
+function internalToken(): string | undefined {
+  return (globalThis as { __piWebInternalTerminalToken?: string }).__piWebInternalTerminalToken;
+}
+
 function bridgeUrl(path: string): string {
   const port = process.env.PI_WEB_INTERNAL_PORT;
-  if (!port || !process.env.PI_WEB_INTERNAL_TERMINAL_TOKEN) throw new Error("TianForge pi terminal bridge is unavailable outside the TianForge pi server");
+  if (!port || !internalToken()) throw new Error("TianForge pi terminal bridge is unavailable outside the TianForge pi server");
   return `http://127.0.0.1:${port}${path}`;
 }
 
 async function request(path: string, init: RequestInit = {}) {
   const response = await fetch(bridgeUrl(path), {
     ...init,
-    headers: { "X-Pi-Web-Internal": process.env.PI_WEB_INTERNAL_TERMINAL_TOKEN!, ...(init.headers ?? {}) },
+    headers: { "X-Pi-Web-Internal": internalToken()!, ...(init.headers ?? {}) },
     cache: "no-store",
   });
   if (!response.ok) {

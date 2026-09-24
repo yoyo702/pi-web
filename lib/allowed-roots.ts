@@ -17,10 +17,25 @@ const LOCK_TIMEOUT_MS = 2_000;
 const LOCK_STALE_MS = 10_000;
 const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
 
+// This is read on every file/Git/worktree authorization; re-parse only when
+// the grants file changes.
+let persistedRootsCache: { signature: string; roots: string[] } | null = null;
+
 function readPersistedAllowedRoots(): string[] {
+  let signature: string;
+  try {
+    const stat = fs.statSync(allowedRootsFile);
+    signature = `${stat.mtimeMs}:${stat.size}:${stat.ino}`;
+  } catch {
+    persistedRootsCache = null;
+    return [];
+  }
+  if (persistedRootsCache?.signature === signature) return persistedRootsCache.roots;
   try {
     const parsed = JSON.parse(fs.readFileSync(allowedRootsFile, "utf8")) as unknown;
-    return Array.isArray(parsed) ? parsed.filter((root): root is string => typeof root === "string" && path.isAbsolute(root)) : [];
+    const roots = Array.isArray(parsed) ? parsed.filter((root): root is string => typeof root === "string" && path.isAbsolute(root)) : [];
+    persistedRootsCache = { signature, roots };
+    return roots;
   } catch {
     return [];
   }
@@ -54,6 +69,9 @@ function acquireAllowedRootsLock(): () => void {
 }
 
 function persistAllowedRoot(root: string): void {
+  // /api/cwd/validate runs on workspace-status polls; skip the cross-process
+  // lock (which can busy-wait the main thread) when the grant already exists.
+  if (readPersistedAllowedRoots().includes(root)) return;
   const directory = path.dirname(allowedRootsFile);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const releaseLock = acquireAllowedRootsLock();

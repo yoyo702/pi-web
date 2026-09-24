@@ -4,6 +4,7 @@ import { createAgentSessionServices, getAgentDir, type SettingsManager } from "@
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { loadModelsWithCache, withModelRuntimeError, type ModelsData } from "@/lib/models-cache";
 import { getAllowedFileRoots, isExistingFilePathAllowed } from "@/lib/file-access";
+import { normalizeModelCompat } from "@/lib/model-compat";
 
 export const dynamic = "force-dynamic";
 
@@ -48,7 +49,7 @@ async function loadModels(cwd: string): Promise<ModelsData> {
 
   const agentDir = getAgentDir();
   const services = await createAgentSessionServices({ cwd, agentDir });
-  const available = await services.modelRuntime.getAvailable();
+  const available = (await services.modelRuntime.getAvailable()).map((model) => normalizeModelCompat(model));
   const modelError = services.modelRuntime.getError();
   const settings: SettingsManager = services.settingsManager;
   const enabledModels = settings.getEnabledModels();

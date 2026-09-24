@@ -817,6 +817,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       es.onmessage = (e) => {
         try {
           const event = JSON.parse(e.data) as AgentEvent;
+          if (event.type === "session_closed") {
+            // The server released this idle session. Close instead of letting
+            // EventSource auto-reconnect (which would restart it immediately);
+            // the next prompt reconnects via ensureEventsConnected.
+            es.close();
+            if (eventSourceRef.current === es) eventSourceRef.current = null;
+            settle("closed");
+            return;
+          }
           if (event.type === "connected") settle("connected");
           handleAgentEventRef.current?.(event);
         } catch {

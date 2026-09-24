@@ -70,13 +70,27 @@ function resolveExecutable(executable, provider) {
   throw new TerminalError("cli_missing", `${provider} CLI was not found on PATH`);
 }
 
-function assertSkipPermissionsSupported(provider, executable) {
-  const flag = provider === "claude" ? "--dangerously-skip-permissions" : "--dangerously-bypass-approvals-and-sandbox";
+// `--help` probing blocks the server's main thread (up to 5 s), so remember
+// the answer per executable until the binary itself changes (e.g. upgrade).
+const helpTextCache = global.__piWebCliHelpCache || new Map();
+global.__piWebCliHelpCache = helpTextCache;
+function cliHelpText(provider, executable) {
+  let signature = null;
+  try { const stat = fs.statSync(executable); signature = `${stat.mtimeMs}:${stat.size}`; } catch { /* resolved via PATH or missing */ }
+  const cached = helpTextCache.get(executable);
+  if (signature && cached?.signature === signature) return cached.help;
   const result = spawnSync(executable, ["--help"], { encoding: "utf8", timeout: 5000, windowsHide: true });
   if (result.error && result.error.code === "ENOENT") {
     throw new TerminalError("cli_missing", `${provider} CLI was not found on PATH`);
   }
   const help = `${result.stdout || ""}\n${result.stderr || ""}`;
+  if (signature && !result.error) helpTextCache.set(executable, { signature, help });
+  return help;
+}
+
+function assertSkipPermissionsSupported(provider, executable) {
+  const flag = provider === "claude" ? "--dangerously-skip-permissions" : "--dangerously-bypass-approvals-and-sandbox";
+  const help = cliHelpText(provider, executable);
   if (!help.includes(flag)) {
     throw new TerminalError("permission_mode_unsupported", `${provider} does not support ${flag}; update the CLI or use interactive permission confirmation`);
   }
@@ -178,6 +192,9 @@ function buildLaunchArgs(provider, executable, permissionMode, launchMode, noAlt
   }
   if (typeof initialPrompt === "string" && initialPrompt.trim()) {
     if (initialPrompt.length > 8_000) throw new TerminalError("invalid_prompt", "Initial prompt must be at most 8000 characters");
+    // A prompt starting with "-" would otherwise be parsed as a Codex option
+    // (e.g. `-c key=value` config overrides).
+    if (initialPrompt.trim().startsWith("-")) args.push("--");
     args.push(initialPrompt.trim());
   }
   return args;

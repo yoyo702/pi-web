@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const manager = require("./terminal-manager.cjs");
 const codexAppServer = require("./codex-app-server.cjs");
+const { readJsonBody } = require("../http-body.cjs");
 
 const state = global.__piWebTerminalAuthorization || { roots: new Set() };
 global.__piWebTerminalAuthorization = state;
@@ -21,7 +22,7 @@ function errorResponse(res, error) {
   json(res, status, { error: error?.message || "terminal request failed", code });
 }
 function readJson(req) {
-  return new Promise((resolve, reject) => { let body = ""; req.on("data", (chunk) => { body += chunk; if (body.length > 65536) reject(new Error("request too large")); }); req.on("end", () => { try { resolve(JSON.parse(body)); } catch { reject(new Error("invalid request body")); } }); req.on("error", reject); });
+  return readJsonBody(req, 65536);
 }
 function addRoot(root) { state.roots.add(path.resolve(root)); }
 function registerCwd(cwd) {
@@ -32,7 +33,51 @@ function registerCwd(cwd) {
   addRoot(canonical);
   return canonical;
 }
-function sessionRoots() {
+// Session files are append-only and can be tens of MB, and this runs on the
+// server's main thread. Read only each file's header line, once per path.
+const HEADER_READ_BYTES = 64 * 1024;
+const headerCwdCache = global.__piWebSessionHeaderCwdCache || new Map();
+global.__piWebSessionHeaderCwdCache = headerCwdCache;
+function readSessionHeaderCwd(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const buffer = Buffer.alloc(HEADER_READ_BYTES);
+    const text = buffer.toString("utf8", 0, fs.readSync(fd, buffer, 0, buffer.length, 0));
+    const newline = text.indexOf("\n");
+    const header = JSON.parse(newline === -1 ? text : text.slice(0, newline));
+    return header?.type === "session" && typeof header.cwd === "string" ? path.resolve(header.cwd) : null;
+  } catch {
+    return null; // malformed historical session
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+function sessionHeaderRoots() {
+  const roots = new Set();
+  const seen = new Set();
+  const sessionBase = path.join(os.homedir(), ".pi", "agent", "sessions");
+  try {
+    for (const dir of fs.readdirSync(sessionBase)) {
+      const directory = path.join(sessionBase, dir);
+      for (const file of fs.readdirSync(directory)) {
+        if (!file.endsWith(".jsonl")) continue;
+        const filePath = path.join(directory, file);
+        seen.add(filePath);
+        let cwd = headerCwdCache.get(filePath);
+        if (!cwd) {
+          // Failures are not cached: a new session file may still be mid-write.
+          cwd = readSessionHeaderCwd(filePath);
+          if (cwd) headerCwdCache.set(filePath, cwd);
+        }
+        if (cwd) roots.add(cwd);
+      }
+    }
+  } catch { /* no sessions yet */ }
+  for (const filePath of headerCwdCache.keys()) if (!seen.has(filePath)) headerCwdCache.delete(filePath);
+  return roots;
+}
+function grantedRoots() {
   const roots = new Set(state.roots);
   // /api/cwd/validate is handled by the Next route, which persists grants for
   // Files, Git, Worktrees, and terminals in one shared file. Reload it for
@@ -44,33 +89,29 @@ function sessionRoots() {
       for (const root of persisted) if (typeof root === "string" && path.isAbsolute(root)) roots.add(root);
     }
   } catch { /* no explicit workspace grants yet */ }
-  const sessionBase = path.join(os.homedir(), ".pi", "agent", "sessions");
-  try {
-    for (const dir of fs.readdirSync(sessionBase)) {
-      const directory = path.join(sessionBase, dir);
-      for (const file of fs.readdirSync(directory)) {
-        if (!file.endsWith(".jsonl")) continue;
-        try {
-          const first = fs.readFileSync(path.join(directory, file), "utf8").split("\n", 1)[0];
-          const header = JSON.parse(first);
-          if (typeof header.cwd === "string") roots.add(path.resolve(header.cwd));
-        } catch { /* malformed historical session */ }
-      }
-    }
-  } catch { /* no sessions yet */ }
   try {
     for (const name of fs.readdirSync(os.homedir())) if (/^pi-cwd-\d{8}$/.test(name)) roots.add(path.join(os.homedir(), name));
   } catch { /* ignore */ }
   return roots;
 }
+function isWithinAnyRoot(target, roots) {
+  for (const root of roots) {
+    try {
+      const relative = path.relative(fs.realpathSync(root), target);
+      if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== "..")) return true;
+    } catch { /* root no longer exists */ }
+  }
+  return false;
+}
 function authorizedCwd(cwd) {
   if (typeof cwd !== "string" || !cwd) throw Object.assign(new Error("cwd is required"), { code: "invalid_cwd" });
   let target;
   try { target = fs.realpathSync(path.resolve(cwd)); } catch { throw Object.assign(new Error("terminal working directory does not exist"), { code: "invalid_cwd" }); }
-  const allowed = [...sessionRoots()].some((root) => {
-    try { const canonicalRoot = fs.realpathSync(root); const relative = path.relative(canonicalRoot, target); return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".."); } catch { return false; }
-  });
-  if (!allowed) throw Object.assign(new Error("terminal working directory is not an authorized workspace"), { code: "forbidden_cwd" });
+  // Explicit grants cover almost every request; scan session headers only
+  // when they miss.
+  if (!isWithinAnyRoot(target, grantedRoots()) && !isWithinAnyRoot(target, sessionHeaderRoots())) {
+    throw Object.assign(new Error("terminal working directory is not an authorized workspace"), { code: "forbidden_cwd" });
+  }
   return target;
 }
 async function claimCodexSession(sourceSessionId) { return manager.interruptAndStopTerminalsForSession(sourceSessionId); }

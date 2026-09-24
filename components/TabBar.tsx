@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { getFileIcon } from "./FileIcons";
 import { ProductBrand } from "./ProductBrand";
+import { ProductStatusDot } from "./ProductStatus";
 import type { TerminalLaunchMode, TerminalPermissionMode, TerminalProvider } from "@/lib/agents/terminal";
 
 export interface Tab {
@@ -256,7 +257,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
               >
                 {tab.kind === "pi" ? <ProductBrand size={12} mutedPi={false} style={{ fontWeight: isActive ? 650 : 550 }} /> : tab.label}
               </span>
-              {tab.status && <span title={tab.status} aria-label={tab.status} style={{ width: 6, height: 6, borderRadius: "50%", flexShrink: 0, background: tab.status === "approval" ? "#f59e0b" : tab.status === "running" ? "#22c55e" : tab.status === "connecting" ? "#3b82f6" : tab.status === "offline" ? "#f59e0b" : tab.status === "failed" ? "#ef4444" : tab.status === "ended" ? "var(--text-dim)" : "#3b82f6" }} />}
+              {tab.status && <ProductStatusDot status={tab.status} size={6} />}
               {tab.locked && (
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-label="Locked" style={{ flexShrink: 0, color: "var(--text-dim)" }}>
                   <rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V7a4 4 0 0 1 8 0v4" />

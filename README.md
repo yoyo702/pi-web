@@ -48,6 +48,20 @@ PI_WEB_PASSWORD='use-a-strong-password' pi-web --hostname 0.0.0.0
 
 A signed-in browser has the same local privileges as the TianForge pi server user. Do not expose it directly to the internet; use HTTPS and a trusted network.
 
+Sessions are signed with a key derived from the password, so changing `PI_WEB_PASSWORD` signs out every browser. Upgrading from 0.8.1 or earlier also signs everyone out once.
+
+### Allowed hosts
+
+To block DNS-rebinding attacks, TianForge pi only answers requests whose `Host` header belongs to this machine: `localhost`, loopback addresses, the machine's hostname and `<hostname>.local`, and its current LAN/Tailscale IP addresses. Tailscale Serve names (`*.ts.net`) are allowed by default.
+
+If you reach TianForge pi through any other name — a custom domain, a reverse proxy, or a DNS alias — list it in `PI_WEB_ALLOWED_HOSTS` (comma-separated; a `*.` prefix matches any subdomain). Setting the variable replaces the `*.ts.net` default, so include it again if you still use Tailscale Serve:
+
+```bash
+PI_WEB_ALLOWED_HOSTS='pi.example.com,*.ts.net' pi-web --hostname 0.0.0.0
+```
+
+A request with an unrecognized host is rejected with `421 unrecognized Host header; set PI_WEB_ALLOWED_HOSTS to allow it`. If the page does not load through a new address, check this first.
+
 ## HTTP Proxy
 
 TianForge pi reads the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables for server-side model and API requests.

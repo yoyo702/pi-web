@@ -4,6 +4,7 @@ import { useSyncExternalStore } from "react";
 
 // Mobile breakpoint shared with app/globals.css (max-width: 640px).
 const MOBILE_QUERY = "(max-width: 640px)";
+const HIDE_DEVTOOLS_QUERY = "(max-width: 768px), (display-mode: standalone), (hover: none) and (pointer: coarse)";
 
 function subscribe(cb: () => void): () => void {
   if (typeof window === "undefined" || !window.matchMedia) return () => {};
@@ -28,4 +29,25 @@ function getServerSnapshot(): boolean {
  */
 export function useIsMobile(): boolean {
   return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+}
+
+function subscribeDevToolsVisibility(cb: () => void): () => void {
+  if (typeof window === "undefined" || !window.matchMedia) return () => {};
+  const mql = window.matchMedia(HIDE_DEVTOOLS_QUERY);
+  mql.addEventListener("change", cb);
+  return () => mql.removeEventListener("change", cb);
+}
+
+function getDevToolsVisibilitySnapshot(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  const iosStandalone = Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone);
+  return iosStandalone || window.matchMedia(HIDE_DEVTOOLS_QUERY).matches;
+}
+
+/**
+ * Development overlays are unsuitable for phone-sized, installed-PWA, and
+ * coarse-pointer layouts even when a landscape viewport exceeds 640px.
+ */
+export function useHideDevelopmentTools(): boolean {
+  return useSyncExternalStore(subscribeDevToolsVisibility, getDevToolsVisibilitySnapshot, getServerSnapshot);
 }

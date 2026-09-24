@@ -2,12 +2,13 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo, type CSSProperties, type MouseEvent } from "react";
 import {
-  Prism as SyntaxHighlighter,
+  PrismAsyncLight as SyntaxHighlighter,
   createElement as renderSyntaxNode,
   type SyntaxHighlighterProps,
 } from "react-syntax-highlighter";
-import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
-import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
+import vs from "react-syntax-highlighter/dist/esm/styles/prism/vs";
+import vscDarkPlus from "react-syntax-highlighter/dist/esm/styles/prism/vsc-dark-plus";
+import { prismLanguage } from "@/lib/code-language";
 import ReactMarkdown from "react-markdown";
 import { useTheme } from "@/hooks/useTheme";
 import {
@@ -900,14 +901,56 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     [data],
   );
 
+  // Tokenizing a large file is the most expensive part of this view. Reusing
+  // the element lets unrelated re-renders (toolbar state, line selection)
+  // skip re-highlighting entirely.
+  const sourceContent = data?.content;
+  const sourceLanguage = data?.language;
+  const sourceView = useMemo(() => sourceContent === undefined ? null : (
+    <SyntaxHighlighter
+      className={wrapLines ? "file-source-view is-wrapped" : "file-source-view"}
+      language={prismLanguage(sourceLanguage)}
+      style={isDark ? vscDarkPlus : vs}
+      showLineNumbers
+      lineNumberStyle={FILE_LINE_NUMBER_STYLE}
+      customStyle={{
+        margin: 0,
+        padding: 0,
+        border: 0,
+        background: "var(--bg)",
+        ...FILE_CODE_STYLE,
+        width: wrapLines ? "100%" : "max-content",
+        minWidth: "100%",
+        minHeight: "100%",
+        overflow: "visible",
+      }}
+      codeTagProps={{
+        style: {
+          fontFamily: "var(--font-mono)",
+          overflowWrap: wrapLines ? "anywhere" : "normal",
+        },
+      }}
+      renderer={(rendererProps) => (
+        <SourceCodeRenderer {...rendererProps} wrapLines={wrapLines} />
+      )}
+      wrapLongLines={wrapLines}
+    >
+      {sourceContent}
+    </SyntaxHighlighter>
+  ), [sourceContent, sourceLanguage, isDark, wrapLines]);
+
   useEffect(() => {
     const updateSelectedLineRange = () => {
       const root = contentRef.current;
-      setSelectedLineRange(
-        onMentionLines && displayMode === "source" && root
-          ? getSelectedSourceLineRange(root, window.getSelection())
-          : null,
-      );
+      const next = onMentionLines && displayMode === "source" && root
+        ? getSelectedSourceLineRange(root, window.getSelection())
+        : null;
+      // selectionchange fires continuously while dragging. Keep the previous
+      // object when the line range is unchanged so the viewer does not
+      // re-render (and re-highlight the whole file) on every event.
+      setSelectedLineRange((current) => (
+        current?.startLine === next?.startLine && current?.endLine === next?.endLine ? current : next
+      ));
     };
 
     updateSelectedLineRange();
@@ -1154,40 +1197,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
               {markdownPreview}
             </ReactMarkdown>
           </div>
-        ) : (
-          <SyntaxHighlighter
-            className={wrapLines ? "file-source-view is-wrapped" : "file-source-view"}
-            language={data.language === "text" ? "plaintext" : data.language}
-            style={isDark ? vscDarkPlus : vs}
-            showLineNumbers
-            lineNumberStyle={{
-              ...FILE_LINE_NUMBER_STYLE,
-            }}
-            customStyle={{
-              margin: 0,
-              padding: 0,
-              border: 0,
-              background: "var(--bg)",
-              ...FILE_CODE_STYLE,
-              width: wrapLines ? "100%" : "max-content",
-              minWidth: "100%",
-              minHeight: "100%",
-              overflow: "visible",
-            }}
-            codeTagProps={{
-              style: {
-                fontFamily: "var(--font-mono)",
-                overflowWrap: wrapLines ? "anywhere" : "normal",
-              },
-            }}
-            renderer={(rendererProps) => (
-              <SourceCodeRenderer {...rendererProps} wrapLines={wrapLines} />
-            )}
-            wrapLongLines={wrapLines}
-          >
-            {data.content}
-          </SyntaxHighlighter>
-        )}
+        ) : sourceView}
       </div>
     </div>
   );

@@ -42,6 +42,20 @@ PI_WEB_NO_OPEN=1 pi-web         # バックグラウンドサービスとして�
 
 `PI_WEB_PASSWORD` で TianForge pi のパスワード認証を有効にできます。loopback 以外へバインドする場合は必須です。インターネットへ直接公開せず、HTTPS と信頼できるネットワークを使用してください。
 
+ログインセッションはパスワードから派生した鍵で署名されるため、`PI_WEB_PASSWORD` を変更するとすべてのブラウザがログアウトされます。0.8.1 以前からアップグレードした場合も、一度だけ全デバイスで再ログインが必要です。
+
+### 許可するホスト
+
+DNS リバインディング攻撃を防ぐため、TianForge pi は `Host` ヘッダーがこのマシンに属するリクエストにのみ応答します：`localhost`、ループバックアドレス、マシンのホスト名と `<ホスト名>.local`、現在の LAN / Tailscale IP アドレス。Tailscale Serve の名前（`*.ts.net`）はデフォルトで許可されます。
+
+独自ドメイン、リバースプロキシ、DNS エイリアスなど別の名前でアクセスする場合は、`PI_WEB_ALLOWED_HOSTS` に追加してください（カンマ区切り、`*.` で始まるとサブドメインに一致）。この変数を設定すると既定の `*.ts.net` は置き換えられるため、Tailscale Serve を使う場合は併記してください：
+
+```bash
+PI_WEB_ALLOWED_HOSTS='pi.example.com,*.ts.net' pi-web --hostname 0.0.0.0
+```
+
+許可されていないホストへのリクエストは `421 unrecognized Host header; set PI_WEB_ALLOWED_HOSTS to allow it` で拒否されます。新しいアドレスでページが開かない場合は、まずこれを確認してください。
+
 ## HTTP プロキシ
 
 TianForge pi は、サーバー側のモデルリクエストと API リクエストに標準の `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 環境変数を使用します。

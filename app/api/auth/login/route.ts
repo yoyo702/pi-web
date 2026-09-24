@@ -4,7 +4,6 @@ export async function POST(request: Request) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const auth = require("@/server/auth.cjs") as {
     configured(): boolean;
-    clientKey(headers: Headers): string;
     isRateLimited(key: string): boolean;
     recordFailure(key: string): void;
     clearFailures(key: string): void;
@@ -17,7 +16,9 @@ export async function POST(request: Request) {
       headers: { "Cache-Control": "no-store" },
     });
   }
-  const key = auth.clientKey(request.headers);
+  // The custom server handles /api/auth/login before Next; this fallback has
+  // no socket access, so all attempts share one rate-limit bucket.
+  const key = "local";
   if (auth.isRateLimited(key)) {
     return NextResponse.json({ error: "too many failed login attempts; try again later" }, { status: 429 });
   }

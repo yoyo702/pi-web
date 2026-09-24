@@ -11,7 +11,7 @@ interface PairingInfo {
   expiresAt: number;
 }
 
-export function MobileAccessDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function MobileAccessDialog({ open = true, onClose, embedded = false }: { open?: boolean; onClose: () => void; embedded?: boolean }) {
   const [info, setInfo] = useState<AccessInfo | null>(null);
   const [pairing, setPairing] = useState<PairingInfo | null>(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
@@ -58,18 +58,18 @@ export function MobileAccessDialog({ open, onClose }: { open: boolean; onClose: 
   }, []);
 
   useEffect(() => {
-    if (!open) return;
+    if (!embedded && !open) return;
     void load();
-  }, [load, open]);
+  }, [embedded, load, open]);
 
   useEffect(() => {
-    if (!open) return;
+    if (embedded || !open) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [onClose, open]);
+  }, [embedded, onClose, open]);
 
   useEffect(() => {
     if (!copied) return;
@@ -88,7 +88,7 @@ export function MobileAccessDialog({ open, onClose }: { open: boolean; onClose: 
     return url.toString();
   }, [pairing, selected]);
 
-  if (!open) return null;
+  if (!embedded && !open) return null;
 
   const copyUrl = async () => {
     if (!selected) return;
@@ -96,27 +96,20 @@ export function MobileAccessDialog({ open, onClose }: { open: boolean; onClose: 
     setCopied(true);
   };
 
-  return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="Mobile access"
-      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
-      style={overlayStyle}
-    >
-      <section style={dialogStyle}>
+  const content = (
+      <section style={embedded ? embeddedDialogStyle : dialogStyle}>
         <header style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 14px", borderBottom: "1px solid var(--border)" }}>
           <Wifi size={16} color="var(--accent)" />
           <div style={{ minWidth: 0, flex: 1 }}>
-            <h2 style={{ margin: 0, color: "var(--text)", fontSize: 14 }}>Mobile access</h2>
-            <p style={{ margin: "3px 0 0", color: "var(--text-dim)", fontSize: 10.5 }}>Choose an address and scan once to sign in on your phone.</p>
+            <h2 style={{ margin: 0, color: "var(--text)", fontSize: 14 }}>Remote access</h2>
+            <p style={{ margin: "3px 0 0", color: "var(--text-dim)", fontSize: 10.5 }}>Choose an address and scan once to sign in on another device.</p>
           </div>
           <button type="button" onClick={() => void load()} disabled={loading} aria-label="Refresh addresses" title="Refresh addresses" style={iconButtonStyle}>
             <RefreshCw size={14} className={loading ? "animate-spin" : undefined} />
           </button>
-          <button type="button" onClick={onClose} aria-label="Close mobile access" title="Close" style={iconButtonStyle}>
+          {!embedded && <button type="button" onClick={onClose} aria-label="Close remote access" title="Close" style={iconButtonStyle}>
             <X size={15} />
-          </button>
+          </button>}
         </header>
 
         <div style={{ padding: 14, overflowY: "auto" }}>
@@ -181,6 +174,19 @@ export function MobileAccessDialog({ open, onClose }: { open: boolean; onClose: 
           )}
         </div>
       </section>
+  );
+
+  if (embedded) return <div aria-label="Remote access settings" style={embeddedOverlayStyle}>{content}</div>;
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Remote access"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+      style={overlayStyle}
+    >
+      {content}
     </div>
   );
 }
@@ -214,6 +220,8 @@ function StatusPill({ text, positive }: { text: string; positive: boolean }) {
 
 const overlayStyle: React.CSSProperties = { position: "fixed", inset: 0, zIndex: 1400, display: "grid", placeItems: "center", padding: 14, background: "rgba(0,0,0,.52)" };
 const dialogStyle: React.CSSProperties = { width: "min(100%, 520px)", maxHeight: "min(760px, calc(100dvh - 28px))", display: "flex", flexDirection: "column", overflow: "hidden", border: "1px solid var(--border)", borderRadius: 11, background: "var(--bg-panel)", boxShadow: "0 22px 68px rgba(0,0,0,.48)" };
+const embeddedOverlayStyle: React.CSSProperties = { width: "100%", height: "100%", minHeight: 0, overflow: "hidden", background: "var(--bg-panel)" };
+const embeddedDialogStyle: React.CSSProperties = { width: "100%", height: "100%", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--bg-panel)" };
 const iconButtonStyle: React.CSSProperties = { width: 28, height: 28, display: "grid", placeItems: "center", padding: 0, border: "1px solid var(--border)", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer" };
 const primaryButtonStyle: React.CSSProperties = { minHeight: 32, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "0 11px", border: "1px solid var(--accent)", borderRadius: 6, background: "var(--accent)", color: "#fff", cursor: "pointer", font: "11px/1 inherit" };
 const secondaryButtonStyle: React.CSSProperties = { ...primaryButtonStyle, borderColor: "var(--border)", background: "var(--bg-hover)", color: "var(--text)" };

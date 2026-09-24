@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useState, useCallback, useRef, type CSSProperties, type ReactNode } from "react";
+import { memo, useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import type { TerminalProvider } from "@/lib/agents/terminal";
 import { AgentsPanel, type CodexSessionTarget } from "./agents/AgentsPanel";
 import { applyBackgroundSessionEvent, type BackgroundAgentEvent } from "@/lib/session-background-sync";
+import { getSessionDisplayTitle, resolveSessionLineage, sortSessionsByRecent } from "@/lib/session-list";
+import { getProductStatus } from "@/lib/product-status";
+import { ChevronDown, Settings } from "lucide-react";
 
 declare global {
   interface Window {
@@ -44,6 +47,7 @@ interface Props {
   explorerRevealKey?: number;
   explorerRevealRequest?: { path: string; key: number } | null;
   cwdResetKey?: number;
+  onOpenSettings?: () => void;
 }
 
 interface WorktreeEntry {
@@ -64,6 +68,7 @@ interface WorktreeState {
 }
 
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
+const SESSION_VIEW_STORAGE_KEY = "pi-web:session-view";
 const sidebarSectionHeaderStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 6, width: "100%", flex: "0 0 auto", padding: "7px 10px", border: 0, borderTop: "1px solid var(--border)", background: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, fontWeight: 600, letterSpacing: "0.05em", textTransform: "uppercase", textAlign: "left" };
 const sidebarModuleNavStyle: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 3, flex: "0 0 auto", margin: "0 8px 7px", padding: 3, border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg)" };
 
@@ -297,102 +302,36 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
   return roots;
 }
 
-const SCRAMBLE_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
-
-function useScramble(target: string, running: boolean): string {
-  const [display, setDisplay] = useState(target);
-  const frameRef = useRef<number | null>(null);
-  const iterRef = useRef(0);
+function TianForgeTitle({ onOpenSettings }: { onOpenSettings?: () => void }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!running) {
-      setDisplay(target);
-      return;
-    }
-    iterRef.current = 0;
-    const totalFrames = target.length * 4;
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => { if (!rootRef.current?.contains(event.target as Node)) setOpen(false); };
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => { document.removeEventListener("pointerdown", closeOutside); document.removeEventListener("keydown", closeOnEscape); };
+  }, [open]);
 
-    const step = () => {
-      iterRef.current += 1;
-      const progress = iterRef.current / totalFrames;
-      const resolved = Math.floor(progress * target.length);
-
-      setDisplay(
-        target
-          .split("")
-          .map((char, i) => {
-            if (char === " ") return " ";
-            if (i < resolved) return char;
-            return SCRAMBLE_CHARS[Math.floor(Math.random() * SCRAMBLE_CHARS.length)];
-          })
-          .join("")
-      );
-
-      if (iterRef.current < totalFrames) {
-        frameRef.current = requestAnimationFrame(step);
-      } else {
-        setDisplay(target);
-      }
-    };
-
-    frameRef.current = requestAnimationFrame(step);
-    return () => { if (frameRef.current) cancelAnimationFrame(frameRef.current); };
-  }, [target, running]);
-
-  return display;
-}
-
-function TianForgeTitle() {
-  const [showVersion, setShowVersion] = useState(false);
-  const [scrambling, setScrambling] = useState(false);
-  const revertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const target = showVersion ? `${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}p${process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}` : "TianForge";
-  const display = useScramble(target, scrambling);
-
-  const triggerScramble = useCallback((toVersion: boolean) => {
-    setShowVersion(toVersion);
-    setScrambling(true);
-    setTimeout(() => setScrambling(false), (toVersion ? 6 : 8) * 4 * (1000 / 60) + 100);
-  }, []);
-
-  const handleClick = useCallback(() => {
-    if (revertTimerRef.current) clearTimeout(revertTimerRef.current);
-
-    const next = !showVersion;
-    triggerScramble(next);
-
-    if (next) {
-      revertTimerRef.current = setTimeout(() => triggerScramble(false), 3000);
-    }
-  }, [showVersion, triggerScramble]);
-
-  useEffect(() => () => { if (revertTimerRef.current) clearTimeout(revertTimerRef.current); }, []);
-
-  return (
-    <button
-      onClick={handleClick}
-      aria-label={showVersion ? `TianForge pi ${display}` : "TianForge pi"}
-      title="TianForge app version · pi engine version"
-      style={{
-        display: "inline-flex", alignItems: "baseline", gap: "0.32em",
-        background: "none", border: "none", padding: 0, cursor: "default",
-        fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em",
-        color: showVersion ? "var(--accent)" : "var(--text)",
-        fontFamily: "var(--font-mono)",
-        minWidth: "6ch",
-      }}
-    >
-      <span aria-hidden="true">{display}</span>
-      {!showVersion && <span aria-hidden="true" style={{ fontSize: "0.58em", fontWeight: 650, letterSpacing: "0.02em", color: "var(--text-muted)" }}>pi</span>}
+  return <div ref={rootRef} style={{ position: "relative", minWidth: 0 }}>
+    <button type="button" onClick={() => setOpen((value) => !value)} aria-label="TianForge app menu" aria-expanded={open} title="TianForge menu" style={{ display: "inline-flex", alignItems: "center", gap: "0.32em", minWidth: 0, padding: "3px 4px 3px 0", border: 0, borderRadius: 5, background: "none", color: "var(--text)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 15, fontWeight: 700, letterSpacing: "-0.01em" }}>
+      <span>TianForge</span><span style={{ fontSize: "0.58em", fontWeight: 650, letterSpacing: "0.02em", color: "var(--text-muted)" }}>pi</span><ChevronDown size={11} style={{ marginLeft: 1, color: "var(--text-dim)", transform: open ? "rotate(180deg)" : undefined, transition: "transform .12s" }} />
     </button>
-  );
+    {open && <div role="menu" aria-label="TianForge menu" style={{ position: "absolute", zIndex: 700, top: "calc(100% + 7px)", left: 0, width: 220, padding: 5, border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", boxShadow: "0 14px 38px rgb(0 0 0 / 30%)" }}>
+      <button type="button" role="menuitem" onClick={() => { setOpen(false); onOpenSettings?.(); }} style={{ width: "100%", minHeight: 34, display: "flex", alignItems: "center", gap: 9, padding: "0 9px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", font: "12px/1.2 inherit", textAlign: "left" }}><Settings size={14} />Settings</button>
+      <div style={{ height: 1, margin: "4px", background: "var(--border)" }} />
+      <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "5px 10px", padding: "7px 9px", color: "var(--text-dim)", fontSize: 9.5 }}><span>TianForge pi</span><code>v{process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}</code><span>Pi engine</span><code>v{process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}</code></div>
+    </div>}
+  </div>;
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onExplorerPathRenamed, onExplorerPathDeleted, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onOpenGitReview, gitReviewOpen, onNewAgent, onOpenCodexSession, onOpenAgentTerminal, onAgentTerminalRemoved, onCodexSessionChanged, requestedModule, explorerRevealKey, explorerRevealRequest, cwdResetKey = 0 }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onExplorerPathRenamed, onExplorerPathDeleted, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onOpenGitReview, gitReviewOpen, onNewAgent, onOpenCodexSession, onOpenAgentTerminal, onAgentTerminalRemoved, onCodexSessionChanged, requestedModule, explorerRevealKey, explorerRevealRequest, cwdResetKey = 0, onOpenSettings }: Props) {
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const sessionPane = useVerticalPaneSize("pi-sidebar-sessions-h", 280, 100, 640);
   const [sessionsExpanded, setSessionsExpanded] = useState(true);
+  const [sessionView, setSessionView] = useState<"tree" | "recent">("tree");
   const [agentsExpanded, setAgentsExpanded] = useState(true);
   const [sidebarMode, setSidebarMode] = useState<"sessions" | "agents">("sessions");
   const [loading, setLoading] = useState(true);
@@ -405,6 +344,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const stored = window.localStorage.getItem("pi-sidebar-module");
     if (stored === "agents") setSidebarMode("agents");
     else if (stored) setSidebarMode("sessions");
+    const storedSessionView = window.localStorage.getItem(SESSION_VIEW_STORAGE_KEY);
+    if (storedSessionView === "tree" || storedSessionView === "recent") {
+      setSessionView(storedSessionView);
+    } else if (window.matchMedia("(max-width: 640px)").matches) {
+      setSessionView("recent");
+    }
+  }, []);
+  const selectSessionView = useCallback((view: "tree" | "recent") => {
+    setSessionView(view);
+    try { window.localStorage.setItem(SESSION_VIEW_STORAGE_KEY, view); } catch { /* storage may be disabled */ }
   }, []);
   const selectSidebarMode = useCallback((mode: "sessions" | "agents") => {
     setSidebarMode(mode);
@@ -449,13 +398,21 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (projectPathCopiedTimerRef.current) clearTimeout(projectPathCopiedTimerRef.current);
   }, []);
 
+  const sessionsKeyRef = useRef("");
   const loadSessions = useCallback(async (showLoading = false) => {
     try {
       if (showLoading) setLoading(true);
       const res = await fetch("/api/sessions");
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json() as { sessions: SessionInfo[]; runningSessionIds?: string[] };
-      setAllSessions(data.sessions);
+      // Periodic refreshes usually return identical data. Keeping the previous
+      // array preserves the memoized tree and list items instead of rebuilding
+      // every row.
+      const nextSessionsKey = JSON.stringify(data.sessions);
+      if (nextSessionsKey !== sessionsKeyRef.current) {
+        sessionsKeyRef.current = nextSessionsKey;
+        setAllSessions(data.sessions);
+      }
       // Treat the fetched running set as an initial fallback only. Once SSE is
       // live it owns this state, so a slow fetch can't revive a stale snapshot.
       if (!sseAuthoritativeRef.current) {
@@ -781,9 +738,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (projectPathCopiedTimerRef.current) clearTimeout(projectPathCopiedTimerRef.current);
     projectPathCopiedTimerRef.current = setTimeout(() => setProjectPathCopied(false), 1600);
   }, [displayedProjectPath]);
-  const filteredSessions = selectedProject
+  const filteredSessions = useMemo(() => selectedProject
     ? allSessions.filter((s) => (s.projectRoot ?? s.cwd) === selectedProject)
-    : allSessions;
+    : allSessions, [allSessions, selectedProject]);
   const showWorktreeSwitcher = Boolean(
     worktreeState?.isGit
     && worktreeState.isTopLevel
@@ -814,7 +771,34 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       : null);
 
   // Build parent-child tree within the filtered set
-  const sessionTree = buildSessionTree(filteredSessions);
+  const sessionTree = useMemo(() => buildSessionTree(filteredSessions), [filteredSessions]);
+  const recentSessions = useMemo(() => sortSessionsByRecent(filteredSessions), [filteredSessions]);
+  const allSessionsById = useMemo(() => new Map(allSessions.map((session) => [session.id, session])), [allSessions]);
+  // Lineage labels are derived once per session list rather than on every
+  // render, and keep stable object identities for the memoized rows.
+  const recentSessionOrigins = useMemo(() => new Map(recentSessions.map((session) => {
+    const lineage = resolveSessionLineage(session, allSessionsById);
+    const parentTitle = lineage.parent ? getSessionDisplayTitle(lineage.parent) : null;
+    const rootTitle = lineage.depth > 1 ? getSessionDisplayTitle(lineage.root) : null;
+    const projectPath = session.projectRoot ?? session.cwd;
+    const projectLabel = !selectedProject ? projectPath.split(/[\\/]/).filter(Boolean).at(-1) : null;
+    const relation = lineage.missingParent
+      ? "Forked from unavailable session"
+      : parentTitle
+        ? `Forked from ${parentTitle}${lineage.depth > 1 ? ` · ${lineage.depth} levels` : ""}`
+        : "Original session";
+    return [session.id, {
+      isFork: lineage.isFork,
+      label: `${projectLabel ? `${projectLabel} · ` : ""}${relation}`,
+      title: lineage.missingParent
+        ? `${relation} (${session.parentSessionId})`
+        : `${relation}${rootTitle ? ` · ${lineage.lineageComplete ? "original" : "earliest available"} ${rootTitle}` : ""} · ${session.messageCount} messages`,
+    }];
+  })), [recentSessions, allSessionsById, selectedProject]);
+  const handleListSessionDeleted = useCallback((id: string) => {
+    onSessionDeleted?.(id);
+    void loadSessions();
+  }, [onSessionDeleted, loadSessions]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
@@ -827,7 +811,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         }}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <TianForgeTitle />
+          <TianForgeTitle onOpenSettings={onOpenSettings} />
           <div style={{ display: "flex", gap: 6 }}>
             <button
               onClick={handleNewSession}
@@ -1290,10 +1274,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
       {/* Session list */}
       {sidebarMode === "sessions" && <>
-      <button type="button" onClick={() => setSessionsExpanded((value) => !value)} aria-expanded={sessionsExpanded} style={sidebarSectionHeaderStyle}>
-        <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ transform: sessionsExpanded ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}><polyline points="3 2 7 5 3 8" /></svg>
-        Pi Sessions
-      </button>
+      <div style={{ ...sidebarSectionHeaderStyle, padding: "4px 7px 4px 0", cursor: "default" }}>
+        <button type="button" onClick={() => setSessionsExpanded((value) => !value)} aria-expanded={sessionsExpanded} style={{ minWidth: 0, flex: 1, height: 25, display: "flex", alignItems: "center", gap: 6, padding: "0 0 0 10px", border: 0, background: "none", color: "inherit", cursor: "pointer", font: "inherit", fontWeight: "inherit", letterSpacing: "inherit", textTransform: "inherit", textAlign: "left" }}>
+          <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" style={{ transform: sessionsExpanded ? "rotate(90deg)" : "none", transition: "transform 0.15s", flexShrink: 0 }}><polyline points="3 2 7 5 3 8" /></svg>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Pi Sessions</span>
+        </button>
+        <div role="group" aria-label="Session display" style={{ display: "flex", flexShrink: 0, padding: 2, border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)" }}>
+          <SessionViewButton view="tree" active={sessionView === "tree"} onClick={() => selectSessionView("tree")} />
+          <SessionViewButton view="recent" active={sessionView === "recent"} onClick={() => selectSessionView("recent")} />
+        </div>
+      </div>
       {sessionsExpanded && <div style={{ flex: (selectedCwdProp || selectedCwd) && explorerOpen ? `0 1 ${sessionPane.size}px` : "1 1 auto", height: (selectedCwdProp || selectedCwd) && explorerOpen ? sessionPane.size : undefined, overflowY: "auto", padding: "0", minHeight: 80 }}>
         {loading && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
@@ -1310,7 +1300,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             No sessions found
           </div>
         )}
-        {sessionTree.map((node) => (
+        {sessionView === "tree" && sessionTree.map((node) => (
           <SessionTreeItem
             key={node.session.id}
             node={node}
@@ -1319,11 +1309,21 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             unreadSessionIds={unreadSessionIds}
             onSelectSession={handleSelectSessionFromList}
             onRenamed={loadSessions}
-            onSessionDeleted={(id) => {
-              onSessionDeleted?.(id);
-              loadSessions();
-            }}
+            onSessionDeleted={handleListSessionDeleted}
             depth={0}
+          />
+        ))}
+        {sessionView === "recent" && recentSessions.map((session) => (
+          <SessionItem
+            key={session.id}
+            session={session}
+            isSelected={session.id === selectedSessionId}
+            isRunning={runningSessionIds.has(session.id)}
+            isUnread={unreadSessionIds.has(session.id)}
+            onSelect={handleSelectSessionFromList}
+            onRenamed={loadSessions}
+            onDeleted={handleListSessionDeleted}
+            listOrigin={recentSessionOrigins.get(session.id)}
           />
         ))}
       </div>}
@@ -1494,7 +1494,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   );
 }
 
-function SessionTreeItem({
+const SessionTreeItem = memo(function SessionTreeItem({
   node,
   selectedSessionId,
   runningSessionIds,
@@ -1515,6 +1515,7 @@ function SessionTreeItem({
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const hasChildren = node.children.length > 0;
+  const toggleCollapsed = useCallback(() => setCollapsed((value) => !value), []);
 
   return (
     <div>
@@ -1535,13 +1536,13 @@ function SessionTreeItem({
           isSelected={node.session.id === selectedSessionId}
           isRunning={runningSessionIds.has(node.session.id)}
           isUnread={unreadSessionIds.has(node.session.id)}
-          onClick={() => onSelectSession(node.session)}
+          onSelect={onSelectSession}
           onRenamed={onRenamed}
-          onDeleted={(id) => onSessionDeleted?.(id)}
+          onDeleted={onSessionDeleted}
           depth={depth}
           hasChildren={hasChildren}
           collapsed={collapsed}
-          onToggleCollapse={() => setCollapsed((v) => !v)}
+          onToggleCollapse={toggleCollapsed}
         />
       </div>
       {hasChildren && !collapsed && (
@@ -1563,6 +1564,49 @@ function SessionTreeItem({
       )}
     </div>
   );
+});
+
+function SessionViewButton({ view, active, onClick }: { view: "tree" | "recent"; active: boolean; onClick: () => void }) {
+  const isTree = view === "tree";
+  const label = isTree ? "Tree view" : "Recent sessions";
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      aria-pressed={active}
+      title={isTree ? "Show fork hierarchy" : "Show latest activity first"}
+      onClick={onClick}
+      style={{
+        width: 25,
+        height: 21,
+        display: "grid",
+        placeItems: "center",
+        padding: 0,
+        border: 0,
+        borderRadius: 4,
+        background: active ? "var(--bg-selected)" : "transparent",
+        color: active ? "var(--accent)" : "var(--text-dim)",
+        cursor: "pointer",
+      }}
+    >
+      {isTree ? (
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M3 2.5v8M3 5.5h4M7 5.5v3M7 8.5h4" />
+          <circle cx="3" cy="2.5" r="1.2" fill="currentColor" stroke="none" />
+          <circle cx="7" cy="5.5" r="1.2" fill="currentColor" stroke="none" />
+          <circle cx="11" cy="8.5" r="1.2" fill="currentColor" stroke="none" />
+          <circle cx="3" cy="11.5" r="1.2" fill="currentColor" stroke="none" />
+        </svg>
+      ) : (
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+          <path d="M5 3h8M5 8h8M5 13h8" />
+          <circle cx="2.5" cy="3" r=".9" fill="currentColor" stroke="none" />
+          <circle cx="2.5" cy="8" r=".9" fill="currentColor" stroke="none" />
+          <circle cx="2.5" cy="13" r=".9" fill="currentColor" stroke="none" />
+        </svg>
+      )}
+    </button>
+  );
 }
 
 function RunningSessionIndicator() {
@@ -1577,7 +1621,7 @@ function RunningSessionIndicator() {
         alignItems: "center",
         justifyContent: "center",
         flexShrink: 0,
-        color: "var(--accent)",
+        color: getProductStatus("running").color,
       }}
     >
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ display: "block" }}>
@@ -1614,7 +1658,7 @@ function UnreadSessionIndicator() {
         alignItems: "center",
         justifyContent: "center",
         flexShrink: 0,
-        color: "#0891b2",
+        color: getProductStatus("unread").color,
       }}
     >
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true" style={{ display: "block" }}>
@@ -1628,30 +1672,32 @@ function UnreadSessionIndicator() {
   );
 }
 
-function SessionItem({
+const SessionItem = memo(function SessionItem({
   session,
   isSelected,
   isRunning,
   isUnread,
-  onClick,
+  onSelect,
   onRenamed,
   onDeleted,
   depth = 0,
   hasChildren = false,
   collapsed = false,
   onToggleCollapse,
+  listOrigin,
 }: {
   session: SessionInfo;
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;
-  onClick: () => void;
+  onSelect: (session: SessionInfo) => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
   depth?: number;
   hasChildren?: boolean;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  listOrigin?: { isFork: boolean; label: string; title: string };
 }) {
   const [hovered, setHovered] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -1660,7 +1706,7 @@ function SessionItem({
   const [deleting, setDeleting] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const title = session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
+  const title = getSessionDisplayTitle(session);
 
   const startRename = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -1712,7 +1758,7 @@ function SessionItem({
 
   return (
     <div
-      onClick={confirmDelete || renaming ? undefined : onClick}
+      onClick={confirmDelete || renaming ? undefined : () => onSelect(session)}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); }}
       style={{
@@ -1803,7 +1849,7 @@ function SessionItem({
         /* ── Normal view ── */
         <>
           {/* Fork indicator for child sessions */}
-          {depth > 0 && (
+          {(depth > 0 || listOrigin?.isFork) && (
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
               <line x1="6" y1="3" x2="6" y2="15" />
               <circle cx="18" cy="6" r="3" />
@@ -1829,16 +1875,28 @@ function SessionItem({
                 {title}
               </span>
             </div>
-            <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
-              {isRunning ? (
-                <RunningSessionIndicator />
-              ) : isUnread ? (
-                <UnreadSessionIndicator />
+            <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: listOrigin ? 6 : 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
+              {listOrigin ? (
+                <>
+                  {isRunning ? <RunningSessionIndicator /> : isUnread ? <UnreadSessionIndicator /> : null}
+                  <span title={listOrigin.title} style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: listOrigin.isFork ? "var(--text-muted)" : "var(--text-dim)" }}>
+                    {listOrigin.label}
+                  </span>
+                  <span title={`${session.modified} · ${session.messageCount} messages`} style={{ flexShrink: 0 }}>{formatRelativeTime(session.modified)}</span>
+                </>
               ) : (
-                <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
+                <>
+                  {isRunning ? (
+                    <RunningSessionIndicator />
+                  ) : isUnread ? (
+                    <UnreadSessionIndicator />
+                  ) : (
+                    <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
+                  )}
+                  <span>{session.messageCount} msgs</span>
+                </>
               )}
-              <span>{session.messageCount} msgs</span>
-              {session.worktreeBranch && (
+              {!listOrigin && session.worktreeBranch && (
                 <span
                   title={`Worktree: ${session.cwd}`}
                   style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}
@@ -1939,4 +1997,4 @@ function SessionItem({
       )}
     </div>
   );
-}
+});

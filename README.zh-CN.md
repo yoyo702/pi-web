@@ -44,6 +44,20 @@ PI_WEB_PASSWORD='请使用强密码' pi-web --hostname 0.0.0.0
 
 登录后的浏览器拥有 TianForge pi 服务用户的本机权限。请勿直接暴露到互联网；应使用 HTTPS 和可信网络。
 
+登录会话使用由密码派生的密钥签名，因此修改 `PI_WEB_PASSWORD` 会让所有浏览器退出登录。从 0.8.1 及更早版本升级后，所有设备也需要重新登录一次。
+
+### 允许的访问地址（Host）
+
+为防御 DNS rebinding 攻击，TianForge pi 只响应 `Host` 请求头属于本机的请求：`localhost`、回环地址、本机主机名和 `<主机名>.local`，以及本机当前的局域网 / Tailscale IP。Tailscale Serve 域名（`*.ts.net`）默认允许。
+
+如果通过其他名称访问——自定义域名、反向代理或 DNS 别名——需要把它加到 `PI_WEB_ALLOWED_HOSTS`（逗号分隔；以 `*.` 开头表示匹配任意子域名）。设置该变量会替换默认的 `*.ts.net`，如果仍在使用 Tailscale Serve，请一并写上：
+
+```bash
+PI_WEB_ALLOWED_HOSTS='pi.example.com,*.ts.net' pi-web --hostname 0.0.0.0
+```
+
+未被允许的地址会返回 `421 unrecognized Host header; set PI_WEB_ALLOWED_HOSTS to allow it`。换了新地址后页面打不开时，请先检查这一项。
+
 ## HTTP 代理
 
 TianForge pi 的服务端模型请求和 API 请求会读取标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。

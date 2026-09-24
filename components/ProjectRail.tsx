@@ -2,10 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { Activity, Bell, ChevronDown, Clipboard, FolderOpen, FolderPlus, GitBranch, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, TerminalSquare, X } from "lucide-react";
+import { Activity, Bell, ChevronDown, Clipboard, FolderOpen, FolderPlus, GitBranch, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, TerminalSquare, X } from "lucide-react";
+import { ProductStatusDot } from "./ProductStatus";
 import { DirectoryPicker } from "./DirectoryPicker";
 import type { ProjectWorkspace } from "@/lib/project-workspaces";
 import type { GitStatusResponse } from "@/lib/git-types";
+import { getProductStatus, type ProductStatusId } from "@/lib/product-status";
 
 interface ProjectStatus {
   branch: string | null;
@@ -21,8 +23,10 @@ interface WorkspaceActivity {
   completed: number;
 }
 
-const activityColor: Record<ActivityState, string> = { approval: "#f59e0b", failed: "#ef4444", working: "#22c55e", completed: "#3b82f6", idle: "var(--text-dim)" };
-const activityLabel: Record<ActivityState, string> = { approval: "Waiting for approval", failed: "Task failed", working: "Working", completed: "Completed", idle: "Idle" };
+const activityStatus: Record<ActivityState, ProductStatusId> = { approval: "approval", failed: "failed", working: "running", completed: "completed", idle: "idle" };
+const activityDefinition = (state: ActivityState) => getProductStatus(activityStatus[state]);
+const activityColor = Object.fromEntries((Object.keys(activityStatus) as ActivityState[]).map((state) => [state, activityDefinition(state).color])) as Record<ActivityState, string>;
+const activityLabel = Object.fromEntries((Object.keys(activityStatus) as ActivityState[]).map((state) => [state, activityDefinition(state).label])) as Record<ActivityState, string>;
 
 interface Props {
   workspaces: ProjectWorkspace[];
@@ -35,6 +39,7 @@ interface Props {
   onOpenTerminal: (workspace: ProjectWorkspace) => void;
   onRename: (workspace: ProjectWorkspace, label: string) => void;
   onTogglePinned: (workspace: ProjectWorkspace) => void;
+  onOpenSettings: () => void;
 }
 
 function initials(label: string): string {
@@ -44,7 +49,7 @@ function initials(label: string): string {
 
 const contextMenuButtonStyle: CSSProperties = { minHeight: 32, display: "flex", alignItems: "center", gap: 9, padding: "0 9px", border: 0, borderRadius: 5, background: "transparent", color: "var(--text)", cursor: "pointer", font: "12px/1.2 inherit", textAlign: "left" };
 
-export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, onRestore, onReorder, onOpenTerminal, onRename, onTogglePinned }: Props) {
+export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, onRestore, onReorder, onOpenTerminal, onRename, onTogglePinned, onOpenSettings }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerBusy, setPickerBusy] = useState(false);
   const [pickerError, setPickerError] = useState<string | null>(null);
@@ -66,6 +71,8 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
   const mobileRef = useRef<HTMLDivElement>(null);
   const previousRunningRef = useRef<Map<string, string> | null>(null);
   const completedUntilRef = useRef<Map<string, number>>(new Map());
+  const sessionRootByIdRef = useRef<Map<string, string>>(new Map());
+  const sessionRootsFetchedAtRef = useRef(0);
   useEffect(() => {
     setCollapsed(localStorage.getItem("pi-web:project-rail-collapsed") === "true");
     const onKeyDown = (event: KeyboardEvent) => {
@@ -124,19 +131,26 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
         const readJson = async <T,>(url: string): Promise<T | null> => {
           try { const response = await fetch(url, { cache: "no-store" }); return response.ok ? await response.json() as T : null; } catch { return null; }
         };
-        const [terminalResult, sessionResult, codexResult] = await Promise.all([
+        const [terminalResult, runningResult, codexResult] = await Promise.all([
           readJson<{ terminals?: Array<{ id: string; cwd: string; state: string; endedAt?: string | null; exitCode?: number | null }> }>("/api/terminals"),
-          readJson<{ sessions?: Array<{ id: string; cwd: string; projectRoot?: string | null }>; runningSessionIds?: string[] }>("/api/sessions"),
+          readJson<{ runningSessionIds?: string[] }>("/api/sessions?running=1"),
           readJson<{ runtimes?: Array<{ threadId: string; cwd: string; state: "idle" | "running" | "approval" }> }>("/api/codex/runtime"),
         ]);
         const terminalData = terminalResult ?? {};
-        const sessionData = sessionResult ?? {};
+        const runningSessionIds = runningResult?.runningSessionIds ?? [];
+        // The full session list requires a server-side scan of every session
+        // file, so only fetch it when a running session's project is unknown.
+        // Throttled because a brand-new session may not be listed yet.
+        if (runningSessionIds.some((id) => !sessionRootByIdRef.current.has(id)) && Date.now() - sessionRootsFetchedAtRef.current >= 30_000) {
+          sessionRootsFetchedAtRef.current = Date.now();
+          const sessionData = await readJson<{ sessions?: Array<{ id: string; cwd: string; projectRoot?: string | null }> }>("/api/sessions");
+          if (sessionData?.sessions) sessionRootByIdRef.current = new Map(sessionData.sessions.map((session) => [session.id, session.projectRoot || session.cwd]));
+        }
         const codexData = codexResult ?? {};
         const counts: Record<string, number> = {};
         const runningNow = new Map<string, string>();
         for (const terminal of terminalData.terminals ?? []) if (terminal.state === "running") { counts[terminal.cwd] = (counts[terminal.cwd] ?? 0) + 1; runningNow.set(`terminal:${terminal.id}`, terminal.cwd); }
-        const sessionById = new Map((sessionData.sessions ?? []).map((session) => [session.id, session]));
-        for (const id of sessionData.runningSessionIds ?? []) { const session = sessionById.get(id); if (session) runningNow.set(`pi:${id}`, session.projectRoot || session.cwd); }
+        for (const id of runningSessionIds) { const root = sessionRootByIdRef.current.get(id); if (root) runningNow.set(`pi:${id}`, root); }
         for (const runtime of codexData.runtimes ?? []) if (runtime.state !== "idle") runningNow.set(`codex:${runtime.threadId}`, runtime.cwd);
         const now = Date.now();
         if (previousRunningRef.current) for (const [key, cwd] of previousRunningRef.current) if (!runningNow.has(key)) completedUntilRef.current.set(cwd, now + 30_000);
@@ -258,7 +272,7 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
   return <>
     <nav className={`project-rail${collapsed ? " is-collapsed" : ""}`} aria-label="Project workspaces">
       <div style={{ display: "flex", alignItems: "center", justifyContent: collapsed ? "center" : "space-between", flexShrink: 0 }}>
-        {!collapsed && <span style={{ display: "flex", alignItems: "center", gap: 2 }}><button type="button" className="project-rail-collapse" aria-label="Search projects" title="Search projects (⌘⇧P)" onClick={() => { setProjectQuery(""); setProjectSearchIndex(0); setProjectSearchOpen(true); }}><Search size={14} /></button><button type="button" className="project-rail-collapse" aria-label="Workspace activity" title="Workspace activity" onClick={() => setActivityCenterOpen(true)} style={{ position: "relative" }}><Bell size={14} />{attentionCount > 0 && <span style={{ position: "absolute", top: 1, right: 1, minWidth: 12, height: 12, display: "grid", placeItems: "center", padding: "0 2px", borderRadius: 999, background: activityColor.approval, color: "white", fontSize: 7, fontWeight: 800 }}>{Math.min(99, attentionCount)}</span>}</button></span>}
+        {!collapsed && <span style={{ display: "flex", alignItems: "center", gap: 2 }}><button type="button" className="project-rail-collapse" aria-label="Search projects" title="Search projects (⌘⇧P)" onClick={() => { setProjectQuery(""); setProjectSearchIndex(0); setProjectSearchOpen(true); }}><Search size={14} /></button><button type="button" className="project-rail-collapse" aria-label="Workspace activity" title="Workspace activity" onClick={() => setActivityCenterOpen(true)} style={{ position: "relative" }}><Bell size={14} />{attentionCount > 0 && <span style={{ position: "absolute", top: 1, right: 1, minWidth: 12, height: 12, display: "grid", placeItems: "center", padding: "0 2px", borderRadius: 999, background: getProductStatus("approval").color, color: "white", fontSize: 7, fontWeight: 800 }}>{Math.min(99, attentionCount)}</span>}</button><button type="button" className="project-rail-collapse" aria-label="Settings" title="Settings" onClick={onOpenSettings}><Settings size={14} /></button></span>}
         <button type="button" className="project-rail-collapse" aria-label={collapsed ? "Expand project bar" : "Collapse project bar"} title={collapsed ? "Expand project bar" : "Collapse project bar"} onClick={toggleCollapsed}>{collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}</button>
       </div>
       <div className="project-rail-list">
@@ -269,11 +283,11 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
           const activityTotal = activity ? activity.working + activity.approval + activity.failed + activity.completed : 0;
           const activitySummary = activity ? [activity.approval && `${activity.approval} waiting`, activity.failed && `${activity.failed} failed`, activity.working && `${activity.working} working`, activity.completed && `${activity.completed} completed`].filter(Boolean).join(" · ") : "";
           return <div key={workspace.id} className={`project-rail-tab${active ? " is-active" : ""}`} draggable onContextMenu={(event) => { event.preventDefault(); setContextMenu({ workspace, x: event.clientX, y: event.clientY }); }} onDragStart={() => setDraggedId(workspace.id)} onDragEnd={() => setDraggedId(null)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (draggedId && draggedId !== workspace.id) onReorder(draggedId, workspace.id); setDraggedId(null); }}>
-            <button type="button" className="project-rail-select" aria-current={active ? "page" : undefined} title={workspace.projectRoot} onClick={() => onSelect(workspace)}>
+            <button type="button" className="project-rail-select" aria-current={active ? "page" : undefined} title={`${workspace.projectRoot}${projectStatus?.changedFiles ? `\n${projectStatus.changedFiles} files with uncommitted Git changes` : ""}`} onClick={() => onSelect(workspace)}>
               <span className="project-rail-icon" aria-hidden="true">{initials(workspace.label)}</span>
-              <span className="project-rail-copy"><strong style={{ display: "flex", alignItems: "center", gap: 4 }}>{workspace.pinned && <Pin size={9} aria-label="Pinned" />}{workspace.label}</strong><small>{projectStatus?.branch || workspace.cwd}{projectStatus?.changedFiles ? ` · ${projectStatus.changedFiles} changed` : ""}</small></span>
-              {projectStatus?.changedFiles ? <span className="project-rail-dirty" title={`${projectStatus.changedFiles} changed files`} aria-label={`${projectStatus.changedFiles} changed files`} style={{ position: "absolute", right: collapsed ? 3 : 28, bottom: collapsed ? 4 : 6, width: 6, height: 6, borderRadius: "50%", background: "#d29922", boxShadow: "0 0 0 2px var(--bg-selected)" }} /> : null}
-              {activity && activity.state !== "idle" && <span role="button" tabIndex={0} title={`${activityLabel[activity.state]}${activitySummary ? ` · ${activitySummary}` : ""}`} aria-label={`${activityLabel[activity.state]}${activitySummary ? `: ${activitySummary}` : ""}`} onClick={(event) => { event.stopPropagation(); setActivityMenu({ workspace, x: event.clientX, y: event.clientY }); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); setActivityMenu({ workspace, x: rect.right, y: rect.bottom }); } }} style={{ position: "absolute", right: collapsed ? 3 : 29, top: collapsed ? 3 : "50%", minWidth: activityTotal > 1 ? 16 : 9, height: activityTotal > 1 ? 16 : 9, display: "grid", placeItems: "center", padding: activityTotal > 1 ? "0 4px" : 0, transform: collapsed ? "none" : "translateY(-50%)", border: "2px solid var(--bg-selected)", borderRadius: 999, boxSizing: "border-box", background: activityColor[activity.state], color: "white", fontSize: 8, fontWeight: 750, cursor: "pointer" }}>{activityTotal > 1 ? activityTotal : ""}</span>}
+              <span className="project-rail-copy"><strong style={{ display: "flex", alignItems: "center", gap: 4 }}>{workspace.pinned && <Pin size={9} aria-label="Pinned" />}{workspace.label}</strong><small><span className="project-rail-branch">{projectStatus?.branch || workspace.cwd}</span>{projectStatus?.changedFiles ? <span className="project-rail-git-status">{projectStatus.changedFiles} Git changes</span> : null}</small></span>
+              {collapsed && projectStatus?.changedFiles ? <ProductStatusDot status="git-changes" size={6} title={`${projectStatus.changedFiles} files with uncommitted Git changes`} style={{ position: "absolute", right: 3, bottom: 4, boxShadow: "0 0 0 2px var(--bg-selected)" }} /> : null}
+              {activity && activity.state !== "idle" && <span role="button" tabIndex={0} title={`${activityDefinition(activity.state).label}${activitySummary ? ` · ${activitySummary}` : ""}`} aria-label={`${activityDefinition(activity.state).label}${activitySummary ? `: ${activitySummary}` : ""}`} onClick={(event) => { event.stopPropagation(); setActivityMenu({ workspace, x: event.clientX, y: event.clientY }); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); setActivityMenu({ workspace, x: rect.right, y: rect.bottom }); } }} style={{ position: "absolute", right: collapsed ? 3 : 29, top: collapsed ? 3 : "50%", minWidth: activityTotal > 1 ? 16 : 9, height: activityTotal > 1 ? 16 : 9, display: "grid", placeItems: "center", padding: activityTotal > 1 ? "0 4px" : 0, transform: collapsed ? "none" : "translateY(-50%)", border: "2px solid var(--bg-selected)", borderRadius: 999, boxSizing: "border-box", background: activityDefinition(activity.state).color, color: "white", fontSize: 8, fontWeight: 750, cursor: "pointer" }}>{activityTotal > 1 ? activityTotal : ""}</span>}
             </button>
             <button type="button" className="project-rail-close" aria-label={`Close ${workspace.label}`} title="Close project workspace" onClick={() => closeWorkspace(workspace)}><X size={13} /></button>
           </div>;
@@ -305,7 +319,7 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "0 13px", borderBottom: "1px solid var(--border)" }}><Search size={15} color="var(--text-dim)" /><input autoFocus value={projectQuery} onChange={(event) => { setProjectQuery(event.target.value); setProjectSearchIndex(0); }} placeholder="Search projects, paths, or branches" aria-label="Search projects" style={{ minWidth: 0, flex: 1, height: 46, padding: 0, border: 0, outline: 0, background: "transparent", color: "var(--text)", font: "13px/1 inherit" }} /><kbd style={{ color: "var(--text-dim)", font: "10px/1 var(--font-mono)" }}>esc</kbd></div>
         <div role="listbox" aria-label="Project results" style={{ minHeight: 0, overflowY: "auto", padding: 6 }}>
-          {filteredWorkspaces.map((workspace, index) => { const status = statusById[workspace.id]; const activity = activityById[workspace.id]; return <button key={workspace.id} type="button" role="option" aria-selected={index === projectSearchIndex} onMouseEnter={() => setProjectSearchIndex(index)} onClick={() => chooseSearchedProject(workspace)} style={{ width: "100%", minHeight: 48, display: "flex", alignItems: "center", gap: 10, padding: "6px 9px", border: 0, borderRadius: 7, background: index === projectSearchIndex ? "var(--bg-selected)" : "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left" }}><span className="project-rail-icon">{initials(workspace.label)}</span><span style={{ minWidth: 0, flex: 1, display: "grid", gap: 3 }}><strong style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12 }}>{workspace.pinned && <Pin size={10} />}{workspace.label}</strong><small style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", font: "10px/1.2 var(--font-mono)" }}>{workspace.cwd}</small></span><span style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 10 }}>{status?.branch && <span style={{ display: "flex", alignItems: "center", gap: 3 }}><GitBranch size={11} />{status.branch}</span>}{status?.changedFiles ? <span style={{ color: "#d29922" }}>{status.changedFiles} changed</span> : null}{activity && activity.state !== "idle" && <span style={{ display: "flex", alignItems: "center", gap: 4, color: activityColor[activity.state] }}><Activity size={11} />{activityLabel[activity.state]}</span>}</span></button>; })}
+          {filteredWorkspaces.map((workspace, index) => { const status = statusById[workspace.id]; const activity = activityById[workspace.id]; return <button key={workspace.id} type="button" role="option" aria-selected={index === projectSearchIndex} onMouseEnter={() => setProjectSearchIndex(index)} onClick={() => chooseSearchedProject(workspace)} style={{ width: "100%", minHeight: 48, display: "flex", alignItems: "center", gap: 10, padding: "6px 9px", border: 0, borderRadius: 7, background: index === projectSearchIndex ? "var(--bg-selected)" : "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left" }}><span className="project-rail-icon">{initials(workspace.label)}</span><span style={{ minWidth: 0, flex: 1, display: "grid", gap: 3 }}><strong style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12 }}>{workspace.pinned && <Pin size={10} />}{workspace.label}</strong><small style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", font: "10px/1.2 var(--font-mono)" }}>{workspace.cwd}</small></span><span style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text-dim)", fontSize: 10 }}>{status?.branch && <span style={{ display: "flex", alignItems: "center", gap: 3 }}><GitBranch size={11} />{status.branch}</span>}{status?.changedFiles ? <span style={{ color: getProductStatus("git-changes").color }}>{status.changedFiles} Git changes</span> : null}{activity && activity.state !== "idle" && <span style={{ display: "flex", alignItems: "center", gap: 4, color: activityDefinition(activity.state).color }}><Activity size={11} />{activityDefinition(activity.state).label}</span>}</span></button>; })}
           {filteredWorkspaces.length === 0 && <div style={{ padding: 24, color: "var(--text-dim)", fontSize: 12, textAlign: "center" }}>No matching projects</div>}
         </div>
         <footer style={{ display: "flex", gap: 12, padding: "7px 12px", borderTop: "1px solid var(--border)", color: "var(--text-dim)", fontSize: 10 }}><span>↑↓ Navigate</span><span>Enter Open</span><span style={{ marginLeft: "auto" }}>{workspaces.length} projects</span></footer>
@@ -318,7 +332,7 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
       <button type="button" className="project-mobile-trigger" aria-label="Switch project" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><span>{activeWorkspace?.label ?? "Projects"}</span><ChevronDown size={13} /></button>
       {mobileOpen && <div className="project-mobile-menu" role="menu" aria-label="Project workspaces">
         {workspaces.map((workspace) => <div key={workspace.id} className={`project-mobile-row${workspace.id === activeId ? " is-active" : ""}`}>
-          <button type="button" role="menuitem" onClick={() => { setMobileOpen(false); onSelect(workspace); }}><span className="project-rail-icon">{initials(workspace.label)}</span><span>{workspace.label}</span>{(runningByCwd[workspace.cwd] ?? 0) > 0 && <span className="project-rail-badge">{runningByCwd[workspace.cwd]}</span>}</button>
+          <button type="button" role="menuitem" onClick={() => { setMobileOpen(false); onSelect(workspace); }}><span className="project-rail-icon">{initials(workspace.label)}</span><span className="project-mobile-label">{workspace.label}</span>{statusById[workspace.id]?.changedFiles ? <span className="project-mobile-git-status"><ProductStatusDot status="git-changes" size={6} />{statusById[workspace.id].changedFiles} Git changes</span> : null}{(runningByCwd[workspace.cwd] ?? 0) > 0 && <span className="project-rail-badge">{runningByCwd[workspace.cwd]}</span>}</button>
           <button type="button" aria-label={`Close ${workspace.label}`} onClick={() => closeWorkspace(workspace)}><X size={13} /></button>
         </div>)}
         <button type="button" className="project-mobile-add" onClick={() => { setMobileOpen(false); setPickerOpen(true); }}><FolderPlus size={14} />Open project</button>

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
@@ -219,39 +219,55 @@ export async function DELETE(
     // Read only the bounded header before deleting.
     const parentSessionPath = readSessionHeader(filePath)?.parentSession;
 
-    // Re-attach all direct children to this session's parent (cascade re-parent)
-    // Scan sibling files in the same directory
+    // Re-attach direct children (forks in the same directory) to this
+    // session's parent. Only headers are read to find them; only children are
+    // rewritten.
     const targetPathKey = sessionPathKey(filePath);
     const dir = dirname(filePath);
+    const reparentFailures: string[] = [];
+    let siblingFiles: string[] = [];
     try {
-      const files = readdirSync(dir).filter(
+      siblingFiles = readdirSync(dir).filter(
         (file) => file.endsWith(".jsonl") && sessionPathKey(join(dir, file)) !== targetPathKey,
       );
-      for (const file of files) {
-        const childPath = join(dir, file);
-        try {
-          const content = readFileSync(childPath, "utf8");
-          const lines = content.split("\n");
-          const header = JSON.parse(lines[0]) as { type?: string; parentSession?: string };
-          if (
-            header.type === "session" &&
-            header.parentSession &&
-            sessionPathKey(header.parentSession) === targetPathKey
-          ) {
-            // Rewrite header with new parentSession
-            header.parentSession = parentSessionPath;
-            lines[0] = JSON.stringify(header);
-            writeFileSync(childPath, lines.join("\n"));
-          }
-        } catch { /* skip malformed */ }
+    } catch (error) {
+      console.warn("[sessions] could not scan for forked children:", error);
+    }
+    for (const file of siblingFiles) {
+      const childPath = join(dir, file);
+      let header: ReturnType<typeof readSessionHeader>;
+      try {
+        header = readSessionHeader(childPath);
+      } catch {
+        continue; // unreadable or malformed historical file
       }
-    } catch { /* skip if dir unreadable */ }
+      if (!header?.parentSession || sessionPathKey(header.parentSession) !== targetPathKey) continue;
+      // A running child appends to its file concurrently; rewriting it now
+      // could drop entries. Leave its link dangling (shown as "forked from
+      // unavailable session") rather than risk the transcript.
+      if (getRpcSession(header.id)?.isRunning()) {
+        reparentFailures.push(header.id);
+        continue;
+      }
+      try {
+        const content = readFileSync(childPath, "utf8");
+        const newline = content.indexOf("\n");
+        const rest = newline === -1 ? "" : content.slice(newline);
+        const tempPath = `${childPath}.${process.pid}.${Date.now()}.tmp`;
+        // Write-then-rename so a crash never leaves a truncated session file.
+        writeFileSync(tempPath, JSON.stringify({ ...header, parentSession: parentSessionPath }) + rest);
+        renameSync(tempPath, childPath);
+      } catch (error) {
+        console.warn(`[sessions] could not re-parent ${childPath}:`, error);
+        reparentFailures.push(header.id);
+      }
+    }
 
     getRpcSession(id)?.destroy();
     unlinkSync(filePath);
     invalidateSessionPathCache(id);
     invalidateSessionListCache();
-    return NextResponse.json({ ok: true });
+    return NextResponse.json(reparentFailures.length ? { ok: true, reparentFailures } : { ok: true });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, type MouseEvent } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import { resolveLocalFileHref } from "@/lib/file-links";
 import { encodeFilePathForApi } from "@/lib/file-paths";
 import { markdownRehypePlugins, markdownRemarkPlugins, normalizeDisplayMath } from "@/lib/markdown";
@@ -17,13 +17,10 @@ interface MarkdownBodyProps {
 
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
-
-  return (
-    <div className={["markdown-body", className].filter(Boolean).join(" ")}>
-      <ReactMarkdown
-        remarkPlugins={markdownRemarkPlugins}
-        rehypePlugins={markdownRehypePlugins}
-        components={{
+  // react-markdown uses these functions as element types, so a fresh object on
+  // every render would unmount and remount code/Mermaid blocks (losing their
+  // local state such as Mermaid preview mode) on each streaming update.
+  const components = useMemo<Components>(() => ({
           code({ className, children, ...props }) {
             const lang = className?.replace("language-", "").toLowerCase() ?? "";
             const raw = String(children);
@@ -91,7 +88,14 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
               </div>
             );
           },
-        }}
+  }), [cwd, isStreaming, onOpenFile]);
+
+  return (
+    <div className={["markdown-body", className].filter(Boolean).join(" ")}>
+      <ReactMarkdown
+        remarkPlugins={markdownRemarkPlugins}
+        rehypePlugins={markdownRehypePlugins}
+        components={components}
       >
         {normalizedMarkdown}
       </ReactMarkdown>

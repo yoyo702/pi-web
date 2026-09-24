@@ -11,6 +11,7 @@ import {
 } from "@/lib/file-paths";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
 import { Check, ChevronUp, Copy, Eye, EyeOff, FilePlus2, FolderPlus, Pencil, Search, Trash2, X } from "lucide-react";
+import { ProductStatusDot } from "./ProductStatus";
 
 interface FileEntry {
   name: string;
@@ -333,13 +334,7 @@ function TreeNode({
         >
           {node.name}
         </span>
-        {highlighted && (
-          <span
-            title="Newly uploaded"
-            aria-label="Newly uploaded"
-            style={{ width: 6, height: 6, flexShrink: 0, borderRadius: "50%", background: "#3b82f6" }}
-          />
-        )}
+        {highlighted && <ProductStatusDot status="uploaded" size={6} />}
         {!hovered && !node.isDir && gitStatus && (
           <span
             title={GIT_STATUS_LABELS[gitStatus.status]}
@@ -357,19 +352,7 @@ function TreeNode({
             {gitStatus.code}
           </span>
         )}
-        {!hovered && containsGitChanges && (
-          <span
-            title="Contains changed files"
-            aria-label="Contains changed files"
-            style={{
-              width: 6,
-              height: 6,
-              flexShrink: 0,
-              borderRadius: "50%",
-              background: "#d6a84b",
-            }}
-          />
-        )}
+        {!hovered && containsGitChanges && <ProductStatusDot status="git-changes" size={6} title="Contains changed files" />}
         {loading && (
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--text-dim)" strokeWidth="2" strokeLinecap="round">
             <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
@@ -993,7 +976,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
             {entry.isDir ? <FolderIcon size={14} /> : getFileIcon(entry.path, 14)}
             <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><HighlightedPath path={entry.path} query={query} /></span>
             {status && <span title={GIT_STATUS_LABELS[status.status]} aria-label={GIT_STATUS_LABELS[status.status]} style={{ color: GIT_STATUS_COLORS[status.status], fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 700 }}>{status.code}</span>}
-            {!status && containsChanges && <span title="Contains changed files" aria-label="Contains changed files" style={{ width: 6, height: 6, borderRadius: "50%", background: "#d6a84b" }} />}
+            {!status && containsChanges && <ProductStatusDot status="git-changes" size={6} title="Contains changed files" />}
           </button>;
         })}
       </div>}
