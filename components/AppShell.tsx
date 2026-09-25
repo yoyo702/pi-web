@@ -23,6 +23,7 @@ import { WorkspaceActionsProvider, type CodexChatTarget, type WorkspaceActions }
 // ssr: false) so they stay out of the initial chat bundle.
 const SettingsPanel = dynamic(() => import("./SettingsPanel").then((m) => m.SettingsPanel), { ssr: false });
 import { ProductStatusDot } from "./ProductStatus";
+import { RecentNotifications, UnreadNotificationBadge } from "./RecentNotifications";
 import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { getFileName } from "@/lib/file-paths";
@@ -41,7 +42,7 @@ import { useProjectWorkspaces } from "@/hooks/useProjectWorkspaces";
 import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PanelsTopLeft, Plus, TerminalSquare } from "lucide-react";
 import { projectLabel, upsertProjectWorkspace, type ProjectWorkspace } from "@/lib/project-workspaces";
 import { getProductStatus } from "@/lib/product-status";
-import type { RailActivityItem } from "@/lib/rail-activity";
+import type { ActivityTarget } from "@/lib/rail-activity";
 
 const rightPanelHeaderButtonStyle: React.CSSProperties = { width: 36, height: 36, display: "grid", placeItems: "center", padding: 0, border: 0, borderLeft: "1px solid var(--border)", background: "transparent", color: "var(--text-muted)", cursor: "pointer" };
 const rightPanelToolMenuStyle: React.CSSProperties = { position: "absolute", zIndex: 500, top: 38, right: 2, width: 190, display: "grid", gap: 2, padding: 5, border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", boxShadow: "0 14px 36px rgba(0,0,0,.26)" };
@@ -839,21 +840,21 @@ export function AppShell() {
   // `token` is the project switch that must still be current when it runs
   // (null while activation is in flight); activation may canonicalize the cwd,
   // so the cwd to wait for comes from the activation itself.
-  const [activityOpenIntent, setActivityOpenIntent] = useState<{ seq: number; item: RailActivityItem; token: number | null; cwd: string | null } | null>(null);
+  const [activityOpenIntent, setActivityOpenIntent] = useState<{ seq: number; item: ActivityTarget; token: number | null; cwd: string | null } | null>(null);
   const activityOpenSeqRef = useRef(0);
   // A Pi item carries the SessionInfo the rail cached when the session started
   // running, so its name can be stale. Look up the current record as soon as
   // the item is clicked (in parallel with any project activation) and open with
   // that, falling back to the cached record.
   const activityFreshSessionRef = useRef<{ seq: number; session: Promise<SessionInfo> } | null>(null);
-  const handleOpenActivityItem = useCallback((workspace: ProjectWorkspace, item: RailActivityItem) => {
+  const handleOpenActivityItem = useCallback((workspace: ProjectWorkspace, item: ActivityTarget) => {
     const seq = ++activityOpenSeqRef.current;
     activityFreshSessionRef.current = item.kind === "pi" ? { seq, session: fetchFreshSessionInfo(item.session) } : null;
     // Terminals are grouped under a workspace by cwd or project root, but the
     // center only loads the active cwd's terminals. A terminal in another
     // directory of the project (e.g. the main checkout while a worktree is
     // active) needs the workspace activated in that directory.
-    const targetCwd = item.kind === "terminal" ? item.terminal.cwd : null;
+    const targetCwd = item.kind === "terminal" ? item.cwd : null;
     if (workspace.id === activeProjectId && activeCwd && (!targetCwd || targetCwd === activeCwd)) {
       setActivityOpenIntent({ seq, item, token: projectSwitchTokenRef.current, cwd: activeCwd });
       return;
@@ -917,7 +918,7 @@ export function AppShell() {
       if (existing) activateWorkspaceTab(existing.id);
       // A running runtime was started from a chat tab; reopen it with the chat
       // defaults. No session name, so the panel shows the thread's own name.
-      else handleOpenCodexSessionChat({ sessionId: threadId, sessionName: "", cwd: item.runtime.cwd, approvalPolicy: "untrusted" });
+      else handleOpenCodexSessionChat({ sessionId: threadId, sessionName: "", cwd: item.cwd, approvalPolicy: "untrusted" });
     }
   }, [activateWorkspaceTab, activeCwd, activityOpenIntent, centerHydratedCwd, closeMobileOverlays, handleOpenCodexSessionChat, handleSelectSession, isMobile, openTerminalTab, terminals, terminalsLoaded, workspaceTabs]);
 
@@ -972,13 +973,14 @@ export function AppShell() {
   const showWorkspaceTabBar = workspaceTabs.length > 1;
   const activityControl = <div ref={activityPanelRef} style={{ position: "relative", alignSelf: "stretch", flexShrink: 0 }}>
     <button type="button" aria-label="Workspace activity" title="Workspace activity" aria-expanded={activityPanelOpen} onClick={() => setActivityPanelOpen((open) => !open)} style={{ display: "flex", alignItems: "center", gap: 5, height: "100%", padding: "0 10px", border: 0, borderLeft: "1px solid var(--border)", background: activityPanelOpen ? "var(--bg-selected)" : "transparent", color: approvalCount > 0 ? getProductStatus("approval").color : activityCount > 0 ? "var(--accent)" : "var(--text-dim)", cursor: "pointer", font: "10.5px/1 inherit" }}>
-      <Activity size={15} /><span>{activityCount}</span>{approvalCount > 0 && <ProductStatusDot status="approval" size={6} title={`${approvalCount} approval pending`} />}
+      <Activity size={15} /><span>{activityCount}</span>{approvalCount > 0 && <ProductStatusDot status="approval" size={6} title={`${approvalCount} approval pending`} />}<UnreadNotificationBadge />
     </button>
     {activityPanelOpen && <div role="dialog" aria-label="Workspace activity" style={{ position: "absolute", zIndex: 500, top: 40, right: 4, width: "min(330px, calc(100vw - 16px))", maxHeight: "min(480px, calc(100dvh - 100px))", overflowY: "auto", padding: 7, border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", boxShadow: "0 16px 44px rgb(0 0 0 / 38%)" }}>
       <div style={{ padding: "5px 7px 7px", color: "var(--text-dim)", fontSize: 10 }}>Workspace activity · {activityCount} active</div>
       {activityCount === 0 && <div style={{ padding: "14px 10px", color: "var(--text-dim)", fontSize: 11, textAlign: "center" }}>No tasks or agents are running</div>}
       {[...runningTasks, ...runningAgents, ...runningShells].map((terminal) => <button key={terminal.id} type="button" onClick={() => { handleTerminalCreated(terminal, terminal.title); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><ProductStatusDot status="running" size={7} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{terminal.title || `${terminal.provider} terminal`}</span><small style={{ color: "var(--text-dim)" }}>{terminal.provider}</small></button>)}
       {activeCodexChats.map((tab) => <button key={tab.id} type="button" onClick={() => { activateWorkspaceTab(tab.id); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><ProductStatusDot status={tab.status === "approval" ? "approval" : "running"} size={7} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tab.label}</span><small style={{ color: tab.status === "approval" ? getProductStatus("approval").color : "var(--text-dim)" }}>{tab.status}</small></button>)}
+      <div style={{ marginTop: 4, borderTop: "1px solid var(--border)" }}><RecentNotifications workspaces={projectWorkspaces} onOpen={(workspace, target) => { setActivityPanelOpen(false); handleOpenActivityItem(workspace, target); }} /></div>
     </div>}
   </div>;
   const topRightControls = <div style={{ display: "flex", alignSelf: "stretch", flexShrink: 0, marginLeft: "auto", marginRight: rightPanelOpen ? 0 : 36 }}>

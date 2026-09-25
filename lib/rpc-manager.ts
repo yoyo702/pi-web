@@ -20,6 +20,14 @@ import { isModelContextOnlyMessageEvent } from "./model-context-messages";
 import { readActiveToolCommand, readActiveToolOutput } from "./tool-progress";
 import { createPlainTextTheme } from "./plain-text-theme";
 import { getResourceConfigFingerprint } from "./resource-config-fingerprint";
+import { piRunOutcome, piSessionTitle } from "./pi-notification";
+import { resolveProject } from "./worktree";
+
+type NotificationLog = {
+  add(entry: { kind: "pi"; event: "completed" | "failed"; targetId: string; cwd: string; projectRoot?: string; title: string; path?: string; detail?: string }): unknown;
+};
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const notifications = require("../server/notifications.cjs") as NotificationLog;
 
 // ============================================================================
 // Types
@@ -120,6 +128,8 @@ export class AgentSessionWrapper {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyListeners = new Set<() => void>();
   private _alive = true;
+  /** The run's latest agent_end, recorded as a notification on agent_settled. */
+  private lastRunEnd: AgentEvent | null = null;
   // Last session-file mtime this wrapper is known to be in sync with. Used to
   // detect edits made by another process (e.g. the terminal `pi`) to the same
   // session file, so we can reload before appending and avoid branching off a
@@ -183,6 +193,11 @@ export class AgentSessionWrapper {
         this.activeToolCalls.clear();
         invalidateSessionListCache();
         this.captureFileMtime();
+        // Pi may still retry the run or compact and continue; the notification waits for agent_settled.
+        this.lastRunEnd = event;
+      } else if (event.type === "agent_settled" && this.lastRunEnd) {
+        this.recordRunNotification(this.lastRunEnd);
+        this.lastRunEnd = null;
       }
       // System prompt/tool messages are model context only; forwarding them
       // made the client append one between its optimistic user bubble and the
@@ -195,6 +210,30 @@ export class AgentSessionWrapper {
     this.resetIdleTimer();
     this.captureFileMtime();
     notifyRunningChange();
+  }
+
+  // A finished or failed run goes to the shared activity notifications; an aborted one does not.
+  // Called once the run settles, with its last agent_end: an error Pi retried,
+  // or a context overflow it compacted and continued from, is not reported.
+  private recordRunNotification(event: AgentEvent): void {
+    const record = async () => {
+      const outcome = piRunOutcome(event.messages);
+      if (!outcome) return;
+      const manager = this.inner.sessionManager;
+      const cwd = manager.getCwd();
+      const entry = {
+        kind: "pi" as const,
+        ...outcome,
+        targetId: this.sessionId,
+        cwd,
+        title: piSessionTitle(manager.getSessionName(), manager.getEntries()),
+        ...(this.inner.sessionFile ? { path: this.inner.sessionFile } : {}),
+      };
+      // A worktree session belongs to the workspace of its main checkout.
+      const projectRoot = await resolveProject(cwd).then((project) => project.projectRoot, () => cwd);
+      notifications.add({ ...entry, projectRoot });
+    };
+    record().catch((error) => console.warn("[pi-web] Unable to record a Pi notification:", error));
   }
 
   // Record the current on-disk mtime as "ours", so subsequent external edits

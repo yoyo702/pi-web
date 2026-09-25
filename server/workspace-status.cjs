@@ -1,7 +1,8 @@
 "use strict";
 
 /**
- * Process-wide bus for workspace run status (terminals, Codex runtimes).
+ * Process-wide bus for workspace run status (terminals, Codex runtimes) and
+ * activity notifications.
  * Next route handlers and the custom server can load separate copies of a
  * module, so all state lives on `global`. Owners register a snapshot provider
  * and call notify() when state changes; the running-status SSE forwards the
@@ -12,6 +13,7 @@ const THROTTLE_MS = 5_000;
 const EMPTY = {
   terminals: () => ({ terminals: [], limits: null }),
   codex_runtimes: () => ({ runtimes: [] }),
+  notifications: () => ({ notifications: [], unread: 0 }),
 };
 
 function freshState() {

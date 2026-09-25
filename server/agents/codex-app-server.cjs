@@ -4,6 +4,7 @@ const { spawn } = require("node:child_process");
 const crypto = require("node:crypto");
 const workspaceStatus = require("../workspace-status.cjs");
 const requests = require("./codex-requests.cjs");
+const notifications = require("../notifications.cjs");
 const sessions = new Map();
 const modelCatalogCache = global.__piWebCodexModelCatalogCache || new Map();
 global.__piWebCodexModelCatalogCache = modelCatalogCache;
@@ -23,6 +24,11 @@ function stop(threadId) {
   workspaceStatus.notify("codex_runtimes");
   try { state.child.kill(); } catch { /* process already exited */ }
   return true;
+}
+// Server shutdown. Ctrl+C also reaches the app-server children (same process
+// group); stopping them first keeps their exits from being recorded as failed turns.
+function shutdownRuntimes() {
+  for (const threadId of [...sessions.keys()]) stop(threadId);
 }
 async function stopAndWait(threadId) {
   const state = sessions.get(threadId);
@@ -85,6 +91,7 @@ function handleProtocolMessage(state, message) {
     state.child?.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: `pi-web does not support ${message.method}` } })}\n`);
     message = { method: "codex/unsupportedRequest", params: { method: message.method } };
   }
+  recordNotification(state, message);
   if (message.method === "turn/started") { state.activeTurnId = message.params?.turn?.id || message.params?.turnId || state.activeTurnId; cancelIdleShutdown(state); }
   // Approvals left open when a turn ends can no longer be answered.
   if (message.method === "turn/completed") { state.activeTurnId = null; state.incoming.clear(); }
@@ -98,11 +105,28 @@ function handleProtocolMessage(state, message) {
   if (state.events.length > 2_000) state.events.splice(0, state.events.length - 2_000);
   for (const listener of state.listeners) listener(event);
 }
+// Turn outcomes and approval requests go to the shared activity notifications.
+function recordNotification(state, message) {
+  if (message.method === "thread/name/updated" && message.params?.threadName) state.title = message.params.threadName;
+  const base = { kind: "codex", targetId: state.threadId, cwd: state.cwd, title: state.title || "Codex chat" };
+  if (message.method === "turn/completed") {
+    const turn = message.params?.turn;
+    if (turn?.error || turn?.status === "failed") notifications.add({ ...base, event: "failed", detail: turn?.error?.message || "Turn failed" });
+    else if (turn?.status === "completed") notifications.add({ ...base, event: "completed" });
+  } else if (message.id != null && message.method) {
+    notifications.add({ ...base, event: "approval" });
+  }
+}
 function failState(state, error) {
   if (state.failure) return;
   state.failure = error instanceof Error ? error : new Error(String(error));
   cancelIdleShutdown(state);
-  if (sessions.get(state.threadId) === state) { sessions.delete(state.threadId); workspaceStatus.notify("codex_runtimes"); }
+  if (sessions.get(state.threadId) === state) {
+    sessions.delete(state.threadId);
+    workspaceStatus.notify("codex_runtimes");
+    // A crash mid-turn ends the turn without turn/completed. A stopped runtime is no longer in `sessions`.
+    if (state.activeTurnId) notifications.add({ kind: "codex", event: "failed", targetId: state.threadId, cwd: state.cwd, title: state.title || "Codex chat", detail: state.failure.message });
+  }
   // stderr may name local paths; it goes to the server log, not to clients.
   const detail = state.stderrTail?.trim();
   if (detail) console.warn(`[pi-web] Codex app-server for ${state.threadId}: ${state.failure.message}\n${detail}`);
@@ -132,7 +156,7 @@ function start({ threadId, cwd, model, serviceTier, approvalPolicy = "untrusted"
   if (removing.has(threadId)) throw Object.assign(new Error("This Codex session is being archived or deleted"), { code: "session_busy" });
   const state = spawnRuntime(threadId, cwd);
   sessions.set(threadId, state); workspaceStatus.notify("codex_runtimes");
-  state.ready = state.request("initialize", INITIALIZE).then(() => state.request("thread/resume", { threadId, cwd, model: model || null, serviceTier: serviceTier || null, approvalPolicy }));
+  state.ready = state.request("initialize", INITIALIZE).then(() => state.request("thread/resume", { threadId, cwd, model: model || null, serviceTier: serviceTier || null, approvalPolicy })).then((result) => { state.title = state.title || result?.thread?.name || result?.thread?.preview || ""; return result; });
   // A runtime that never resumed is useless; drop it so the next request retries.
   // The idle clock starts once the thread is loaded, not while it is loading.
   state.ready.then(() => { state.loaded = true; if (!state.idleTimer) scheduleIdleShutdown(state); }, () => { if (sessions.get(threadId) === state) stop(threadId); });
@@ -156,7 +180,7 @@ async function create({ cwd, model, serviceTier, approvalPolicy = "untrusted" })
   scheduleIdleShutdown(state);
   return state;
 }
-async function prompt(state, text, model = null, approvalPolicy = null, images = [], clientUserMessageId = null, effort = null, serviceTier = null) { await state.ready; const result = await state.request("turn/start", { threadId: state.threadId, cwd: state.cwd, input: [...(text ? [{ type: "text", text }] : []), ...images.map((url) => ({ type: "image", url }))], clientUserMessageId, approvalPolicy, model, effort, serviceTier, summary: "auto" }); state.activeTurnId = result?.turn?.id || result?.id || state.activeTurnId; if (state.activeTurnId) cancelIdleShutdown(state); workspaceStatus.notify("codex_runtimes"); return result; }
+async function prompt(state, text, model = null, approvalPolicy = null, images = [], clientUserMessageId = null, effort = null, serviceTier = null) { await state.ready; if (!state.title && text) state.title = text; const result = await state.request("turn/start", { threadId: state.threadId, cwd: state.cwd, input: [...(text ? [{ type: "text", text }] : []), ...images.map((url) => ({ type: "image", url }))], clientUserMessageId, approvalPolicy, model, effort, serviceTier, summary: "auto" }); state.activeTurnId = result?.turn?.id || result?.id || state.activeTurnId; if (state.activeTurnId) cancelIdleShutdown(state); workspaceStatus.notify("codex_runtimes"); return result; }
 // Adds input to the running turn. Codex refuses it if that turn has already ended.
 async function steer(state, text, images = [], clientUserMessageId = null) {
   await state.ready;
@@ -273,6 +297,6 @@ async function listModels(cwd) {
   modelCatalogCache.set(cwd, { promise, expiresAt: 0 });
   return promise;
 }
-module.exports = { configure, withRemovalLock, isRemoving, start, create, stop, stopAndWait, prompt, steer, readThread, command, respond, fork, interrupt, subscribe, isClaimed, isAttached, snapshot, runtimeForSession, listRuntimes, listModels, handleProtocolMessage, failState };
+module.exports = { configure, withRemovalLock, isRemoving, start, create, stop, stopAndWait, shutdownRuntimes, prompt, steer, readThread, command, respond, fork, interrupt, subscribe, isClaimed, isAttached, snapshot, runtimeForSession, listRuntimes, listModels, handleProtocolMessage, failState };
 
 workspaceStatus.registerProvider("codex_runtimes", () => ({ runtimes: listRuntimes() }));

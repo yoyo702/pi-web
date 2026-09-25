@@ -8,12 +8,33 @@ export interface CodexRuntimeStatus {
   connected?: boolean;
 }
 
+/** One entry of the server's activity notification log (server/notifications.cjs). */
+export interface ActivityNotification {
+  id: string;
+  kind: "codex" | "pi" | "terminal";
+  event: "completed" | "failed" | "approval";
+  /** Codex thread id, Pi session id or terminal id. */
+  targetId: string;
+  cwd: string;
+  /** Main checkout of a worktree cwd. */
+  projectRoot?: string;
+  title: string;
+  detail?: string;
+  /** Pi session file. */
+  path?: string;
+  createdAt: number;
+  read: boolean;
+}
+
 export interface WorkspaceStatusSnapshot {
   /** null until the first message of that kind arrives */
   runningSessionIds: string[] | null;
   terminals: TerminalSession[] | null;
   terminalLimits: TerminalStats["limits"] | null;
   codexRuntimes: CodexRuntimeStatus[] | null;
+  /** Newest first. */
+  notifications: ActivityNotification[] | null;
+  unreadNotifications: number;
 }
 
 export interface WorkspaceStatusStore {
@@ -32,6 +53,8 @@ const EMPTY_SNAPSHOT: WorkspaceStatusSnapshot = {
   terminals: null,
   terminalLimits: null,
   codexRuntimes: null,
+  notifications: null,
+  unreadNotifications: 0,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -76,6 +99,12 @@ export function createWorkspaceStatusStore(): WorkspaceStatusStore {
         case "codex_runtimes": {
           if (!Array.isArray(message.runtimes)) return;
           notify({ ...snapshot, codexRuntimes: message.runtimes as CodexRuntimeStatus[] });
+          return;
+        }
+        case "notifications": {
+          if (!Array.isArray(message.notifications)) return;
+          const unread = typeof message.unread === "number" ? message.unread : 0;
+          notify({ ...snapshot, notifications: message.notifications as ActivityNotification[], unreadNotifications: unread });
           return;
         }
         default:

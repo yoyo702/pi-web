@@ -274,6 +274,10 @@ function handleRequest(req, res) {
   if (codexSessionsApi.isCodexSessionPath(url.pathname)) {
     return codexSessionsApi.handleCodexSessionRequest(req, res, url);
   }
+  const notificationsApi = require("./notifications-api.cjs");
+  if (notificationsApi.isPath(url.pathname)) {
+    return notificationsApi.handle(req, res);
+  }
   const codexAppApi = require("./agents/codex-app-api.cjs");
   if (codexAppApi.isPath(url.pathname)) {
     return codexAppApi.handle(req, res, url);
@@ -341,6 +345,9 @@ function shutdown() {
     const { shutdownTerminals } = require("./agents/terminal-manager.cjs");
     shutdownTerminals();
   } catch { /* terminal runtime may not have loaded */ }
+  try {
+    require("./agents/codex-app-server.cjs").shutdownRuntimes();
+  } catch { /* Codex runtime may not have loaded */ }
   server.close(() => process.exit(0));
   // SSE streams and terminal WebSockets never end on their own, so close()
   // would otherwise always wait for the forced-exit timeout below.

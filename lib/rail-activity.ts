@@ -26,6 +26,18 @@ export type RailActivityItem =
   | (RailActivityItemBase & { kind: "terminal"; terminal: TerminalSession })
   | (RailActivityItemBase & { kind: "codex"; runtime: CodexRuntimeStatus });
 
+/** What opening an activity item or notification needs: the session, terminal or Codex chat and its directory. */
+export type ActivityTarget =
+  | { kind: "pi"; id: string; session: SessionInfo }
+  | { kind: "terminal"; id: string; cwd: string }
+  | { kind: "codex"; id: string; cwd: string };
+
+export function activityTarget(item: RailActivityItem): ActivityTarget {
+  if (item.kind === "pi") return { kind: "pi", id: item.id, session: item.session };
+  if (item.kind === "terminal") return { kind: "terminal", id: item.id, cwd: item.terminal.cwd };
+  return { kind: "codex", id: item.id, cwd: item.runtime.cwd };
+}
+
 export interface RailCompletedEntry {
   until: number;
   item: RailActivityItem;

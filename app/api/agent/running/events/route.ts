@@ -9,10 +9,14 @@ type WorkspaceStatusBus = {
 
 // GET /api/agent/running/events - SSE stream of running ids plus the bounded,
 // completion-level events used to keep unmounted session snapshots warm, plus
-// terminal and Codex runtime status snapshots from the workspace-status bus.
+// terminal, Codex runtime and activity notification snapshots from the
+// workspace-status bus.
 export async function GET(req: Request) {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const workspaceStatus = require("@/server/workspace-status.cjs") as WorkspaceStatusBus;
+  // Registers the notifications provider even before anything was recorded in this process.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  require("@/server/notifications.cjs");
 
   let cleanupStream: (() => void) | null = null;
   const pendingSnapshots = new Map<string, unknown>();
@@ -29,8 +33,8 @@ export async function GET(req: Request) {
         const text = `data: ${JSON.stringify(data)}\n\n`;
         controller.enqueue(new TextEncoder().encode(text));
       };
-      // Status snapshots (terminals, codex_runtimes) are coalesced upstream by
-      // the bus, so under backpressure we keep only the latest per kind and
+      // Status snapshots (terminals, codex_runtimes, notifications) are
+      // coalesced upstream by the bus, so under backpressure we keep only the latest per kind and
       // flush it once the stream drains, instead of dropping it outright.
       const sendSnapshot = (message: { type: string }) => {
         if (controller.desiredSize !== null && controller.desiredSize <= 0) {
@@ -75,7 +79,7 @@ export async function GET(req: Request) {
       encode({ type: "running", runningSessionIds: getRunningRpcSessionIds() });
       // A failing provider skips its kind; it must not fail the whole stream
       // (and leak the subscriptions above, whose cleanup is installed below).
-      for (const kind of ["terminals", "codex_runtimes"]) {
+      for (const kind of ["terminals", "codex_runtimes", "notifications"]) {
         try {
           sendSnapshot(workspaceStatus.snapshot(kind));
         } catch (error) {

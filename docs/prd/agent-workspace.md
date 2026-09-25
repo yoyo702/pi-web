@@ -59,6 +59,24 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - 会话被另一个 Codex 客户端（如 ChatGPT 桌面端）占用（app-server 报 “already has an active writer”）：409 `writer_conflict`，提示完全退出该应用后重试，或从 Agents 面板 Fork。
 - 聊天接口错误码：400 参数错误，403 目录未授权，404 会话不存在；409 用于已归档、正在归档/删除或有一轮在跑（`session_busy`）、终端占用（`terminal_owns_session`、`terminal_conflict`）、`writer_conflict`、审批已过期（`approval_expired`）、没有进行中的一轮（`no_active_turn`）；503 app-server 不可用；其余 500。app-server 自身的错误（`rpc_error`）、超时和运行时退出原因会显示，但其中的文件路径替换为 `<path>`；其他 500/503 只返回通用提示，详情写服务端日志（stderr 只进日志）。
 
+## 活动通知
+
+跑完、失败或等待审批的任务会留下一条通知，手机和电脑共用同一份列表和已读状态：在手机上发起、锁屏后，回到电脑上能看到结果。
+
+- 存储：服务端 `server/notifications.cjs`，写入 `~/.pi-web/notifications.json`（可用环境变量 `PI_WEB_NOTIFICATIONS_FILE` 改路径；测试和 e2e 用临时文件）。不读写 `~/.codex`、`~/.pi`。文件损坏时从空列表开始（服务端日志有警告），写入失败只记日志，列表仍在内存可用。
+- 保留：最近 7 天，最多 200 条，超出的旧条目自动删除。每条事件都会同步重写整个文件。同一个通知文件只应由一个 pi-web 进程使用：两个进程（如 `npm start` 和 `npm run dev`）同时写同一文件会互相覆盖，第二个进程应设置不同的 `PI_WEB_NOTIFICATIONS_FILE`。
+- 记录的事件：
+  - Codex 聊天：一轮完成（Completed）、失败（Failed，带 `turn.error` 原因）、等待审批或提问（Needs your input）；这一轮中途运行时意外退出算失败（用户停止或服务端正常关闭时先停止运行时，不记录）。被中断（interrupted）的一轮不记录；pi-web 不支持而直接拒绝的请求不记录。标题为会话名，无名字时用第一条消息。
+  - Pi 会话：等整次运行结束（`agent_settled`）后，按最后一次 `agent_end` 的最后一条助手消息判断：`stopReason: "error"` 记为失败（带错误信息），用户中止（aborted）不记录，其余记为完成。Pi 自动重试成功、或上下文溢出后压缩并继续成功的，只记一条完成。标题为会话名，否则第一条用户消息。worktree 里的会话同时记录项目根目录，用来找到对应项目。
+  - 终端：退出码非 0 或被信号结束记为失败（“Exited with code N” / “Killed by signal …”）；Codex/Claude 终端正常退出记为完成；普通 shell 正常退出、用户点 Stop 停止的终端不记录。
+- 已读：同一个聊天、会话或终端有新通知时，它之前未读的通知自动标为已读（只需关注最新状态；同一聊天连续两个审批时，只有后一个显示为未读，两个审批卡片仍都在聊天里）。点击通知标为已读，“Mark all read” 全部标为已读；已读状态保存在服务端，所有设备同步。接口 `POST /api/notifications/read`，请求体 `{"ids": [...]}`（最多 500 个）或 `{"all": true}`，返回 `{changed}`；格式错误 400，非 POST 405。
+- 推送：通知列表作为 `notifications` 快照（`{notifications, unread}`，新的在前）通过状态 SSE（`/api/agent/running/events`）推送，连接时先发一次完整快照。
+- 界面：
+  - 项目栏铃铛（“Workspace activity”）的角标为未读数；有等待审批的任务时角标为审批颜色，鼠标悬停显示未读数和等待数。
+  - 中间工具栏的 “Workspace activity” 按钮（手机上也有）显示未读数。
+  - 两处活动面板底部都有 “Recent” 列表：未读加粗，显示项目、类型、事件、时间，失败时附原因；点击后标为已读，并切换到所在项目打开对应的聊天、会话或终端（项目未打开时只标已读；终端记录只在内存中，服务端重启或 “Clear ended” 之后点击终端通知只切换到所在项目）。没有通知时显示 “No notifications in the last 7 days”。
+- 暂未实现：浏览器系统推送（Push API）；正在查看的标签不会自动标为已读。
+
 ## 状态模型
 
 - `idle`：可输入新任务。
@@ -94,7 +112,7 @@ Codex Chat 的审批来自 app-server 协议；普通 Terminal 不通过输出�
 
 ## 后续计划
 
-- 统一 Agent 活动通知中心。
+- 合并三处活动显示（项目栏铃铛、中间工具栏活动面板、Agents 面板）为一个活动中心；浏览器系统推送（Push API）。
 - 为 Terminal CLI 增加结构化“等待输入”状态。
 - 任务模板、批量启动和跨项目任务队列。
 - 更细粒度的资源使用和运行时间统计。

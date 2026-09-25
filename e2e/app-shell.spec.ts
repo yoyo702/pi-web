@@ -842,6 +842,82 @@ test("opens the specific terminal behind a project rail activity item", async ({
   await expect(page.getByText("Terminal process is unavailable")).toHaveCount(0);
 });
 
+test("lists recent notifications, marks them read on the server, and opens their target", async ({ page }, testInfo) => {
+  const mobile = testInfo.project.name.startsWith("mobile");
+  const cwdA = "/tmp/pi-web-notify-a";
+  const cwdB = "/tmp/pi-web-notify-b";
+  await page.addInitScript((snapshot) => {
+    if (!localStorage.getItem("pi-web:project-workspaces:v1")) localStorage.setItem("pi-web:project-workspaces:v1", JSON.stringify(snapshot));
+  }, {
+    activeId: cwdA,
+    workspaces: [
+      { id: cwdA, projectRoot: cwdA, cwd: cwdA, label: "notify-a", sessionId: null, lastActive: 2 },
+      { id: cwdB, projectRoot: cwdB, cwd: cwdB, label: "notify-b", sessionId: null, lastActive: 1 },
+    ],
+  });
+  const terminal = {
+    id: "notify-terminal", title: "Nightly build", provider: "codex", state: "exited", exitCode: 1, cwd: cwdB,
+    pid: 111, permissionMode: "confirm", launchMode: "new", noAltScreen: true, cols: 80, rows: 24,
+    createdAt: "2026-08-03T00:00:00.000Z", endedAt: "2026-08-03T00:05:00.000Z", signal: null, bufferBytes: 0, bufferTruncated: false, history: [],
+  };
+  const now = Date.now();
+  const notifications = [
+    { id: "n2", kind: "terminal", event: "failed", targetId: terminal.id, cwd: cwdB, title: "Nightly build", detail: "Exited with code 1", createdAt: now - 5 * 60_000, read: false },
+    { id: "n1", kind: "codex", event: "completed", targetId: "notify-thread", cwd: cwdA, title: "Refactor rail", createdAt: now - 2 * 60 * 60_000, read: true },
+  ];
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => {
+    const body = route.request().postDataJSON() as { cwd?: string };
+    return body.cwd ? route.fulfill({ json: { success: true, cwd: body.cwd } }) : route.fulfill({ status: 400, json: { error: "cwd required" } });
+  });
+  await page.route("**/api/git/status?*", async (route) => route.fulfill({ json: { isGitRepository: false, files: [] } }));
+  await page.route("**/api/worktrees?*", async (route) => route.fulfill({ json: { projectRoot: new URL(route.request().url()).searchParams.get("cwd"), isGit: false, isTopLevel: true, worktrees: [] } }));
+  await page.route("**/api/terminals**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname !== "/api/terminals") return route.fulfill({ status: 404, json: { error: "not found" } });
+    const cwd = url.searchParams.get("cwd") ?? "";
+    const own = cwd === cwdB ? [terminal] : [];
+    return route.fulfill({ json: {
+      cwd,
+      terminals: own,
+      stats: { workspace: { running: 0, records: own.length, bufferBytes: 0 }, global: { running: 0, records: 1, bufferBytes: 0 }, limits: { running: 20, records: 100 } },
+    } });
+  });
+  const readRequests: unknown[] = [];
+  await page.route("**/api/notifications/read", async (route) => {
+    readRequests.push(route.request().postDataJSON());
+    return route.fulfill({ json: { changed: 1 } });
+  });
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals: [terminal], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+    { type: "notifications", notifications, unread: 1 },
+  ]);
+
+  await page.goto("/");
+  const activityButton = page.locator(".center-workspace").getByRole("button", { name: "Workspace activity" });
+  await expect(activityButton.getByTestId("activity-unread-count")).toHaveText("1");
+  if (!mobile) await expect(page.getByRole("navigation", { name: "Project workspaces" }).getByTestId("activity-unread-badge")).toHaveText("1");
+
+  await activityButton.click();
+  const recent = page.getByRole("dialog", { name: "Workspace activity" }).getByRole("region", { name: "Recent notifications" });
+  await expect(recent.getByText("Recent · 1 unread")).toBeVisible();
+  const unread = recent.getByRole("button", { name: "Nightly build · Terminal · Failed · unread" });
+  await expect(unread).toHaveAttribute("data-unread", "true");
+  await expect(unread).toContainText("notify-b · Terminal · Failed · 5m ago · Exited with code 1");
+  await expect(recent.getByRole("button", { name: "Refactor rail · Codex chat · Completed" })).not.toHaveAttribute("data-unread", "true");
+
+  await recent.getByRole("button", { name: "Mark all read" }).click();
+  await expect.poll(() => readRequests).toEqual([{ all: true }]);
+
+  // Opening an entry marks it read and switches to its workspace and terminal.
+  await unread.click();
+  await expect.poll(() => readRequests.at(-1)).toEqual({ ids: ["n2"] });
+  await expect(recent).toBeHidden();
+  await expect(page.locator('.center-workspace [role="tab"][data-tab-id="terminal:notify-terminal"]')).toHaveAttribute("aria-selected", "true");
+});
+
 test("opens the Pi session behind a rail activity item with a fresh session lookup", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.startsWith("mobile"), "desktop project rail test");
   const cwd = "/tmp/pi-web-rail-pi";

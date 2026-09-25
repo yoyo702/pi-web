@@ -7,6 +7,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { ensureNodePtySpawnHelper } = require("./ensure-node-pty-helper.cjs");
 const workspaceStatus = require("../workspace-status.cjs");
+const notifications = require("../notifications.cjs");
 
 const MAX_BUFFER_BYTES = 1024 * 1024;
 const MAX_RUNNING_TERMINALS = 20;
@@ -243,8 +244,24 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
       try { subscriber(null); } catch { /* ignore */ }
     }
     workspaceStatus.notify("terminals");
+    recordExit(session);
   });
   return publicSession(session);
+}
+
+// A terminal the user stopped, or a shell they exited normally, needs no notice.
+function recordExit(session) {
+  if (session.state === "stopped") return;
+  const failed = (session.exitCode ?? 0) !== 0 || Boolean(session.signal);
+  if (!failed && session.provider === "shell") return;
+  notifications.add({
+    kind: "terminal",
+    event: failed ? "failed" : "completed",
+    targetId: session.id,
+    cwd: session.cwd,
+    title: session.title,
+    ...(failed ? { detail: session.signal && !session.exitCode ? `Killed by signal ${session.signal}` : `Exited with code ${session.exitCode}` } : {}),
+  });
 }
 
 function lookup(id) {
