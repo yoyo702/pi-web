@@ -274,6 +274,10 @@ function handleRequest(req, res) {
   if (codexSessionsApi.isCodexSessionPath(url.pathname)) {
     return codexSessionsApi.handleCodexSessionRequest(req, res, url);
   }
+  const claudeSessionsApi = require("./agents/claude-sessions-api.cjs");
+  if (claudeSessionsApi.isPath(url.pathname)) {
+    return claudeSessionsApi.handle(req, res, url);
+  }
   const notificationsApi = require("./notifications-api.cjs");
   if (notificationsApi.isPath(url.pathname)) {
     return notificationsApi.handle(req, res);

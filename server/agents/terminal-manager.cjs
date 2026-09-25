@@ -163,15 +163,23 @@ function publicSession(session) {
   };
 }
 
+const CLAUDE_SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function buildLaunchArgs(provider, executable, permissionMode, launchMode, noAltScreen, sourceSessionId, model, webSearch, initialPrompt) {
   if (provider === "shell") return process.platform === "win32" ? [] : ["-l"];
   if (!["new", "resume-last", "resume", "fork"].includes(launchMode)) {
     throw new TerminalError("invalid_launch_mode", "launchMode is invalid");
   }
   if (provider === "claude") {
-    if (launchMode !== "new") throw new TerminalError("unsupported_launch_mode", "Claude resume is not available from this terminal launcher yet");
+    if (launchMode === "resume-last") throw new TerminalError("unsupported_launch_mode", "Claude terminals resume a chosen session");
     if (permissionMode !== "confirm" && permissionMode !== "bypass") throw new TerminalError("invalid_permission_mode", "Claude supports confirm or bypass permission mode");
-    return permissionMode === "bypass" ? [assertSkipPermissionsSupported(provider, executable)] : [];
+    if (launchMode !== "new" && (typeof sourceSessionId !== "string" || !CLAUDE_SESSION_ID.test(sourceSessionId))) {
+      throw new TerminalError("invalid_session", "A Claude session id is required for this launch mode");
+    }
+    // `--fork-session` copies the history into a new session id.
+    const args = launchMode === "resume" ? ["--resume", sourceSessionId] : launchMode === "fork" ? ["--resume", sourceSessionId, "--fork-session"] : [];
+    if (permissionMode === "bypass") args.push(assertSkipPermissionsSupported(provider, executable));
+    return args;
   }
 
   if (!["confirm", "on-request", "never", "bypass"].includes(permissionMode)) {
@@ -292,9 +300,10 @@ function getTerminal(id) { return publicSession(lookup(id)); }
 function renameTerminal(id, title) { const session = lookup(id); if (typeof title !== "string" || !title.trim()) throw new TerminalError("invalid_title", "terminal title is required"); session.title = title.trim().slice(0, 80); workspaceStatus.notify("terminals"); return publicSession(session); }
 function getBuffer(id) { const session = lookup(id); return { data: Buffer.concat(session.chunks), truncated: session.truncated, state: session.state }; }
 // A `resume` terminal writes to its source session; a `fork` terminal writes
-// to a new session and only reads the source.
+// to a new session and only reads the source. Codex and Claude session ids are
+// both UUIDs, so one lookup serves both catalogs.
 function writesSession(session, sessionId) {
-  return session.provider === "codex" && session.state === "running" && session.launchMode === "resume" && session.sourceSessionId === sessionId;
+  return (session.provider === "codex" || session.provider === "claude") && session.state === "running" && session.launchMode === "resume" && session.sourceSessionId === sessionId;
 }
 function runtimeForSession(sourceSessionId) {
   const session = [...state.sessions.values()].find((candidate) => writesSession(candidate, sourceSessionId));

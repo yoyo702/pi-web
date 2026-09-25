@@ -1145,6 +1145,91 @@ test("pages Codex sessions and shows fork source, model and busy errors", async 
   await expect(page.getByText("Parent work", { exact: true })).toBeVisible();
 });
 
+test("lists Claude sessions, resumes one in a terminal and shows delete conflicts", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const session = (id: string, title: string, extra: Record<string, unknown> = {}) => ({
+    id, title, firstMessage: `${title} prompt`, cwd: "/tmp/pi-web-e2e", gitBranch: "main", createdAt: "2026-08-03T00:00:00.000Z",
+    updatedAt: "2026-08-03T00:00:00.000Z", size: 2048, runtime: null, ...extra,
+  });
+  const firstId = "11111111-1111-4111-8111-111111111111";
+  const secondId = "22222222-2222-4222-8222-222222222222";
+  const queries: string[] = [];
+  const launches: Record<string, unknown>[] = [];
+  const deleted = new Set<string>();
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
+    id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
+    created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
+  }], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
+  await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: { cwd: "/tmp/pi-web-e2e", terminals: [], stats: null } }));
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals: [], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
+  await page.route("**/api/project-scripts?*", async (route) => route.fulfill({ json: { scripts: [], runner: "npm" } }));
+  await page.route("**/api/claude/sessions?*", async (route) => {
+    const query = new URL(route.request().url()).searchParams.get("q") || "";
+    queries.push(query);
+    const all = [session(firstId, "Refactor login"), session(secondId, "Write docs")].filter((item) => !deleted.has(item.id));
+    return route.fulfill({ json: { sessions: all.filter((item) => item.title.toLowerCase().includes(query.toLowerCase())), nextCursor: null } });
+  });
+  await page.route("**/api/claude/sessions/*/delete", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/")[4];
+    if (id === firstId) return route.fulfill({ status: 409, json: { error: "A running Claude terminal in this workspace may be writing this session. Stop it first.", code: "session_busy" } });
+    deleted.add(id);
+    return route.fulfill({ json: { session: session(id, "Write docs") } });
+  });
+  await page.route("**/api/terminals", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    launches.push(body);
+    return route.fulfill({ status: 201, json: { terminal: {
+      id: "claude-term", provider: "claude", cwd: "/tmp/pi-web-e2e", state: "running", createdAt: new Date().toISOString(),
+      launchMode: body.launchMode, sourceSessionId: body.sourceSessionId, permissionMode: body.permissionMode, label: "Claude",
+    } } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.locator("button[aria-expanded]").filter({ hasText: "Claude" }).last().click();
+  await expect(page.getByText("Refactor login", { exact: true })).toBeVisible();
+  await expect(page.getByText("Refactor login prompt · 2.0 KB", { exact: true })).toBeVisible();
+
+  await page.getByRole("textbox", { name: "Search Claude sessions" }).fill("docs");
+  await expect(page.getByText("Refactor login", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Write docs", { exact: true })).toBeVisible();
+  expect(queries).toContain("docs");
+  await page.getByRole("button", { name: "Clear Claude session search" }).click();
+  await expect(page.getByText("Refactor login", { exact: true })).toBeVisible();
+  await expect(page.getByText("Write docs", { exact: true })).toBeVisible();
+
+  // The action menu closes on scroll; bring the rows into view before opening it.
+  const openMenu = async (title: string) => {
+    const trigger = page.getByRole("button", { name: `Manage ${title}` });
+    await trigger.hover();
+    await trigger.click();
+  };
+  await openMenu("Refactor login");
+  await page.getByRole("menuitem", { name: "Delete…" }).click();
+  await page.getByRole("dialog", { name: "Delete Claude session" }).getByRole("button", { name: "Remove" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "may be writing this session" })).toBeVisible();
+
+  await openMenu("Write docs");
+  await page.getByRole("menuitem", { name: "Delete…" }).click();
+  await page.getByRole("dialog", { name: "Delete Claude session" }).getByRole("button", { name: "Remove" }).click();
+  await expect(page.getByText("Write docs", { exact: true })).toHaveCount(0);
+
+  await openMenu("Refactor login");
+  await page.getByRole("menuitem", { name: "Fork to Terminal…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Start Claude session" });
+  await expect(dialog.getByRole("combobox", { name: "Action" })).toHaveValue("fork");
+  await dialog.getByRole("combobox", { name: "Action" }).selectOption("resume");
+  await dialog.getByRole("button", { name: "Resume in Terminal" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(launches).toEqual([{ provider: "claude", cwd: "/tmp/pi-web-e2e", permissionMode: "confirm", launchMode: "resume", sourceSessionId: firstId }]);
+});
+
 // Codex chat event streams are driven from the test through window.__codexStreams.
 async function fakeCodexStreams(page: Page) {
   await page.addInitScript(() => {

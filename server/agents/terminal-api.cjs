@@ -6,6 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const manager = require("./terminal-manager.cjs");
 const codexAppServer = require("./codex-app-server.cjs");
+const claudeSessions = require("./claude-sessions.cjs");
 const { readJsonBody } = require("../http-body.cjs");
 
 const state = global.__piWebTerminalAuthorization || { roots: new Set() };
@@ -181,6 +182,12 @@ async function handleTerminalRequest(req, res, url) {
         if (chat && chat.state !== "idle") throw Object.assign(new Error("Codex Chat is still running a turn in this session. Wait for it to finish or stop it first."), { code: "session_busy" });
         await codexAppServer.stopAndWait(body.sourceSessionId);
         if (codexAppServer.isRemoving(body.sourceSessionId)) throw Object.assign(new Error("This Codex session is being archived or deleted"), { code: "session_busy" });
+      }
+      if (body.provider === "claude" && (body.launchMode === "resume" || body.launchMode === "fork")) {
+        // Claude looks sessions up by folder, so the session must belong to this one.
+        claudeSessions.requireSession(body.sourceSessionId, cwd);
+        // Two Claude processes appending to one session file corrupt its history.
+        if (body.launchMode === "resume" && manager.runtimeForSession(body.sourceSessionId)) throw Object.assign(new Error("This Claude session is already open in a terminal"), { code: "session_busy" });
       }
       const terminal = manager.createTerminal({ provider: body.provider, cwd, cols: body.cols ?? 100, rows: body.rows ?? 30, permissionMode: body.permissionMode ?? "confirm", launchMode: body.launchMode ?? "new", noAltScreen: body.noAltScreen ?? body.provider === "codex", sourceSessionId: body.sourceSessionId, model: body.model, webSearch: body.webSearch, initialPrompt: body.initialPrompt, chatMode: body.chatMode === true });
       return json(res, 201, { terminal });

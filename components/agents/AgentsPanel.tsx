@@ -5,6 +5,7 @@ import { createPortal } from "react-dom";
 import type { TerminalPermissionMode, TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
 import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
 import { useWorkspaceStatus } from "@/hooks/useWorkspaceStatus";
+import { useClaudeSessions, type ClaudeSession } from "@/hooks/useClaudeSessions";
 import { ProductStatusDot } from "@/components/ProductStatus";
 import type { CodexChatTarget } from "@/components/workspace/WorkspaceActions";
 
@@ -27,6 +28,7 @@ interface ProjectScript { name: string; command: string }
 interface TaskNotice { terminal: TerminalSession; title: string; summary: string }
 type PendingAction =
   | { kind: "session"; action: "rename" | "archive" | "unarchive" | "delete"; session: CodexSession }
+  | { kind: "claude-session"; session: ClaudeSession }
   | { kind: "terminal"; action: "stop" | "remove"; terminal: TerminalSession }
   | { kind: "clear"; provider?: TerminalProvider; count: number };
 
@@ -56,6 +58,10 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [sessionQuery, setSessionQuery] = useState("");
   const [debouncedSessionQuery, setDebouncedSessionQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [claudeQuery, setClaudeQuery] = useState("");
+  const [debouncedClaudeQuery, setDebouncedClaudeQuery] = useState("");
+  const [claudeLaunch, setClaudeLaunch] = useState<{ session: ClaudeSession; mode: "resume" | "fork"; permission: "confirm" | "bypass" } | null>(null);
+  const [claudeError, setClaudeError] = useState<string | null>(null);
   const { terminals, stats: terminalStats, update: setTerminals } = useWorkspaceTerminals(cwd, refreshKey);
   const status = useWorkspaceStatus();
   const [projectScripts, setProjectScripts] = useState<ProjectScript[]>([]);
@@ -133,6 +139,11 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     const timer = window.setTimeout(() => setDebouncedSessionQuery(sessionQuery.trim()), 180);
     return () => window.clearTimeout(timer);
   }, [sessionQuery]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedClaudeQuery(claudeQuery.trim()), 180);
+    return () => window.clearTimeout(timer);
+  }, [claudeQuery]);
 
   useEffect(() => {
     if (!launchTarget) return;
@@ -303,6 +314,16 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const manualShellTerminals = shellTerminals.filter((terminal) => !terminal.title?.startsWith("Task: "));
   const codexTerminals = terminals.filter((terminal) => terminal.provider === "codex");
   const claudeTerminals = terminals.filter((terminal) => terminal.provider === "claude");
+  const claudeCatalog = useClaudeSessions(cwd, {
+    enabled: claudeOpen,
+    query: debouncedClaudeQuery,
+    refreshKey,
+    // A Claude terminal starting or ending creates or updates a session file.
+    changeKey: claudeTerminals.map((terminal) => `${terminal.id}:${terminal.state}`).sort().join(","),
+  });
+  // A resumed session is shown as its terminal row, like Codex.
+  const liveClaudeSessionIds = new Set(claudeTerminals.filter((terminal) => terminal.state === "running" && terminal.launchMode === "resume").map((terminal) => terminal.sourceSessionId).filter(Boolean));
+  const claudeHistory = claudeCatalog.sessions.filter((session) => !liveClaudeSessionIds.has(session.id));
   // A fork terminal records its parent as the source but writes a new session,
   // so only resumed sessions are hidden behind their terminal row.
   const liveCodexSessionIds = new Set(codexTerminals.filter((terminal) => terminal.state === "running" && terminal.launchMode === "resume").map((terminal) => terminal.sourceSessionId).filter(Boolean));
@@ -384,6 +405,49 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
       setBusyId(null);
     }
   }, [cwd, launchModel, launchPermission, launchPrompt, launchReasoningEffort, launchServiceTier, launchTarget, launchWebSearch, onOpenCodexSession, onOpenTerminal, setTerminals]);
+
+  const startClaudeSession = useCallback(async () => {
+    if (!claudeLaunch) return;
+    const { session, mode, permission } = claudeLaunch;
+    setBusyId(session.id);
+    setClaudeError(null);
+    try {
+      const response = await fetch("/api/terminals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "claude", cwd, permissionMode: permission, launchMode: mode, sourceSessionId: session.id }),
+      });
+      const data = await response.json() as { terminal?: TerminalSession; error?: string };
+      if (!response.ok || !data.terminal) throw new Error(data.error || "Unable to start Claude terminal");
+      onOpenTerminal?.(data.terminal, mode === "fork" ? `${session.title} (fork)` : session.title);
+      setTerminals((current) => current.some((item) => item.id === data.terminal!.id) ? current : [...current, data.terminal!]);
+      setClaudeLaunch(null);
+    } catch (cause) {
+      setClaudeError(cause instanceof Error ? cause.message : "Unable to start Claude terminal");
+    } finally {
+      setBusyId(null);
+    }
+  }, [claudeLaunch, cwd, onOpenTerminal, setTerminals]);
+
+  const { reload: reloadClaudeSessions } = claudeCatalog;
+  const deleteClaudeSession = useCallback(async (session: ClaudeSession) => {
+    setBusyId(session.id);
+    setClaudeError(null);
+    try {
+      const response = await fetch(`/api/claude/sessions/${encodeURIComponent(session.id)}/delete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error || "Unable to delete Claude session");
+      await reloadClaudeSessions(true);
+    } catch (cause) {
+      setClaudeError(cause instanceof Error ? cause.message : "Unable to delete Claude session");
+    } finally {
+      setBusyId(null);
+    }
+  }, [cwd, reloadClaudeSessions]);
 
   const stopTerminal = useCallback(async (terminal: TerminalSession) => {
     setActionError(null);
@@ -487,9 +551,10 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     if (pending.kind === "session" && pending.action === "rename" && (!renameValue.trim() || renameValue.trim() === pending.session.name)) return;
     setPendingAction(null);
     if (pending.kind === "session") void manageSession(pending.session, pending.action, renameValue);
+    else if (pending.kind === "claude-session") void deleteClaudeSession(pending.session);
     else if (pending.kind === "terminal") void (pending.action === "stop" ? stopTerminal(pending.terminal) : removeTerminalRecord(pending.terminal));
     else void clearEndedTerminalRecords(pending.provider);
-  }, [clearEndedTerminalRecords, manageSession, pendingAction, removeTerminalRecord, renameValue, stopTerminal]);
+  }, [clearEndedTerminalRecords, deleteClaudeSession, manageSession, pendingAction, removeTerminalRecord, renameValue, stopTerminal]);
 
   const requestSessionAction = useCallback((session: CodexSession, action: "rename" | "archive" | "unarchive" | "delete") => {
     setRenameValue(session.name);
@@ -580,10 +645,44 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
               </div>)}
         {!loading && !error && nextCursor && <button type="button" disabled={loadingMore} onClick={() => void loadMoreSessions()} style={retryStyle}>{loadingMore ? "Loading…" : "Load more sessions"}</button>}
       </div>}
-      <ProviderRow provider="claude" label="Claude" badge="A" badgeColor="#d97706" open={claudeOpen} count={claudeTerminals.length} running={claudeTerminals.filter((terminal) => terminal.state === "running").length} onToggle={() => setClaudeOpen((value) => !value)} onNewAgent={onNewAgent} />
+      <ProviderRow provider="claude" label="Claude" badge="A" badgeColor="#d97706" open={claudeOpen} count={claudeTerminals.length + claudeHistory.length} running={claudeTerminals.filter((terminal) => terminal.state === "running").length} onToggle={() => setClaudeOpen((value) => !value)} onNewAgent={onNewAgent} />
       {claudeOpen && <div style={sessionListStyle}>
+        <div style={sessionToolsStyle}>
+          <label style={searchStyle}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></svg>
+            <input value={claudeQuery} onChange={(event) => setClaudeQuery(event.target.value)} placeholder="Search sessions" aria-label="Search Claude sessions" style={searchInputStyle} />
+            {claudeQuery && <button type="button" onClick={() => setClaudeQuery("")} aria-label="Clear Claude session search" title="Clear" style={searchClearStyle}>×</button>}
+          </label>
+        </div>
+        {claudeError && !claudeLaunch && <div role="alert" style={errorStyle}>{claudeError}</div>}
         {claudeTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "claude", count: claudeTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
-        {claudeTerminals.length === 0 ? <InlineMessage>No active Claude sessions</InlineMessage> : claudeTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
+        {claudeTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} preferredLabel={claudeCatalog.sessions.find((session) => session.id === terminal.sourceSessionId && terminal.launchMode === "resume")?.title} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
+        {claudeCatalog.loading && claudeCatalog.sessions.length === 0 ? <InlineMessage>Loading sessions…</InlineMessage>
+          : claudeCatalog.error ? <button type="button" onClick={() => void claudeCatalog.reload()} style={retryStyle}>Couldn&apos;t load sessions · Retry</button>
+            : claudeHistory.length === 0 && claudeTerminals.length === 0 ? <InlineMessage>{claudeQuery ? "No matching sessions" : "No Claude sessions in this folder"}</InlineMessage>
+              : claudeHistory.map((session) => <div key={session.id} style={sessionContainerStyle}>
+                <button
+                  type="button"
+                  disabled={busyId === session.id}
+                  style={{ ...sessionMainStyle, cursor: "pointer" }}
+                  title={[session.title, session.firstMessage !== session.title && session.firstMessage, session.gitBranch && `Branch: ${session.gitBranch}`, session.id].filter(Boolean).join("\n")}
+                  onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "resume", permission: "confirm" }); }}
+                >
+                  <StatusDot state="idle" />
+                  <span style={{ minWidth: 0, flex: 1 }}>
+                    <span style={sessionNameStyle}>{session.title}</span>
+                    <span style={sessionMetaStyle}>{[session.firstMessage !== session.title && session.firstMessage, formatBytes(session.size)].filter(Boolean).join(" · ")}</span>
+                  </span>
+                  <span style={timeStyle}>{busyId === session.id ? "…" : formatRelativeTime(session.updatedAt)}</span>
+                </button>
+                <ActionMenu label={`Manage ${session.title}`}>
+                  <MenuButton onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "resume", permission: "confirm" }); }}>Resume in Terminal…</MenuButton>
+                  <MenuButton onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "fork", permission: "confirm" }); }}>Fork to Terminal…</MenuButton>
+                  <span style={menuDividerStyle} />
+                  <MenuButton danger onClick={() => setPendingAction({ kind: "claude-session", session })}>Delete…</MenuButton>
+                </ActionMenu>
+              </div>)}
+        {!claudeCatalog.loading && !claudeCatalog.error && claudeCatalog.nextCursor && <button type="button" disabled={claudeCatalog.loadingMore} onClick={() => void claudeCatalog.loadMore()} style={retryStyle}>{claudeCatalog.loadingMore ? "Loading…" : claudeCatalog.loadMoreError ? "Couldn't load more · Retry" : "Load more sessions"}</button>}
       </div>}
     </div>}
   </section>
@@ -610,6 +709,14 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
       onCancel={() => { if (!busyId) setLaunchTarget(null); }}
       onStart={() => void startSession()}
     />}
+    {claudeLaunch && <ClaudeLaunchDialog
+      target={claudeLaunch}
+      busy={busyId === claudeLaunch.session.id}
+      error={claudeError}
+      onChange={(change) => setClaudeLaunch((current) => current ? { ...current, ...change } : null)}
+      onCancel={() => { if (!busyId) setClaudeLaunch(null); }}
+      onStart={() => void startClaudeSession()}
+    />}
     {pendingAction && <AgentActionDialog action={pendingAction} renameValue={renameValue} busy={Boolean(busyId)} onRenameChange={setRenameValue} onCancel={() => setPendingAction(null)} onConfirm={confirmPendingAction} />}
     {taskNotices.length > 0 && createPortal(<div aria-live="polite" style={taskNoticesStackStyle}>{taskNotices.map((notice) => <div key={notice.terminal.id} role="status" style={taskNoticeStyle}>
       <button type="button" onClick={() => { onOpenTerminal?.(notice.terminal, notice.terminal.title); setTaskNotices((current) => current.filter((item) => item.terminal.id !== notice.terminal.id)); }} style={taskNoticeMainStyle}><strong>{notice.title}</strong><span>{notice.summary}</span></button>
@@ -621,9 +728,10 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
 function AgentActionDialog({ action, renameValue, busy, onRenameChange, onCancel, onConfirm }: { action: PendingAction; renameValue: string; busy: boolean; onRenameChange: (value: string) => void; onCancel: () => void; onConfirm: () => void }) {
   useDialogEscape(onCancel, busy);
   const rename = action.kind === "session" && action.action === "rename";
-  const destructive = action.kind === "session" && action.action === "delete" || action.kind === "terminal" || action.kind === "clear";
-  const title = rename ? "Rename Codex session" : action.kind === "session" ? `${action.action === "unarchive" ? "Restore" : action.action[0].toUpperCase() + action.action.slice(1)} Codex session` : action.kind === "terminal" ? `${action.action === "stop" ? "Stop" : "Remove"} ${action.terminal.provider} terminal` : `Clear ended ${action.provider ? `${action.provider} ` : ""}terminals`;
-  const description = action.kind === "session"
+  const destructive = action.kind === "session" && action.action === "delete" || action.kind === "claude-session" || action.kind === "terminal" || action.kind === "clear";
+  const title = rename ? "Rename Codex session" : action.kind === "claude-session" ? "Delete Claude session" : action.kind === "session" ? `${action.action === "unarchive" ? "Restore" : action.action[0].toUpperCase() + action.action.slice(1)} Codex session` : action.kind === "terminal" ? `${action.action === "stop" ? "Stop" : "Remove"} ${action.terminal.provider} terminal` : `Clear ended ${action.provider ? `${action.provider} ` : ""}terminals`;
+  const description = action.kind === "claude-session" ? `“${action.session.title}” and its sub-agent transcripts will be permanently deleted. This cannot be undone.`
+    : action.kind === "session"
     ? action.action === "delete" ? `“${action.session.name}” will be permanently deleted. This cannot be undone.` : action.action === "archive" ? `“${action.session.name}” will move out of the active session list.` : action.action === "unarchive" ? `“${action.session.name}” will return to the active session list.` : "Choose a concise name that identifies this session."
     : action.kind === "terminal" ? action.action === "stop" ? "The running process will be interrupted. Its session history will remain available." : "This removes the ended terminal record from the workspace."
     : `${action.count} ended terminal record${action.count === 1 ? "" : "s"} will be removed from this workspace.`;
@@ -637,6 +745,30 @@ function AgentActionDialog({ action, renameValue, busy, onRenameChange, onCancel
         <button type="button" disabled={busy} onClick={onCancel} style={dialogButtonStyle}>Cancel</button>
         <button type="button" disabled={confirmDisabled} onClick={onConfirm} style={{ ...dialogButtonStyle, borderColor: destructive ? "rgb(239 68 68 / 45%)" : "var(--accent)", background: destructive ? "rgb(239 68 68 / 10%)" : "var(--accent)", color: destructive ? "#ef4444" : "white", opacity: confirmDisabled ? .5 : 1 }}>{busy ? "Working…" : rename ? "Rename" : action.kind === "session" && action.action === "unarchive" ? "Restore" : action.kind === "session" && action.action === "archive" ? "Archive" : action.kind === "terminal" && action.action === "stop" ? "Stop terminal" : "Remove"}</button>
       </div>
+    </section>
+  </div>;
+}
+
+function ClaudeLaunchDialog({ target, busy, error, onChange, onCancel, onStart }: {
+  target: { session: ClaudeSession; mode: "resume" | "fork"; permission: "confirm" | "bypass" };
+  busy: boolean;
+  error: string | null;
+  onChange: (change: { mode?: "resume" | "fork"; permission?: "confirm" | "bypass" }) => void;
+  onCancel: () => void;
+  onStart: () => void;
+}) {
+  useDialogEscape(onCancel, busy);
+  return <div role="dialog" aria-modal="true" aria-label="Start Claude session" style={dialogOverlayStyle} onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+    <section style={dialogStyle}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}><strong style={{ flex: 1, fontSize: 14 }}>{target.session.title}</strong><button type="button" onClick={onCancel} disabled={busy} style={dialogButtonStyle}>Cancel</button></div>
+      <div style={dialogGridStyle}>
+        <label style={fieldStyle}>Action<select value={target.mode} disabled={busy} onChange={(event) => onChange({ mode: event.target.value as "resume" | "fork" })} style={inputStyle}><option value="resume">Resume session</option><option value="fork">Fork session</option></select></label>
+        <label style={fieldStyle}>Permissions<select value={target.permission} disabled={busy} onChange={(event) => onChange({ permission: event.target.value as "confirm" | "bypass" })} style={inputStyle}><option value="confirm">Keep CLI confirmations</option><option value="bypass">Dangerous bypass</option></select></label>
+      </div>
+      <small style={{ ...hintStyle, display: "block", marginTop: 10 }}>{target.mode === "fork" ? "Starts a new session with a copy of this history; the original is left unchanged." : "Continues this session in a Terminal. Only one Terminal can resume a session at a time."}</small>
+      {target.permission === "bypass" && <div style={dangerStyle}>Claude will skip its permission confirmations in this Terminal.</div>}
+      {error && <div role="alert" style={errorStyle}>{error}</div>}
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}><button type="button" disabled={busy} onClick={onStart} style={{ ...dialogButtonStyle, background: "var(--accent)", borderColor: "var(--accent)", color: "white" }}>{busy ? "Starting…" : `${target.mode === "fork" ? "Fork" : "Resume"} in Terminal`}</button></div>
     </section>
   </div>;
 }
