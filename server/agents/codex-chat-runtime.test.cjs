@@ -20,15 +20,16 @@ const IDLE_MS = 60;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Chat runtimes run the fake app-server in a temp dir; nothing touches ~/.codex.
-function useFakeRuntime(t, { writer = false } = {}) {
+function useFakeRuntime(t, { writer = false, turns } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-codex-runtime-"));
   const log = path.join(dir, "log.jsonl");
   const state = path.join(dir, "state.json");
-  fs.writeFileSync(state, JSON.stringify({ threads: [{ id: ID, name: "Chat", cwd: dir, archived: false, writer, path: path.join(dir, "rollout.jsonl") }] }));
+  fs.writeFileSync(state, JSON.stringify({ threads: [{ id: ID, name: "Chat", cwd: dir, archived: false, writer, turns, path: path.join(dir, "rollout.jsonl") }] }));
   appServer.configure({ command: process.execPath, args: [FAKE_SERVER], env: { ...process.env, FAKE_CODEX_STATE: state, FAKE_CODEX_LOG: log }, idleMs: IDLE_MS });
   t.after(async () => { await appServer.stopAndWait(ID); appServer.configure(null); fs.rmSync(dir, { recursive: true, force: true }); });
   const methods = () => fs.existsSync(log) ? fs.readFileSync(log, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [];
-  return { dir, methods };
+  const threads = () => JSON.parse(fs.readFileSync(state, "utf8")).threads;
+  return { dir, methods, threads };
 }
 async function waitFor(check, timeoutMs = 2_000) {
   const deadline = Date.now() + timeoutMs;
@@ -135,6 +136,35 @@ test("a turn Codex will not steer is reported as no_active_turn", async (t) => {
   const runtime = appServer.start({ threadId: ID, cwd: dir });
   await appServer.prompt(runtime, "review the diff");
   await assert.rejects(appServer.steer(runtime, "more"), (error) => error.code === "no_active_turn" && /activeTurnNotSteerable/.test(JSON.stringify(error.cause.rpcData)));
+});
+
+test("a fork keeps the turns through the given one, and its own runtime can resume it", async (t) => {
+  const { dir, methods, threads } = useFakeRuntime(t, { turns: [{ id: "turn-a", items: [] }, { id: "turn-b", items: [] }, { id: "turn-c", items: [] }] });
+  const source = appServer.start({ threadId: ID, cwd: dir });
+  await source.ready;
+  const { thread } = await appServer.fork({ threadId: ID, cwd: dir }, "turn-b");
+  assert.notEqual(thread.id, ID);
+  assert.deepEqual(threads().find((item) => item.id === thread.id).turns.map((turn) => turn.id), ["turn-a", "turn-b"]);
+  assert.deepEqual(methods().find((entry) => entry.method === "thread/fork").params, { threadId: ID, cwd: dir, excludeTurns: true, lastTurnId: "turn-b" });
+  // The fork came from its own process, not the source's runtime, which keeps running.
+  assert.equal(appServer.isClaimed(thread.id), false);
+  assert.equal(appServer.isClaimed(ID), true);
+  const forked = appServer.start({ threadId: thread.id, cwd: dir });
+  t.after(() => appServer.stopAndWait(thread.id));
+  await forked.ready;
+  // Without a turn the whole thread is copied.
+  const whole = await appServer.fork({ threadId: ID, cwd: dir });
+  assert.equal(threads().find((item) => item.id === whole.thread.id).turns.length, 3);
+  assert.equal("lastTurnId" in methods().filter((entry) => entry.method === "thread/fork").at(-1).params, false);
+  await appServer.withRemovalLock(ID, async () => {
+    await assert.rejects(appServer.fork({ threadId: ID, cwd: dir }), (error) => error.code === "session_busy");
+  });
+});
+
+test("a fork whose app-server cannot start fails instead of hanging", async (t) => {
+  const { dir } = useFakeRuntime(t);
+  appServer.configure({ command: path.join(dir, "missing-codex"), args: [], env: process.env, idleMs: IDLE_MS });
+  await assert.rejects(appServer.fork({ threadId: ID, cwd: dir }), /Unable to start Codex app-server/);
 });
 
 test("closing the last viewer of an idle runtime shuts it down", async (t) => {
@@ -260,6 +290,25 @@ test("steering needs a turn this chat is running and never starts a runtime", as
   assert.equal(accepted.status, 202);
   assert.deepEqual(accepted.body, { turn: { turnId: "turn-1" } });
   assert.deepEqual(calls.at(-1), ["steer", "more", "m1"]);
+});
+
+test("a fork request passes its turn id, starts no runtime and hides the fork's rollout path", async (t) => {
+  const calls = setupApi(t);
+  const forks = [];
+  stub(t, appServer, "fork", async (source, lastTurnId) => { forks.push([source.threadId, lastTurnId]); return { thread: { id: "22222222-2222-2222-2222-222222222222", path: "/secret" } }; });
+  const through = await request("POST", `/api/codex/chat/${ID}/fork`, { lastTurnId: "turn-1" });
+  assert.equal(through.status, 200);
+  assert.deepEqual(through.body, { result: { thread: { id: "22222222-2222-2222-2222-222222222222" } } });
+  assert.equal((await request("POST", `/api/codex/chat/${ID}/fork`, {})).status, 200);
+  assert.deepEqual(forks, [[ID, "turn-1"], [ID, null]]);
+  // No runtime is started for the source.
+  assert.deepEqual(calls, []);
+  for (const lastTurnId of ["", 7]) {
+    const refused = await request("POST", `/api/codex/chat/${ID}/fork`, { lastTurnId });
+    assert.equal(refused.status, 400);
+    assert.equal(refused.body.code, "invalid_request");
+  }
+  assert.equal(forks.length, 2);
 });
 
 test("a new chat is created in an authorized folder with its first message", async (t) => {

@@ -98,6 +98,12 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - 其他请求（如动态工具调用 `item/tool/call`、ChatGPT 登录刷新）立即回错误，聊天显示 “Codex asked for …, which Codex Chat does not support; it was declined.”，这一轮不会卡住。
   - 回答格式错误返回 400，卡片保留；请求已不存在返回 409 `approval_expired`。
 - 运行中插话：Codex 在跑时，Enter 或 “Steer” 把消息加入当前这一轮（`POST /api/codex/chat/:id/steer`，app-server `turn/steer`）；“Queue” 排到下一轮，斜杠命令在运行中总是排队。这一轮刚结束或不能插话（review、compact）时返回 409 `no_active_turn`，消息自动排队，这一轮结束后按普通消息发送。插话不会启动运行时，只作用于本聊天已在运行的一轮；请求失败时消息放回输入框。
+- 文件改动显示为差异：新增文件全部为 “+” 行，删除文件全部为 “-” 行，修改显示 Codex 给出的 hunk（重命名时目标为新路径）；默认折叠，点开文件行查看。
+- 任务列表：`turn/plan/updated` 显示为 “Tasks” 卡片（“n/m done”，○ 待做 / ◐ 进行中 / ● 完成），每轮一张，更新时移到最新位置。Codex 不把计划更新写入会话文件，所以只在运行时事件里可见（实时或重放缓冲）；运行时关闭后重新打开，任务列表不再显示。
+- Fork（都在新标签打开，原聊天不变）：
+  - 输入框 “More → Fork chat” 复制整个会话。
+  - 用户消息上的 “New session” 从这条消息分叉：保留它之前的各轮（`POST /api/codex/chat/:id/fork`，`{lastTurnId}` 为上一轮的 id，含该轮），这条消息放进新标签的输入框，可修改后发送。会话第一条消息没有之前的轮，不显示该按钮；运行中不能 Fork。
+  - 服务端在单独的短命 app-server 进程里调用 `thread/fork`（`excludeTurns: true`），等进程退出后才返回。原因：app-server 对它加载过的每个会话（包括 fork 出的新会话）一直保持写入者身份，`thread/unsubscribe` 也不释放；在原会话的运行时里 fork，新会话的运行时会报 “already has an active writer”。Fork 不启动运行时，也不检查终端占用。
 - 错误显示：
   - `error` 且 `willRetry: true`：显示 “Codex is retrying: …”，这一轮继续，收到新的条目或一轮开始后提示消失。
   - `turn/completed` 带 `turn.error`：显示 “Turn failed: …”。
@@ -123,7 +129,8 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - Esc 或停止按钮中断这一轮（`interrupt` 控制请求）；Claude 以 `result` 结束这一轮，进程保留。
   - 模型：Default / Sonnet / Opus / Haiku；权限模式：Ask before edits（`default`）/ Accept edits / Plan mode / Bypass permissions。都作用于下一条消息：与运行中进程的启动参数不同时，服务端先停止进程再用新参数启动（比较的是启动时请求的模型别名 `launchModel`，不是 Claude 回报的完整模型名，所以同一模型不会每次重启）。
   - “Allow for session” 可能让 Claude 切换权限模式（如接受编辑），`system` 记录回报新模式后，界面和标签配置随之更新。
-  - 工具显示：Bash 显示为命令和输出；Edit / MultiEdit / Write 显示为差异；其他工具显示名称、输入和结果。斜杠命令按输入显示，命令输出显示为提示；“[Request interrupted by user]” 显示为 “Interrupted”。`result` 带 `is_error` 时显示错误提示。
+  - 工具显示：Bash 显示为命令和输出；Edit / MultiEdit / Write 显示为差异；其他工具显示名称、输入和结果。
+  - 任务列表：`TaskCreate` / `TaskUpdate`（Claude Code 2.x 的任务工具）和旧的 `TodoWrite` 不显示为工具调用，而是合成一张 “Tasks” 卡片，放在最近一次改动的位置。新任务的编号取自 `TaskCreate` 的结果（“Task #N created …”），`TaskUpdate` 只更新已知编号（`deleted` 删除）；创建在未加载的更早历史里的任务，其更新被忽略。斜杠命令按输入显示，命令输出显示为提示；“[Request interrupted by user]” 显示为 “Interrupted”。`result` 带 `is_error` 时显示错误提示。
   - 暂不支持：图片（发送时提示移除）、子代理详情、斜杠命令菜单、Fork。
 - 权限卡片（`control_request can_use_tool`）：
   - 普通工具：显示命令 / 差异 / 输入 JSON、文件路径和原因；按钮 Allow、Allow for session（仅当 Claude 给出建议规则时，同时应用这些规则）、Deny。

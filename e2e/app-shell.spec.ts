@@ -1430,6 +1430,77 @@ test("starts a new Codex chat whose first message creates the session", async ({
   await expect(page.getByRole("tab", { name: /Codex Chat/ })).toHaveCount(0);
 });
 
+test("shows Codex file diffs and task lists, and forks a chat from a message into a new tab", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const id = "55555555-5555-5555-5555-555555555555";
+  const forkId = "66666666-6666-6666-6666-666666666666";
+  await fakeCodexStreams(page);
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
+    id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
+    created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
+  }], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
+  await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: { cwd: "/tmp/pi-web-e2e", terminals: [], stats: null } }));
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals: [], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
+  await page.route("**/api/project-scripts?*", async (route) => route.fulfill({ json: { scripts: [], runner: "npm" } }));
+  await page.route("**/api/codex/models?*", async (route) => route.fulfill({ json: { result: { data: [] } } }));
+  await page.route("**/api/codex/sessions?*", async (route) => route.fulfill({ json: { sessions: [{
+    id, name: "Diff work", cwd: "/tmp/pi-web-e2e", updatedAt: "2026-08-03T00:00:00.000Z", lastUserMessage: "rename b", archived: false, runtime: null,
+  }], nextCursor: null } }));
+  const turns = [
+    { id: "turn-1", status: "completed", items: [
+      { type: "userMessage", id: "u1", content: [{ type: "text", text: "add a file" }] },
+      { type: "fileChange", id: "f1", status: "completed", changes: [{ path: "/tmp/pi-web-e2e/notes.txt", kind: { type: "update", move_path: null }, diff: "@@ -1,2 +1,2 @@\n a\n-old line\n+new line\n" }] },
+    ] },
+    { id: "turn-2", status: "completed", items: [
+      { type: "userMessage", id: "u2", content: [{ type: "text", text: "rename b" }] },
+      { type: "agentMessage", id: "a2", text: "Renamed." },
+    ] },
+  ];
+  await page.route(`**/api/codex/chat/${id}*`, async (route) => route.fulfill({ json: { thread: { thread: { id, turns } }, history: [], events: [] } }));
+  await page.route(`**/api/codex/chat/${forkId}*`, async (route) => route.fulfill({ json: { thread: { thread: { id: forkId, turns: turns.slice(0, 1) } }, history: [], events: [] } }));
+  const forks: Array<Record<string, unknown>> = [];
+  await page.route(`**/api/codex/chat/${id}/fork`, async (route) => {
+    forks.push(route.request().postDataJSON() as Record<string, unknown>);
+    return route.fulfill({ json: { result: { thread: { id: forkId } } } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.locator("button[aria-expanded]").filter({ hasText: "Codex" }).last().click();
+  const manage = page.getByRole("button", { name: "Manage Diff work" });
+  await manage.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(300);
+  await manage.click();
+  await page.getByRole("menuitem", { name: "Open in Chat…" }).click();
+  await page.getByRole("button", { name: "Resume in Chat" }).click();
+  const chat = page.locator("section").filter({ hasText: "Codex Chat · Diff work" });
+  await expect(chat.getByText("Renamed.")).toBeVisible();
+  // The file change shows its diff lines.
+  await chat.getByRole("button", { name: "edit /tmp/pi-web-e2e/notes.txt" }).click();
+  await expect(chat.getByText("new line").first()).toBeVisible();
+  await expect(chat.getByText("old line").first()).toBeVisible();
+
+  // A live plan update shows as a task list.
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __codexStreams?: unknown[] }).__codexStreams?.length ?? 0)).toBeGreaterThan(0);
+  await emitCodexEvent(page, { method: "turn/plan/updated", params: { turnId: "turn-2", explanation: null, plan: [{ step: "Read the code", status: "completed" }, { step: "Rename b", status: "inProgress" }] }, piSeq: 1, piRuntime: "run1" });
+  const tasks = chat.getByRole("region", { name: "Tasks" });
+  await expect(tasks.getByText("1/2 done")).toBeVisible();
+  await expect(tasks.getByRole("listitem", { name: "Rename b (in progress)" })).toBeVisible();
+
+  // The first message has nothing before it to keep, so only the second can fork, keeping the turns before it.
+  await expect(chat.getByRole("button", { name: "New session" })).toHaveCount(1);
+  await chat.getByText("rename b", { exact: true }).hover();
+  await chat.getByRole("button", { name: "New session" }).click();
+  await expect.poll(() => forks).toEqual([{ lastTurnId: "turn-1" }]);
+  const forkChat = page.locator("section").filter({ hasText: "Codex Chat · Diff work (fork)" });
+  await expect(forkChat.getByPlaceholder("Message… Type / for commands", { exact: true })).toHaveValue("rename b");
+});
+
 async function mockClaudeWorkspace(page: Page, sessions: Array<Record<string, unknown>>) {
   await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
     id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",

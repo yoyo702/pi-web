@@ -105,6 +105,7 @@ export function CodexChatTabView({
       workspaceTabId={tab.id}
       newChat={!terminal && tab.newChat}
       onCreated={onCreated}
+      onOpenFork={actions.openCodexChat}
       onStatusChange={onStatusChange}
       onConfigurationChange={onConfigurationChange}
       onOpenFile={(filePath) => {

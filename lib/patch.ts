@@ -27,6 +27,10 @@ export function parseUnifiedPatch(text: string): SplitDiffFile[] | null {
   let pendingOldPath: string | undefined;
   let oldLineNo = 0;
   let newLineNo = 0;
+  // Lines still owed to the current hunk by its header. Inside a hunk, a
+  // removed "-- x" or added "++ x" line reads like a file header.
+  let oldLeft = 0;
+  let newLeft = 0;
   let removed: PendingChangeLine[] = [];
   let added: PendingChangeLine[] = [];
 
@@ -52,20 +56,21 @@ export function parseUnifiedPatch(text: string): SplitDiffFile[] | null {
   };
 
   for (const line of text.split(/\r?\n/)) {
-    if (line.startsWith("--- ")) {
+    const inHunk = oldLeft > 0 || newLeft > 0;
+    if (!inHunk && line.startsWith("--- ")) {
       flushChanges();
       pendingOldPath = cleanPatchPath(line.slice(4));
       continue;
     }
 
-    if (line.startsWith("+++ ")) {
+    if (!inHunk && line.startsWith("+++ ")) {
       flushChanges();
       current = { oldPath: pendingOldPath, newPath: cleanPatchPath(line.slice(4)), rows: [] };
       files.push(current);
       continue;
     }
 
-    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    const hunk = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
     if (hunk) {
       if (!current) {
         current = { rows: [] };
@@ -73,7 +78,9 @@ export function parseUnifiedPatch(text: string): SplitDiffFile[] | null {
       }
       flushChanges();
       oldLineNo = Number(hunk[1]);
-      newLineNo = Number(hunk[2]);
+      newLineNo = Number(hunk[3]);
+      oldLeft = hunk[2] === undefined ? 1 : Number(hunk[2]);
+      newLeft = hunk[4] === undefined ? 1 : Number(hunk[4]);
       current.rows.push({ type: "hunk", text: line });
       continue;
     }
@@ -96,10 +103,13 @@ export function parseUnifiedPatch(text: string): SplitDiffFile[] | null {
         left: { lineNo: oldLineNo++, text: content, type: "context" },
         right: { lineNo: newLineNo++, text: content, type: "context" },
       });
+      oldLeft--; newLeft--;
     } else if (prefix === "-") {
       removed.push({ lineNo: oldLineNo++, text: content });
+      oldLeft--;
     } else if (prefix === "+") {
       added.push({ lineNo: newLineNo++, text: content });
+      newLeft--;
     } else if (line !== "") {
       flushChanges();
       current.rows.push({ type: "hunk", text: line });

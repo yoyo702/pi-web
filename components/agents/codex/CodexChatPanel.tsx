@@ -5,17 +5,18 @@ import type { TerminalSession } from "@/lib/agents/terminal";
 import { CodexAssistantThread } from "./CodexAssistantThread";
 import { isCodexCardRequest, type CodexRequestAnswer, type CodexServerRequest } from "./CodexRequestCard";
 import { reduceCodexEvent, type CodexConversationItem } from "@/lib/agents/codex-conversation";
-import type { ChatDraftImage } from "@/lib/draft-store";
+import { setDraft, type ChatDraftImage } from "@/lib/draft-store";
 import { useWorkspaceStatusSelector } from "@/hooks/useWorkspaceStatus";
 import { randomId } from "@/lib/random-id";
 import type { CodexApprovalPolicy } from "@/lib/workspace/tabs";
+import type { CodexChatTarget } from "../../workspace/WorkspaceActions";
 
 type HistoryMessage = { role: "user" | "assistant"; text: string };
 type ModelOption = { id: string; label: string; provider?: string; defaultReasoningEffort?: string; reasoningEfforts?: { id: string; description?: string }[]; defaultServiceTier?: string; serviceTiers?: { id: string; label: string; description?: string }[] };
 type AppItem = Record<string, unknown> & { id?: string; type?: string };
 type TokenCount = { totalTokens?: number; inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; reasoningOutputTokens?: number };
 type TokenUsagePayload = { totalTokens?: number; total?: TokenCount; last?: TokenCount; modelContextWindow?: number };
-type AppEvent = { id?: string | number; piSeq?: number; piRuntime?: string; method?: string; params?: { turnId?: string; runtimeId?: string; willRetry?: boolean; turn?: { status?: string; error?: { message?: string } | null }; requestId?: string | number; delta?: string; command?: string | string[]; cwd?: string; grantRoot?: string; reason?: string; message?: string; error?: { message?: string } | string; status?: { type?: string; activeFlags?: string[] }; tokenUsage?: TokenUsagePayload; modelContextWindow?: number; item?: AppItem } };
+type AppEvent = { id?: string | number; piSeq?: number; piRuntime?: string; method?: string; params?: { turnId?: string; runtimeId?: string; willRetry?: boolean; turn?: { id?: string; status?: string; error?: { message?: string } | null }; requestId?: string | number; delta?: string; command?: string | string[]; cwd?: string; grantRoot?: string; reason?: string; message?: string; error?: { message?: string } | string; status?: { type?: string; activeFlags?: string[] }; tokenUsage?: TokenUsagePayload; modelContextWindow?: number; item?: AppItem } };
 function requestFromEvent(event: AppEvent): CodexServerRequest | null {
   return event.id !== undefined && isCodexCardRequest(event.method) ? { id: String(event.id), method: event.method!, params: (event.params ?? {}) as Record<string, unknown> } : null;
 }
@@ -44,17 +45,39 @@ type TerminalConflict = { kind: "owns" | "unknown"; message: string };
 function errorText(event: AppEvent) {
   return typeof event.params?.error === "string" ? event.params.error : event.params?.error?.message ?? event.params?.message;
 }
+type ThreadTurn = { id?: string; status?: string; items?: AppItem[] };
 type ThreadRead = {
   name?: string;
   title?: string;
   model?: string;
   status?: { type?: string; activeFlags?: string[] };
-  turns?: { status?: string; items?: AppItem[] }[];
-  thread?: { name?: string; title?: string; model?: string; turns?: { status?: string; items?: AppItem[] }[]; status?: { type?: string; activeFlags?: string[] } };
+  turns?: ThreadTurn[];
+  thread?: { name?: string; title?: string; model?: string; turns?: ThreadTurn[]; status?: { type?: string; activeFlags?: string[] } };
 };
+/** Saved turns as the events that built them; items keep their turn id. */
+function persistedEventsOf(turns: ThreadTurn[]): AppEvent[] {
+  return turns.flatMap((turn) => (turn.items ?? []).map((item) => ({ method: "item/completed", params: { item, ...(turn.id ? { turnId: turn.id } : {}) } })));
+}
+/** Plan updates are not saved in the thread; keep their cards, each after the item it followed. */
+function keepTodos(current: CodexConversationItem[], rebuilt: CodexConversationItem[]): CodexConversationItem[] {
+  const next: CodexConversationItem[] = rebuilt.filter((item) => item.kind !== "todo");
+  current.forEach((item, index) => {
+    if (item.kind !== "todo") return;
+    const before = current.slice(0, index).reverse().find((candidate) => next.some((kept) => kept.id === candidate.id));
+    next.splice(before ? next.findIndex((kept) => kept.id === before.id) + 1 : next.length, 0, item);
+  });
+  return next;
+}
+/** Turn ids in order: the saved turns, then turns the runtime started since. */
+function turnOrderOf(turns: ThreadTurn[], events: AppEvent[] = []): string[] {
+  const order = turns.flatMap((turn) => turn.id ? [turn.id] : []);
+  for (const event of events) if (event.method === "turn/started" && event.params?.turn?.id && !order.includes(event.params.turn.id)) order.push(event.params.turn.id);
+  return order;
+}
 
-export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCreated, onOpenFile, onStatusChange, onConfigurationChange }: { terminal: Pick<TerminalSession, "cwd" | "model" | "sourceSessionId"> & { reasoningEffort?: string; serviceTier?: string; approvalPolicy?: "untrusted" | "on-request" | "never"; sessionName?: string }; workspaceTabId: string; newChat?: boolean; onCreated?: (tabId: string, cwd: string, threadId: string, title: string) => void; onOpenFile?: (filePath: string) => void; onStatusChange?: (tabId: string, status: "idle" | "running" | "approval") => void; onConfigurationChange?: (tabId: string, configuration: { model?: string; reasoningEffort?: string; serviceTier?: string; approvalPolicy?: "untrusted" | "on-request" | "never" }) => void }) {
+export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCreated, onOpenFork, onOpenFile, onStatusChange, onConfigurationChange }: { terminal: Pick<TerminalSession, "cwd" | "model" | "sourceSessionId"> & { reasoningEffort?: string; serviceTier?: string; approvalPolicy?: "untrusted" | "on-request" | "never"; sessionName?: string }; workspaceTabId: string; newChat?: boolean; onCreated?: (tabId: string, cwd: string, threadId: string, title: string) => void; /** Opens a fork of this chat in its own tab. */ onOpenFork?: (target: CodexChatTarget) => void; onOpenFile?: (filePath: string) => void; onStatusChange?: (tabId: string, status: "idle" | "running" | "approval") => void; onConfigurationChange?: (tabId: string, configuration: { model?: string; reasoningEffort?: string; serviceTier?: string; approvalPolicy?: "untrusted" | "on-request" | "never" }) => void }) {
   const [items, setItems] = useState<CodexConversationItem[]>([]);
+  const [turnOrder, setTurnOrder] = useState<string[]>([]);
   const [approvals, setApprovals] = useState<CodexServerRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [connection, setConnection] = useState<"loading" | "connected" | "reconnecting" | "failed">("loading");
@@ -125,6 +148,8 @@ export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCr
             const item = event.params?.item;
             setCurrentActivity(item?.type === "commandExecution" ? `Running: ${String(item.command ?? "command")}` : item?.type === "fileChange" ? "Applying file changes…" : item?.type === "webSearch" ? "Searching the web…" : "Codex is working…");
           }
+          const startedTurn = event.method === "turn/started" ? event.params?.turn?.id : undefined;
+          if (startedTurn) setTurnOrder((current) => current.includes(startedTurn) ? current : [...current, startedTurn]);
           if (event.method === "turn/completed") { setRunState("idle"); setCurrentActivity(""); setApprovals([]); }
           if (event.method === "thread/status/changed") {
             if (event.params?.status?.activeFlags?.includes("waitingOnApproval")) setRunState("approval");
@@ -168,7 +193,8 @@ export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCr
         runtimeIdRef.current = data.events?.at(-1)?.piRuntime ?? "";
         const latestUsage = [...(data.events ?? [])].reverse().map(tokenUsageFromEvent).find(Boolean);
         if (latestUsage) setContextUsage(latestUsage);
-        const persistedEvents: AppEvent[] = turns.flatMap((turn) => (turn.items ?? []).map((item) => ({ method: "item/completed", params: { item } })));
+        const persistedEvents = persistedEventsOf(turns);
+        setTurnOrder(turnOrderOf(turns, data.events));
         const history: CodexConversationItem[] = persistedEvents.length ? [] : (data.history ?? []).map((message, index) => ({ id: `history-${index}`, kind: "message", role: message.role, text: message.text }));
         setItems([...(persistedEvents), ...(data.events ?? [])].reduce(reduceCodexEvent, history));
         const pendingApprovals = pendingApprovalsFromEvents(data.events ?? []);
@@ -207,9 +233,9 @@ export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCr
         const thread = data.thread?.thread ?? data.thread;
         const turns = thread?.turns ?? [];
         const latestTurn = turns.at(-1);
-        const persistedEvents: AppEvent[] = turns.flatMap((turn) => (turn.items ?? []).map((item) => ({ method: "item/completed", params: { item } })));
+        const persistedEvents = persistedEventsOf(turns);
         const isIdle = thread?.status?.type === "idle" || Boolean(latestTurn?.status && latestTurn.status !== "inProgress");
-        if (isIdle && persistedEvents.length) setItems(persistedEvents.reduce(reduceCodexEvent, []));
+        if (isIdle && persistedEvents.length) { setItems((current) => keepTodos(current, persistedEvents.reduce(reduceCodexEvent, []))); setTurnOrder(turnOrderOf(turns)); }
         if (isIdle) {
           setRunState("idle");
           setCurrentActivity("");
@@ -368,18 +394,22 @@ export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCr
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to stop the terminal"); }
     finally { setSending(false); }
   }, [conflict, threadId]);
-  const forkChat = useCallback(async () => {
-    if (!threadId || runState !== "idle") return;
+  // A fork opens in its own tab. Forking from a message keeps the turns before
+  // it (through `lastTurnId`) and puts the message in the fork's composer.
+  const forkChat = useCallback(async (lastTurnId?: string, text?: string) => {
+    if (!threadId || runState !== "idle" || !onOpenFork) return;
     setSending(true); setError(null);
     try {
-      const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/fork`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-      const data = await response.json() as { error?: string; result?: { thread?: { id?: string }; id?: string; threadId?: string } };
-      const nextThreadId = data.result?.thread?.id ?? data.result?.threadId ?? data.result?.id;
+      const response = await fetch(`/api/codex/chat/${encodeURIComponent(threadId)}/fork`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(lastTurnId ? { lastTurnId } : {}) });
+      const data = await response.json() as { error?: string; result?: { thread?: { id?: string } } };
+      const nextThreadId = data.result?.thread?.id;
       if (!response.ok || !nextThreadId) throw new Error(data.error ?? "Codex did not return a forked thread");
-      setThreadId(nextThreadId); setSessionName((name) => name ? `${name} (fork)` : "Forked Chat"); setItems([]); setApprovals([]); setRunState("idle");
+      if (text) setDraft(`codex:${nextThreadId}`, { value: text, images: [] });
+      onOpenFork({ sessionId: nextThreadId, sessionName: `${sessionName || "Codex Chat"} (fork)`, cwd: terminal.cwd, model: chatModel || undefined, reasoningEffort: reasoningEffort || undefined, serviceTier: serviceTier || undefined, approvalPolicy });
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to fork this Chat"); }
     finally { setSending(false); }
-  }, [runState, threadId]);
+  }, [approvalPolicy, chatModel, onOpenFork, reasoningEffort, runState, serviceTier, sessionName, terminal.cwd, threadId]);
+  const forkFrom = useCallback((lastTurnId: string, text: string) => void forkChat(lastTurnId, text), [forkChat]);
 
   return <section style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg)" }}>
     <header style={{ padding: "9px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>
@@ -425,7 +455,9 @@ export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCr
         onReasoningEffortChange={(value) => { setReasoningEffort(value); onConfigurationChange?.(workspaceTabId, { reasoningEffort: value || undefined }); setModelNotice(`Reasoning changed to ${value} · applies to the next turn`); }}
         onServiceTierChange={(value) => { setServiceTier(value); onConfigurationChange?.(workspaceTabId, { serviceTier: value || undefined }); setModelNotice(`${value ? `Service tier changed to ${value}` : "Using standard service tier"} · applies to the next turn`); }}
         onApprovalPolicyChange={(policy) => { const value = policy as CodexApprovalPolicy; setApprovalPolicy(value); onConfigurationChange?.(workspaceTabId, { approvalPolicy: value }); setModelNotice("Permission policy updated · applies to the next turn"); }}
-        onFork={() => void forkChat()}
+        turnOrder={turnOrder}
+        onFork={onOpenFork ? () => void forkChat() : undefined}
+        onForkFrom={onOpenFork ? forkFrom : undefined}
         onSend={send}
         onSteer={steer}
         onStop={stopRun}

@@ -1,4 +1,4 @@
-import type { CodexConversationItem } from "./codex-conversation";
+import { todoStatus, type CodexConversationItem, type TodoStep } from "./codex-conversation";
 
 /**
  * Builds Claude Chat items from transcript records (history pages) followed by
@@ -9,7 +9,11 @@ import type { CodexConversationItem } from "./codex-conversation";
  *   carry `piBlockIndex`, Claude's `apiBlockIndex`);
  * - tools: the tool_use id; a `tool_result` completes it;
  * - user messages: the record uuid (the browser sends its own uuid, so the
- *   optimistic message is replaced in place).
+ *   optimistic message is replaced in place);
+ * - the task list (`TaskCreate`/`TaskUpdate`, or `TodoWrite` in older Claude
+ *   versions): one `claude:tasks` item, moved to the latest change. A task
+ *   gets its id from the `TaskCreate` result; updates to tasks created before
+ *   the loaded history are ignored.
  */
 export type ClaudeBlock = { type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: unknown; is_error?: boolean };
 export type ClaudeRecord = {
@@ -76,10 +80,39 @@ function toolItem(block: ClaudeBlock, previous?: CodexConversationItem): CodexCo
   return { id, kind: "toolCall", toolName: name, input, diff: claudeToolDiff(name, input), ...result, done };
 }
 
+const TASKS_ID = "claude:tasks";
+
 export function claudeConversationItems(records: ClaudeRecord[]): CodexConversationItem[] {
   const items = new Map<string, CodexConversationItem>();
   let messageId = "";
   const put = (item: CodexConversationItem) => items.set(item.id, item);
+  const tasks = new Map<string, TodoStep>();
+  const creating = new Map<string, string>();
+  const showTasks = () => { items.delete(TASKS_ID); if (tasks.size) put({ id: TASKS_ID, kind: "todo", steps: [...tasks.values()] }); };
+  /** Applies a task-list tool; true when the call is shown as the task list instead of a tool call. */
+  const taskTool = (block: ClaudeBlock) => {
+    const input = block.input && typeof block.input === "object" ? block.input as Record<string, unknown> : {};
+    if (block.name === "TodoWrite") {
+      if (!Array.isArray(input.todos)) return true;
+      tasks.clear();
+      input.todos.forEach((todo: Record<string, unknown>, index) => tasks.set(String(index), { text: typeof todo?.content === "string" ? todo.content : "", status: todoStatus(todo?.status) }));
+      showTasks();
+      return true;
+    }
+    if (block.name === "TaskCreate") {
+      if (block.id && typeof input.subject === "string") creating.set(block.id, input.subject);
+      return true;
+    }
+    if (block.name === "TaskUpdate") {
+      const task = typeof input.taskId === "string" ? tasks.get(input.taskId) : undefined;
+      if (!task) return true;
+      if (input.status === "deleted") tasks.delete(input.taskId as string);
+      else tasks.set(input.taskId as string, { text: typeof input.subject === "string" ? input.subject : task.text, status: input.status === undefined ? task.status : todoStatus(input.status) });
+      showTasks();
+      return true;
+    }
+    return false;
+  };
   const finishStreaming = () => {
     for (const [id, item] of items) {
       if ((item.kind === "message" || item.kind === "plan") && item.streaming) items.set(id, { ...item, streaming: false });
@@ -95,7 +128,7 @@ export function claudeConversationItems(records: ClaudeRecord[]): CodexConversat
         const block = event.content_block ?? {};
         if (block.type === "text" && !items.has(key)) put({ id: key, kind: "message", role: "assistant", text: block.text ?? "", streaming: true });
         else if (block.type === "thinking" && !items.has(key)) put({ id: key, kind: "reasoning", summary: "", content: block.thinking ?? "" });
-        else if (block.type === "tool_use" && block.id && !items.has(block.id)) put(toolItem(block));
+        else if (block.type === "tool_use" && block.id && !items.has(block.id) && !taskTool(block)) put(toolItem(block));
       } else if (event.type === "content_block_delta") {
         const previous = items.get(key);
         if (event.delta?.type === "text_delta" && previous?.kind === "message" && previous.streaming) put({ ...previous, text: previous.text + (event.delta.text ?? "") });
@@ -109,7 +142,7 @@ export function claudeConversationItems(records: ClaudeRecord[]): CodexConversat
         const key = `${record.message?.id ?? record.uuid}:${(record.piBlockIndex ?? 0) + offset}`;
         if (block.type === "text" && block.text?.trim()) put({ id: key, kind: "message", role: "assistant", text: block.text });
         else if (block.type === "thinking") put({ id: key, kind: "reasoning", summary: "", content: block.thinking ?? "" });
-        else if (block.type === "tool_use" && block.id) put(toolItem(block, items.get(block.id)));
+        else if (block.type === "tool_use" && block.id && !taskTool(block)) put(toolItem(block, items.get(block.id)));
       });
       continue;
     }
@@ -119,6 +152,9 @@ export function claudeConversationItems(records: ClaudeRecord[]): CodexConversat
       if (Array.isArray(content)) {
         for (const block of content) {
           if (block.type !== "tool_result" || !block.tool_use_id) continue;
+          const subject = creating.get(block.tool_use_id);
+          const created = subject !== undefined && !block.is_error ? textOf(block.content).match(/Task #(\S+) created/)?.[1] : undefined;
+          if (created) { creating.delete(block.tool_use_id); tasks.delete(created); tasks.set(created, { text: subject!, status: "pending" }); showTasks(); }
           const previous = items.get(block.tool_use_id);
           const output = textOf(block.content);
           if (previous?.kind === "command") put({ ...previous, output, exitCode: block.is_error ? 1 : 0, done: true });

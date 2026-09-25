@@ -144,7 +144,11 @@ async function handle(req, res, url) {
     if (req.method !== "POST") return send(res, 405, { error: "method not allowed" });
     const body = await read(req);
     if (action === "claim") { await claim(session, body.terminals === "stop" ? "stop" : "ignore"); return send(res, 204, {}); }
-    if (action === "fork") return send(res, 200, { result: await appServer.fork(runtime(session, url)) });
+    if (action === "fork") {
+      if (body.lastTurnId !== undefined && (typeof body.lastTurnId !== "string" || !body.lastTurnId)) return send(res, 400, { error: "invalid turn id", code: "invalid_request" });
+      // Forking reads the rollout only; it needs no runtime and takes nothing from a terminal.
+      return send(res, 200, { result: withoutPath(await appServer.fork({ threadId: session.id, cwd: session.cwd }, body.lastTurnId ?? null)) });
+    }
     if (action === "command") {
       if (!["compact", "review", "models"].includes(body.name)) return send(res, 400, { error: "unsupported command", code: "invalid_request" });
       if (body.name !== "models") await claim(session, body.terminals);

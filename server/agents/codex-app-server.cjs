@@ -215,7 +215,29 @@ function respond(state, requestId, answer) {
   workspaceStatus.notify("codex_runtimes");
   state.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`);
 }
-async function fork(state) { await state.ready; return state.request("thread/fork", { threadId: state.threadId, cwd: state.cwd }); }
+// Forks `threadId` into a new thread, keeping the turns up to and including
+// `lastTurnId` (all of them without it). A Codex process stays the writer of
+// every thread it has loaded, even after `thread/unsubscribe`, so the fork is
+// made by a short-lived process: once it exits, the fork's own chat runtime can
+// resume it. Forking only reads the source rollout, so the source may be open
+// in a chat or another client meanwhile.
+async function fork({ threadId, cwd }, lastTurnId = null) {
+  if (removing.has(threadId)) throw Object.assign(new Error("This Codex session is being archived or deleted"), { code: "session_busy" });
+  const state = spawnRuntime(threadId, cwd);
+  // "close", not "exit": a process that failed to spawn never emits "exit".
+  const exited = new Promise((resolve) => state.child.once("close", resolve));
+  try {
+    await state.request("initialize", INITIALIZE);
+    return await state.request("thread/fork", { threadId, cwd, excludeTurns: true, ...(lastTurnId ? { lastTurnId } : {}) });
+  } finally {
+    // Marked failed first so the expected exit is not logged as a crash.
+    state.failure = state.failure || new Error("closed");
+    state.child.stdin.end();
+    const killTimer = setTimeout(() => { try { state.child.kill(); } catch { /* process already exited */ } }, 5_000);
+    await exited;
+    clearTimeout(killTimer);
+  }
+}
 async function interrupt(state, fallbackTurnId = null) { await state.ready; const turnId = state.activeTurnId || fallbackTurnId; if (!turnId) throw Object.assign(new Error("No active turn was found"), { code: "no_active_turn" }); return state.request("turn/interrupt", { threadId: state.threadId, turnId }); }
 function subscribe(state, listener, afterSeq = 0) { cancelIdleShutdown(state); for (const event of state.events) if ((event.piSeq || 0) > afterSeq) listener(event); state.listeners.add(listener); workspaceStatus.notify("codex_runtimes"); return () => { state.listeners.delete(listener); workspaceStatus.notify("codex_runtimes"); scheduleIdleShutdown(state); }; }
 function isClaimed(threadId) { return sessions.has(threadId); }

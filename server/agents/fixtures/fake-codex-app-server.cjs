@@ -11,6 +11,8 @@
 // user a question, and answering either ends the turn. "tool call" sends an
 // `item/tool/call` request (which pi-web refuses). `turn/steer` checks
 // `expectedTurnId`, and refuses a turn whose prompt contains "review".
+// `thread/fork` copies a thread under a new id, keeping its `turns` through
+// `lastTurnId`; `thread/read` with `includeTurns` returns a thread's `turns`.
 
 const fs = require("node:fs");
 const readline = require("node:readline");
@@ -24,7 +26,7 @@ const fail = (id, message, data) => process.stdout.write(`${JSON.stringify({ jso
 const notify = (method, params, id) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...(id == null ? {} : { id }), method, params })}\n`);
 let activeTurn = null;
 let reviewTurn = false;
-const publicThread = (thread) => { const result = { ...thread, turns: [] }; delete result.archived; delete result.unmaterialized; return result; };
+const publicThread = (thread, withTurns = false) => { const result = { ...thread, turns: withTurns ? thread.turns ?? [] : [] }; delete result.archived; delete result.unmaterialized; return result; };
 
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const { id, method, params = {}, result, error } = JSON.parse(line);
@@ -85,7 +87,17 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       return undefined;
     case "thread/read":
       if (thread?.unmaterialized && params.includeTurns) return fail(id, `thread ${thread.id} is not materialized yet; includeTurns is unavailable before first user message`);
-      return thread ? reply(id, { thread: publicThread(thread) }) : fail(id, `thread not loaded: ${params.threadId}`);
+      return thread ? reply(id, { thread: publicThread(thread, params.includeTurns) }) : fail(id, `thread not loaded: ${params.threadId}`);
+    case "thread/fork": {
+      if (!thread) return fail(id, `no rollout found for thread id ${params.threadId}`);
+      const turns = thread.turns ?? [];
+      const end = params.lastTurnId ? turns.findIndex((turn) => turn.id === params.lastTurnId) : turns.length - 1;
+      if (params.lastTurnId && end < 0) return fail(id, `turn not found: ${params.lastTurnId}`);
+      const forked = { ...thread, id: require("node:crypto").randomUUID(), name: null, writer: false, updatedAt: Math.floor(Date.now() / 1000), turns: turns.slice(0, end + 1), path: `/fake/sessions/fork-${Date.now()}.jsonl` };
+      state.threads.push(forked); save(state);
+      return reply(id, { thread: publicThread(forked, !params.excludeTurns) });
+    }
+    case "thread/unsubscribe": return reply(id, { status: "unsubscribed" });
     case "thread/name/set":
       if (!thread) return fail(id, `no rollout found for thread id ${params.threadId}`);
       thread.name = params.name; save(state); return reply(id, {});
