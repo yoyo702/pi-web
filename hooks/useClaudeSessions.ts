@@ -13,8 +13,8 @@ export interface ClaudeSession {
   createdAt: string | null;
   updatedAt: string;
   size: number;
-  /** Set while a terminal resumes (writes) this session. */
-  runtime: { owner: "terminal"; state: "running"; terminalId: string } | null;
+  /** Set while a terminal resumes (writes) this session or Claude Chat runs it. */
+  runtime: { owner: "terminal"; state: "running"; terminalId: string } | { owner: "chat"; state: "idle" | "running" | "approval"; connected: boolean } | null;
 }
 
 const PAGE_SIZE = 50;

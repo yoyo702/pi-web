@@ -2,6 +2,7 @@ import type { TerminalLaunchMode, TerminalPermissionMode, TerminalProvider } fro
 
 export type TabStatus = "idle" | "running" | "approval" | "connecting" | "offline" | "failed" | "ended";
 export type CodexApprovalPolicy = "untrusted" | "on-request" | "never";
+export type ClaudePermissionMode = "default" | "acceptEdits" | "plan" | "bypassPermissions";
 
 interface TabBase {
   id: string;
@@ -42,11 +43,23 @@ export interface CodexChatTab extends TabBase {
   newChat?: boolean;
 }
 
+export interface ClaudeChatTab extends TabBase {
+  kind: "claude-chat";
+  sourceSessionId?: string | null;
+  cwd?: string;
+  /** "", "sonnet", "opus" or "haiku"; "" is Claude's default. */
+  model?: string;
+  permissionMode?: ClaudePermissionMode;
+  sessionName?: string;
+  /** A chat whose session is created by its first message; `sourceSessionId` is set once it exists. */
+  newChat?: boolean;
+}
+
 export interface FileTab extends TabBase { kind: "file"; filePath: string; sourceSessionId?: string | null }
 export interface GitTab extends TabBase { kind: "git" }
 
 /** Tabs shown in the center workspace (scoped per cwd). */
-export type CenterTab = PiTab | TerminalTab | CodexChatTab;
+export type CenterTab = PiTab | TerminalTab | CodexChatTab | ClaudeChatTab;
 /** Tabs shown in the right panel (scoped per project). */
 export type SideTab = FileTab | GitTab;
 export type Tab = CenterTab | SideTab;
@@ -56,3 +69,4 @@ export const GIT_REVIEW_TAB_ID = "git-review";
 export const fileTabId = (filePath: string) => `file:${filePath}`;
 export const terminalTabId = (terminalId: string) => `terminal:${terminalId}`;
 export const codexChatTabId = (id: string) => `codex-chat:${id}`;
+export const claudeChatTabId = (id: string) => `claude-chat:${id}`;

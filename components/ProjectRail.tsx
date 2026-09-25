@@ -48,7 +48,7 @@ function initials(label: string): string {
 
 const contextMenuButtonStyle: CSSProperties = { minHeight: 32, display: "flex", alignItems: "center", gap: 9, padding: "0 9px", border: 0, borderRadius: 5, background: "transparent", color: "var(--text)", cursor: "pointer", font: "12px/1.2 inherit", textAlign: "left" };
 const activityItemButtonStyle: CSSProperties = { width: "100%", minHeight: 30, display: "flex", alignItems: "center", gap: 8, padding: "0 7px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", font: "11px/1.3 inherit", textAlign: "left" };
-const activityKindLabel: Record<RailActivityItem["kind"], string> = { pi: "Pi session", terminal: "Terminal", codex: "Codex chat" };
+const activityKindLabel: Record<RailActivityItem["kind"], string> = { pi: "Pi session", terminal: "Terminal", codex: "Codex chat", claude: "Claude chat" };
 
 function ActivityItemButton({ item, onOpen }: { item: RailActivityItem; onOpen: () => void }) {
   const Icon = item.kind === "terminal" ? TerminalSquare : Bot;
@@ -145,6 +145,7 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
         const terminals = workspaceStatus.terminals ?? [];
         const runningSessionIds = workspaceStatus.runningSessionIds ?? [];
         const codexRuntimes = workspaceStatus.codexRuntimes ?? [];
+        const claudeRuntimes = workspaceStatus.claudeRuntimes ?? [];
         // The full session list requires a server-side scan of every session
         // file, so only fetch it when a running session's project is unknown.
         // Throttled because a brand-new session may not be listed yet.
@@ -166,7 +167,7 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
         const now = Date.now();
         // Running items, terminals ended within 5 minutes, and items that
         // finished within the last 30 s; see lib/rail-activity.ts.
-        const result = computeRailActivity({ terminals, runningSessionIds, codexRuntimes, sessionsById: sessionsByIdRef.current, previousRunning: previousRunningRef.current, completed: completedRef.current, now });
+        const result = computeRailActivity({ terminals, runningSessionIds, codexRuntimes, claudeRuntimes, sessionsById: sessionsByIdRef.current, previousRunning: previousRunningRef.current, completed: completedRef.current, now });
         previousRunningRef.current = result.running;
         completedRef.current = result.completed;
         const activities = groupRailActivity(result.items, workspaces);
@@ -182,7 +183,7 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
     };
     void compute();
     return () => { cancelled = true; if (expiryTimer) clearTimeout(expiryTimer); };
-  }, [workspaceStatus.terminals, workspaceStatus.runningSessionIds, workspaceStatus.codexRuntimes, workspaces, tick]);
+  }, [workspaceStatus.terminals, workspaceStatus.runningSessionIds, workspaceStatus.codexRuntimes, workspaceStatus.claudeRuntimes, workspaces, tick]);
   // Pi item labels come from the session list fetched when a session first
   // runs, so a later rename would never show. Refresh it (same 30 s throttle)
   // when the user opens an activity list that has Pi items — not on a poll.

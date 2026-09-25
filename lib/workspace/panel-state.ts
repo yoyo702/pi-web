@@ -1,5 +1,5 @@
 import { getFileName } from "../file-paths";
-import { GIT_REVIEW_TAB_ID, PI_TAB, fileTabId, terminalTabId, type CenterTab, type CodexChatTab, type SideTab, type TerminalTab } from "./tabs";
+import { GIT_REVIEW_TAB_ID, PI_TAB, fileTabId, terminalTabId, type CenterTab, type ClaudeChatTab, type CodexChatTab, type SideTab, type TerminalTab } from "./tabs";
 
 export interface TerminalSplit {
   primaryTabId: string;
@@ -35,7 +35,7 @@ export function initialSideState(): SideState {
 
 export type CenterAction =
   | { type: "hydrate"; state: CenterState }
-  | { type: "open"; tab: TerminalTab | CodexChatTab; mergeExisting?: Partial<TerminalTab> | Partial<CodexChatTab> }
+  | { type: "open"; tab: TerminalTab | CodexChatTab | ClaudeChatTab; mergeExisting?: Partial<TerminalTab> | Partial<CodexChatTab> | Partial<ClaudeChatTab> }
   | { type: "activate"; id: string }
   /** User tab selection: selecting the split's secondary pane exits the split. */
   | { type: "select"; id: string }
@@ -56,8 +56,9 @@ export function centerReducer(state: CenterState, action: CenterAction): CenterS
       // A session chat opened again (e.g. one started here as a new chat) reuses its tab.
       const opened = action.tab;
       // A tab with the exact id wins, so two tabs of one session cannot point at each other.
-      const sameSession = opened.kind === "codex-chat" && opened.sourceSessionId && !opened.terminalId && !state.tabs.some((tab) => tab.id === opened.id)
-        ? state.tabs.find((tab) => tab.kind === "codex-chat" && !tab.terminalId && tab.sourceSessionId === opened.sourceSessionId && tab.id !== opened.id)
+      const isChat = (tab: CenterTab) => (tab.kind === "codex-chat" && !tab.terminalId) || tab.kind === "claude-chat";
+      const sameSession = isChat(opened) && opened.kind !== "terminal" && opened.sourceSessionId && !state.tabs.some((tab) => tab.id === opened.id)
+        ? state.tabs.find((tab) => tab.kind === opened.kind && isChat(tab) && tab.sourceSessionId === opened.sourceSessionId && tab.id !== opened.id)
         : undefined;
       if (sameSession) return centerReducer(state, { ...action, tab: { ...opened, id: sameSession.id } });
       const exists = state.tabs.some((tab) => tab.id === action.tab.id);

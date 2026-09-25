@@ -13,6 +13,7 @@ const THROTTLE_MS = 5_000;
 const EMPTY = {
   terminals: () => ({ terminals: [], limits: null }),
   codex_runtimes: () => ({ runtimes: [] }),
+  claude_runtimes: () => ({ runtimes: [] }),
   notifications: () => ({ notifications: [], unread: 0 }),
 };
 

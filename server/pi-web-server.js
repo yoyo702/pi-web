@@ -278,6 +278,10 @@ function handleRequest(req, res) {
   if (claudeSessionsApi.isPath(url.pathname)) {
     return claudeSessionsApi.handle(req, res, url);
   }
+  const claudeChatApi = require("./agents/claude-chat-api.cjs");
+  if (claudeChatApi.isPath(url.pathname)) {
+    return claudeChatApi.handle(req, res, url);
+  }
   const notificationsApi = require("./notifications-api.cjs");
   if (notificationsApi.isPath(url.pathname)) {
     return notificationsApi.handle(req, res);
@@ -352,6 +356,9 @@ function shutdown() {
   try {
     require("./agents/codex-app-server.cjs").shutdownRuntimes();
   } catch { /* Codex runtime may not have loaded */ }
+  try {
+    require("./agents/claude-chat-runtime.cjs").shutdownRuntimes();
+  } catch { /* Claude Chat runtime may not have loaded */ }
   server.close(() => process.exit(0));
   // SSE streams and terminal WebSockets never end on their own, so close()
   // would otherwise always wait for the forced-exit timeout below.

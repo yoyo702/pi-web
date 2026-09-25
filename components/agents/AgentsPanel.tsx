@@ -7,7 +7,7 @@ import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
 import { useWorkspaceStatus } from "@/hooks/useWorkspaceStatus";
 import { useClaudeSessions, type ClaudeSession } from "@/hooks/useClaudeSessions";
 import { ProductStatusDot } from "@/components/ProductStatus";
-import type { CodexChatTarget } from "@/components/workspace/WorkspaceActions";
+import type { ClaudeChatTarget, CodexChatTarget } from "@/components/workspace/WorkspaceActions";
 
 /** Structurally identical to `CodexChatTarget`; kept as a distinct export so AgentsPanel stays usable outside the workspace-actions context. */
 export type CodexSessionTarget = CodexChatTarget;
@@ -41,12 +41,15 @@ interface Props {
   onOpenCodexSession?: (target: CodexSessionTarget) => void;
   /** Opens an empty Codex chat in the folder. */
   onNewCodexChat?: (cwd: string) => void;
+  onOpenClaudeChat?: (target: ClaudeChatTarget) => void;
+  /** Opens an empty Claude chat in the folder. */
+  onNewClaudeChat?: (cwd: string) => void;
   onOpenTerminal?: (terminal: TerminalSession, label?: string) => void;
   onTerminalRemoved?: (terminalId: string) => void;
   onCodexSessionChanged?: (change: { id: string; action: "rename" | "archive" | "unarchive" | "delete"; name?: string }) => void;
 }
 
-export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAgent, onOpenCodexSession, onNewCodexChat, onOpenTerminal, onTerminalRemoved, onCodexSessionChanged }: Props) {
+export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAgent, onOpenCodexSession, onNewCodexChat, onOpenClaudeChat, onNewClaudeChat, onOpenTerminal, onTerminalRemoved, onCodexSessionChanged }: Props) {
   const [open, setOpen] = useState(true);
   const [shellOpen, setShellOpen] = useState(false);
   const [codexOpen, setCodexOpen] = useState(false);
@@ -314,16 +317,21 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const manualShellTerminals = shellTerminals.filter((terminal) => !terminal.title?.startsWith("Task: "));
   const codexTerminals = terminals.filter((terminal) => terminal.provider === "codex");
   const claudeTerminals = terminals.filter((terminal) => terminal.provider === "claude");
+  const claudeChatRuntimes = useMemo(() => (status.claudeRuntimes ?? []).filter((runtime) => runtime.cwd === cwd), [cwd, status.claudeRuntimes]);
   const claudeCatalog = useClaudeSessions(cwd, {
     enabled: claudeOpen,
     query: debouncedClaudeQuery,
     refreshKey,
-    // A Claude terminal starting or ending creates or updates a session file.
-    changeKey: claudeTerminals.map((terminal) => `${terminal.id}:${terminal.state}`).sort().join(","),
+    // A Claude terminal or chat turn starting or ending creates or updates a session file.
+    changeKey: [...claudeTerminals.map((terminal) => `${terminal.id}:${terminal.state}`), ...claudeChatRuntimes.map((runtime) => `${runtime.sessionId}:${runtime.state === "idle" ? "idle" : "busy"}`)].sort().join(","),
   });
   // A resumed session is shown as its terminal row, like Codex.
   const liveClaudeSessionIds = new Set(claudeTerminals.filter((terminal) => terminal.state === "running" && terminal.launchMode === "resume").map((terminal) => terminal.sourceSessionId).filter(Boolean));
-  const claudeHistory = claudeCatalog.sessions.filter((session) => !liveClaudeSessionIds.has(session.id));
+  // Chat state comes from the status stream; the catalog is only re-read on changes.
+  const claudeHistory = claudeCatalog.sessions.filter((session) => !liveClaudeSessionIds.has(session.id)).map((session) => {
+    const runtime = claudeChatRuntimes.find((item) => item.sessionId === session.id);
+    return runtime ? { ...session, runtime: { owner: "chat" as const, state: runtime.state, connected: Boolean(runtime.connected) } } : status.claudeRuntimes && session.runtime?.owner === "chat" ? { ...session, runtime: null } : session;
+  });
   // A fork terminal records its parent as the source but writes a new session,
   // so only resumed sessions are hidden behind their terminal row.
   const liveCodexSessionIds = new Set(codexTerminals.filter((terminal) => terminal.state === "running" && terminal.launchMode === "resume").map((terminal) => terminal.sourceSessionId).filter(Boolean));
@@ -428,6 +436,13 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
       setBusyId(null);
     }
   }, [claudeLaunch, cwd, onOpenTerminal, setTerminals]);
+
+  // Rows open in Claude Chat when the workspace supports it, else in a terminal.
+  const openClaudeSession = useCallback((session: ClaudeSession) => {
+    setClaudeError(null);
+    if (onOpenClaudeChat) onOpenClaudeChat({ sessionId: session.id, sessionName: session.title, cwd });
+    else setClaudeLaunch({ session, mode: "resume", permission: "confirm" });
+  }, [cwd, onOpenClaudeChat]);
 
   const { reload: reloadClaudeSessions } = claudeCatalog;
   const deleteClaudeSession = useCallback(async (session: ClaudeSession) => {
@@ -645,7 +660,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
               </div>)}
         {!loading && !error && nextCursor && <button type="button" disabled={loadingMore} onClick={() => void loadMoreSessions()} style={retryStyle}>{loadingMore ? "Loading…" : "Load more sessions"}</button>}
       </div>}
-      <ProviderRow provider="claude" label="Claude" badge="A" badgeColor="#d97706" open={claudeOpen} count={claudeTerminals.length + claudeHistory.length} running={claudeTerminals.filter((terminal) => terminal.state === "running").length} onToggle={() => setClaudeOpen((value) => !value)} onNewAgent={onNewAgent} />
+      <ProviderRow provider="claude" label="Claude" badge="A" badgeColor="#d97706" open={claudeOpen} count={claudeTerminals.length + claudeHistory.length} running={claudeTerminals.filter((terminal) => terminal.state === "running").length + claudeHistory.filter((session) => session.runtime?.owner === "chat" && session.runtime.state !== "idle").length} onToggle={() => setClaudeOpen((value) => !value)} onNewAgent={onNewAgent} onNewChat={onNewClaudeChat ? () => onNewClaudeChat(cwd) : undefined} />
       {claudeOpen && <div style={sessionListStyle}>
         <div style={sessionToolsStyle}>
           <label style={searchStyle}>
@@ -666,9 +681,9 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
                   disabled={busyId === session.id}
                   style={{ ...sessionMainStyle, cursor: "pointer" }}
                   title={[session.title, session.firstMessage !== session.title && session.firstMessage, session.gitBranch && `Branch: ${session.gitBranch}`, session.id].filter(Boolean).join("\n")}
-                  onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "resume", permission: "confirm" }); }}
+                  onClick={() => openClaudeSession(session)}
                 >
-                  <StatusDot state="idle" />
+                  <StatusDot state={session.runtime?.owner === "chat" ? session.runtime.state : "idle"} />
                   <span style={{ minWidth: 0, flex: 1 }}>
                     <span style={sessionNameStyle}>{session.title}</span>
                     <span style={sessionMetaStyle}>{[session.firstMessage !== session.title && session.firstMessage, formatBytes(session.size)].filter(Boolean).join(" · ")}</span>
@@ -676,6 +691,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
                   <span style={timeStyle}>{busyId === session.id ? "…" : formatRelativeTime(session.updatedAt)}</span>
                 </button>
                 <ActionMenu label={`Manage ${session.title}`}>
+                  {onOpenClaudeChat && <MenuButton onClick={() => onOpenClaudeChat({ sessionId: session.id, sessionName: session.title, cwd })}>Open in Chat</MenuButton>}
                   <MenuButton onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "resume", permission: "confirm" }); }}>Resume in Terminal…</MenuButton>
                   <MenuButton onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "fork", permission: "confirm" }); }}>Fork to Terminal…</MenuButton>
                   <span style={menuDividerStyle} />

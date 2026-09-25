@@ -8,6 +8,7 @@ import { reduceCodexEvent, type CodexConversationItem } from "@/lib/agents/codex
 import type { ChatDraftImage } from "@/lib/draft-store";
 import { useWorkspaceStatusSelector } from "@/hooks/useWorkspaceStatus";
 import { randomId } from "@/lib/random-id";
+import type { CodexApprovalPolicy } from "@/lib/workspace/tabs";
 
 type HistoryMessage = { role: "user" | "assistant"; text: string };
 type ModelOption = { id: string; label: string; provider?: string; defaultReasoningEffort?: string; reasoningEfforts?: { id: string; description?: string }[]; defaultServiceTier?: string; serviceTiers?: { id: string; label: string; description?: string }[] };
@@ -423,7 +424,7 @@ export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCr
         }}
         onReasoningEffortChange={(value) => { setReasoningEffort(value); onConfigurationChange?.(workspaceTabId, { reasoningEffort: value || undefined }); setModelNotice(`Reasoning changed to ${value} · applies to the next turn`); }}
         onServiceTierChange={(value) => { setServiceTier(value); onConfigurationChange?.(workspaceTabId, { serviceTier: value || undefined }); setModelNotice(`${value ? `Service tier changed to ${value}` : "Using standard service tier"} · applies to the next turn`); }}
-        onApprovalPolicyChange={(value) => { setApprovalPolicy(value); onConfigurationChange?.(workspaceTabId, { approvalPolicy: value }); setModelNotice("Permission policy updated · applies to the next turn"); }}
+        onApprovalPolicyChange={(policy) => { const value = policy as CodexApprovalPolicy; setApprovalPolicy(value); onConfigurationChange?.(workspaceTabId, { approvalPolicy: value }); setModelNotice("Permission policy updated · applies to the next turn"); }}
         onFork={() => void forkChat()}
         onSend={send}
         onSteer={steer}

@@ -2,7 +2,7 @@
 "use strict";
 
 /**
- * Activity notifications (a Codex/Pi turn finished or failed, Codex waits for
+ * Activity notifications (a Codex/Claude/Pi turn finished or failed, Codex or Claude waits for
  * approval, a terminal ended), shared by every browser. Entries and their read
  * state are kept in `~/.pi-web/notifications.json` so a phone and a PC see the
  * same list, and the list survives restarts. Next route handlers and the
@@ -17,7 +17,7 @@ const workspaceStatus = require("./workspace-status.cjs");
 
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ENTRIES = 200;
-const KINDS = new Set(["codex", "pi", "terminal"]);
+const KINDS = new Set(["codex", "claude", "pi", "terminal"]);
 const EVENTS = new Set(["completed", "failed", "approval"]);
 
 function file() {

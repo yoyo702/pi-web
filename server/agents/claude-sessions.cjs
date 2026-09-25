@@ -217,4 +217,107 @@ function remove(id, cwd) {
   return session;
 }
 
-module.exports = { listSessions, requireSession, remove, encodeCwd };
+// Transcript records for Claude Chat. Tool results, tool inputs and pasted
+// images can be megabytes; the browser gets truncated text and no image data.
+const TEXT_MAX = 20_000;
+function clip(value) { return typeof value === "string" && value.length > TEXT_MAX ? `${value.slice(0, TEXT_MAX)}\n… (truncated)` : value; }
+function compactValue(value, depth = 0) {
+  if (typeof value === "string") return clip(value);
+  if (!value || typeof value !== "object" || depth > 6) return value;
+  if (Array.isArray(value)) return value.slice(0, 500).map((item) => compactValue(item, depth + 1));
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, compactValue(item, depth + 1)]));
+}
+function compactBlock(block) {
+  if (!block || typeof block !== "object") return block;
+  if (block.type === "image") return { type: "image" };
+  if (block.type === "thinking") return { type: "thinking", thinking: clip(block.thinking ?? "") };
+  if (block.type === "redacted_thinking") return { type: "thinking", thinking: "" };
+  if (block.type === "tool_result") {
+    const content = Array.isArray(block.content)
+      ? block.content.map((part) => part?.type === "text" ? { type: "text", text: clip(part.text ?? "") } : { type: part?.type === "image" ? "image" : "other" })
+      : clip(block.content);
+    return { type: "tool_result", tool_use_id: block.tool_use_id, content, is_error: Boolean(block.is_error) };
+  }
+  if (block.type === "tool_use") return { type: "tool_use", id: block.id, name: block.name, input: compactValue(block.input) };
+  if (block.type === "text") return { type: "text", text: clip(block.text ?? "") };
+  return { type: block.type };
+}
+/**
+ * The part of a `user`/`assistant` record Claude Chat shows, or null for
+ * records it skips (sub-agent turns, injected context, compaction summaries).
+ */
+function compactRecord(record) {
+  if ((record?.type !== "user" && record?.type !== "assistant") || record.isSidechain || record.isMeta || record.isCompactSummary) return null;
+  if (record.parent_tool_use_id) return null;
+  const message = record.message ?? {};
+  const content = typeof message.content === "string" ? clip(message.content) : Array.isArray(message.content) ? message.content.map(compactBlock) : "";
+  return {
+    type: record.type,
+    uuid: typeof record.uuid === "string" ? record.uuid : undefined,
+    timestamp: typeof record.timestamp === "string" ? record.timestamp : undefined,
+    ...(typeof record.apiBlockIndex === "number" ? { piBlockIndex: record.apiBlockIndex } : {}),
+    message: { id: message.id, role: message.role ?? record.type, model: message.model, content },
+  };
+}
+
+const HISTORY_WINDOW = 512 * 1024;
+const HISTORY_SCAN_MAX = 16 * 1024 * 1024;
+const HISTORY_LINE_MAX = 32 * 1024 * 1024;
+/** The file of a session in this folder, or null. */
+function sessionFile(id, cwd) {
+  if (typeof id !== "string" || !SESSION_ID.test(id)) throw error("invalid_session", "Invalid Claude session id");
+  if (typeof cwd !== "string" || !path.isAbsolute(cwd)) throw error("invalid_cwd", "A workspace folder is required");
+  for (const directory of projectDirs(cwd)) {
+    const target = path.join(directory, `${id}.jsonl`);
+    try { if (fs.statSync(target).isFile()) return target; } catch { /* next folder */ }
+  }
+  return null;
+}
+/**
+ * Transcript records ending before byte `before` (default: the end), about
+ * 512 KiB at a time: `{ records, cursor }`. `cursor` is where the returned
+ * records start, for the next older page; null at the start of the file.
+ * The window grows to fit a long line (pasted images are inlined as base64);
+ * lines over 32 MiB are skipped.
+ */
+function readHistory(id, cwd, { before } = {}) {
+  const target = sessionFile(id, cwd);
+  if (!target) throw error("not_found", "Claude session not found in this workspace");
+  const handle = fs.openSync(target, "r");
+  try {
+    const size = fs.fstatSync(handle).size;
+    let end = Math.min(size, /^\d+$/.test(String(before ?? "")) ? Number(before) : size);
+    const records = [];
+    let scanned = 0;
+    let window = HISTORY_WINDOW;
+    while (end > 0 && !records.length && scanned < HISTORY_SCAN_MAX) {
+      const start = Math.max(0, end - window);
+      const buffer = Buffer.alloc(end - start);
+      fs.readSync(handle, buffer, 0, buffer.length, start);
+      // A window that starts mid-line begins after its first newline.
+      let offset = 0;
+      if (start > 0) {
+        offset = buffer.indexOf(10) + 1;
+        if (offset === 0 || offset === buffer.length) {
+          // No whole line in the window: widen it, or skip a huge line.
+          if (window < HISTORY_LINE_MAX) { window *= 2; continue; }
+          scanned += buffer.length;
+          end = start;
+          continue;
+        }
+      }
+      scanned += buffer.length;
+      window = HISTORY_WINDOW;
+      for (const line of buffer.subarray(offset).toString("utf8").split("\n")) {
+        if (!line) continue;
+        let record;
+        try { record = compactRecord(JSON.parse(line)); } catch { continue; }
+        if (record) records.push(record);
+      }
+      end = start + offset;
+    }
+    return { records, cursor: end > 0 ? String(end) : null };
+  } finally { fs.closeSync(handle); }
+}
+
+module.exports = { listSessions, requireSession, remove, encodeCwd, sessionFile, readHistory, compactRecord };

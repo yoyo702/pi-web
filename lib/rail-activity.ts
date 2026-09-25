@@ -1,7 +1,7 @@
 import type { TerminalSession } from "./agents/terminal";
 import type { ProjectWorkspace } from "./project-workspaces";
 import type { SessionInfo } from "./types";
-import type { CodexRuntimeStatus } from "./workspace-status-store";
+import type { ClaudeRuntimeStatus, CodexRuntimeStatus } from "./workspace-status-store";
 
 /**
  * Per-item activity shown by the project rail. Everything here is derived from
@@ -12,7 +12,7 @@ export type RailActivityState = "approval" | "failed" | "working" | "completed";
 export type WorkspaceActivityState = RailActivityState | "idle";
 
 interface RailActivityItemBase {
-  /** Stable identity: `pi:<sessionId>`, `terminal:<terminalId>`, `codex:<threadId>`. */
+  /** Stable identity: `pi:<sessionId>`, `terminal:<terminalId>`, `codex:<threadId>`, `claude:<sessionId>`. */
   key: string;
   id: string;
   label: string;
@@ -24,17 +24,20 @@ interface RailActivityItemBase {
 export type RailActivityItem =
   | (RailActivityItemBase & { kind: "pi"; session: SessionInfo })
   | (RailActivityItemBase & { kind: "terminal"; terminal: TerminalSession })
-  | (RailActivityItemBase & { kind: "codex"; runtime: CodexRuntimeStatus });
+  | (RailActivityItemBase & { kind: "codex"; runtime: CodexRuntimeStatus })
+  | (RailActivityItemBase & { kind: "claude"; runtime: ClaudeRuntimeStatus });
 
-/** What opening an activity item or notification needs: the session, terminal or Codex chat and its directory. */
+/** What opening an activity item or notification needs: the session, terminal, Codex or Claude chat and its directory. */
 export type ActivityTarget =
   | { kind: "pi"; id: string; session: SessionInfo }
   | { kind: "terminal"; id: string; cwd: string }
-  | { kind: "codex"; id: string; cwd: string };
+  | { kind: "codex"; id: string; cwd: string }
+  | { kind: "claude"; id: string; cwd: string; title?: string };
 
 export function activityTarget(item: RailActivityItem): ActivityTarget {
   if (item.kind === "pi") return { kind: "pi", id: item.id, session: item.session };
   if (item.kind === "terminal") return { kind: "terminal", id: item.id, cwd: item.terminal.cwd };
+  if (item.kind === "claude") return { kind: "claude", id: item.id, cwd: item.runtime.cwd, title: item.runtime.title ?? undefined };
   return { kind: "codex", id: item.id, cwd: item.runtime.cwd };
 }
 
@@ -76,10 +79,17 @@ export function codexActivityLabel(threadId: string): string {
   return `Codex chat · ${threadId.slice(0, 8)}`;
 }
 
+export function claudeActivityLabel(runtime: Pick<ClaudeRuntimeStatus, "sessionId" | "title">): string {
+  const title = runtime.title?.trim();
+  if (title) return title.length > 60 ? `${title.slice(0, 59)}…` : title;
+  return `Claude chat · ${runtime.sessionId.slice(0, 8)}`;
+}
+
 export interface RailActivityInput {
   terminals: TerminalSession[];
   runningSessionIds: string[];
   codexRuntimes: CodexRuntimeStatus[];
+  claudeRuntimes?: ClaudeRuntimeStatus[];
   /** Sessions known from the last /api/sessions response. */
   sessionsById: ReadonlyMap<string, SessionInfo>;
   /** `running` from the previous computation; null before the first one. */
@@ -101,7 +111,7 @@ export interface RailActivityResult {
 }
 
 export function computeRailActivity(input: RailActivityInput): RailActivityResult {
-  const { terminals, runningSessionIds, codexRuntimes, sessionsById, previousRunning, now } = input;
+  const { terminals, runningSessionIds, codexRuntimes, claudeRuntimes = [], sessionsById, previousRunning, now } = input;
   const running = new Map<string, RailActivityItem>();
   for (const terminal of terminals) {
     if (terminal.state !== "running") continue;
@@ -120,6 +130,11 @@ export function computeRailActivity(input: RailActivityInput): RailActivityResul
     const key = `codex:${runtime.threadId}`;
     running.set(key, { key, kind: "codex", id: runtime.threadId, label: codexActivityLabel(runtime.threadId), state: runtime.state === "approval" ? "approval" : "working", cwd: runtime.cwd, runtime });
   }
+  for (const runtime of claudeRuntimes) {
+    if (runtime.state === "idle") continue;
+    const key = `claude:${runtime.sessionId}`;
+    running.set(key, { key, kind: "claude", id: runtime.sessionId, label: claudeActivityLabel(runtime), state: runtime.state === "approval" ? "approval" : "working", cwd: runtime.cwd, runtime });
+  }
 
   const completed = new Map<string, RailCompletedEntry>();
   for (const [key, entry] of input.completed) if (entry.until > now && !running.has(key)) completed.set(key, entry);
@@ -131,7 +146,9 @@ export function computeRailActivity(input: RailActivityInput): RailActivityResul
         ? { ...item, terminal: terminals.find((terminal) => terminal.id === item.id) ?? item.terminal }
         : item.kind === "codex"
           ? { ...item, runtime: codexRuntimes.find((runtime) => runtime.threadId === item.id) ?? item.runtime }
-          : item;
+          : item.kind === "claude"
+            ? { ...item, runtime: claudeRuntimes.find((runtime) => runtime.sessionId === item.id) ?? item.runtime }
+            : item;
       completed.set(key, { until: now + RECENTLY_COMPLETED_MS, item: { ...latest, state: "completed" } });
     }
   }

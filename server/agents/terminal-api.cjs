@@ -7,6 +7,7 @@ const path = require("node:path");
 const manager = require("./terminal-manager.cjs");
 const codexAppServer = require("./codex-app-server.cjs");
 const claudeSessions = require("./claude-sessions.cjs");
+const claudeChat = require("./claude-chat-runtime.cjs");
 const { readJsonBody } = require("../http-body.cjs");
 
 const state = global.__piWebTerminalAuthorization || { roots: new Set() };
@@ -188,6 +189,12 @@ async function handleTerminalRequest(req, res, url) {
         claudeSessions.requireSession(body.sourceSessionId, cwd);
         // Two Claude processes appending to one session file corrupt its history.
         if (body.launchMode === "resume" && manager.runtimeForSession(body.sourceSessionId)) throw Object.assign(new Error("This Claude session is already open in a terminal"), { code: "session_busy" });
+        // An idle Claude Chat process is stopped; its tab can reopen later.
+        if (body.launchMode === "resume") {
+          if (claudeChat.isBusySession(body.sourceSessionId)) throw Object.assign(new Error("Claude Chat is still running a turn in this session. Wait for it to finish or stop it first."), { code: "session_busy" });
+          await claudeChat.stopAndWait(body.sourceSessionId);
+          if (claudeChat.runtimeForSession(body.sourceSessionId) || manager.runtimeForSession(body.sourceSessionId)) throw Object.assign(new Error("This Claude session was opened elsewhere meanwhile"), { code: "session_busy" });
+        }
       }
       const terminal = manager.createTerminal({ provider: body.provider, cwd, cols: body.cols ?? 100, rows: body.rows ?? 30, permissionMode: body.permissionMode ?? "confirm", launchMode: body.launchMode ?? "new", noAltScreen: body.noAltScreen ?? body.provider === "codex", sourceSessionId: body.sourceSessionId, model: body.model, webSearch: body.webSearch, initialPrompt: body.initialPrompt, chatMode: body.chatMode === true });
       return json(res, 201, { terminal });

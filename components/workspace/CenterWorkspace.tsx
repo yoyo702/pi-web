@@ -2,10 +2,10 @@
 
 import type { ReactNode } from "react";
 import type { CenterState } from "@/lib/workspace/panel-state";
-import { terminalTabId, type CodexChatTab, type TerminalTab } from "@/lib/workspace/tabs";
+import { terminalTabId, type ClaudeChatTab, type CodexChatTab, type TerminalTab } from "@/lib/workspace/tabs";
 
 /** Mounted external-agent tabs; the Pi tab is rendered by the caller. */
-export function CenterWorkspace({ state, renderTab }: { state: CenterState; renderTab: (tab: TerminalTab | CodexChatTab) => ReactNode }) {
+export function CenterWorkspace({ state, renderTab }: { state: CenterState; renderTab: (tab: TerminalTab | CodexChatTab | ClaudeChatTab) => ReactNode }) {
   const splitSecondaryId = state.split ? terminalTabId(state.split.secondaryTerminalId) : null;
   return <>
     {state.tabs.map((tab) => {

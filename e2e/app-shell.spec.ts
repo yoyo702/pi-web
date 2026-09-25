@@ -1230,7 +1230,7 @@ test("lists Claude sessions, resumes one in a terminal and shows delete conflict
   expect(launches).toEqual([{ provider: "claude", cwd: "/tmp/pi-web-e2e", permissionMode: "confirm", launchMode: "resume", sourceSessionId: firstId }]);
 });
 
-// Codex chat event streams are driven from the test through window.__codexStreams.
+// Codex and Claude chat event streams are driven from the test through window.__codexStreams.
 async function fakeCodexStreams(page: Page) {
   await page.addInitScript(() => {
     const RealEventSource = window.EventSource;
@@ -1250,7 +1250,7 @@ async function fakeCodexStreams(page: Page) {
       close() { this.readyState = 2; }
     }
     window.EventSource = function (url: string | URL, init?: EventSourceInit) {
-      return String(url).includes("/api/codex/chat/") ? new FakeEventSource(String(url)) : new RealEventSource(url, init);
+      return /\/api\/(codex|claude)\/chat\//.test(String(url)) ? new FakeEventSource(String(url)) : new RealEventSource(url, init);
     } as unknown as typeof EventSource;
     Object.assign(window.EventSource, { CONNECTING: 0, OPEN: 1, CLOSED: 2 });
   });
@@ -1428,6 +1428,120 @@ test("starts a new Codex chat whose first message creates the session", async ({
   await page.getByRole("button", { name: "Resume in Chat" }).click();
   await expect(page.getByRole("tab", { name: /fix the flaky test/ })).toHaveCount(1);
   await expect(page.getByRole("tab", { name: /Codex Chat/ })).toHaveCount(0);
+});
+
+async function mockClaudeWorkspace(page: Page, sessions: Array<Record<string, unknown>>) {
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
+    id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
+    created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
+  }], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
+  await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: { cwd: "/tmp/pi-web-e2e", terminals: [], stats: null } }));
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals: [], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+    { type: "claude_runtimes", runtimes: [] },
+  ]);
+  await page.route("**/api/project-scripts?*", async (route) => route.fulfill({ json: { scripts: [], runner: "npm" } }));
+  await page.route("**/api/claude/sessions?*", async (route) => route.fulfill({ json: { sessions, nextCursor: null } }));
+}
+
+test("opens a Claude session in Claude Chat, answers permissions and stops a terminal that owns it", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const id = "55555555-5555-4555-8555-555555555555";
+  await fakeCodexStreams(page);
+  await mockClaudeWorkspace(page, [{ id, title: "Refactor login", firstMessage: "Refactor login", cwd: "/tmp/pi-web-e2e", gitBranch: null, createdAt: null, updatedAt: "2026-08-03T00:00:00.000Z", size: 2048, runtime: null }]);
+  let terminalOwns = true;
+  await page.route(`**/api/claude/chat/${id}?*`, async (route) => route.fulfill({ json: {
+    session: { id, title: "Refactor login" },
+    history: [
+      { type: "user", uuid: "h1", message: { role: "user", content: "Refactor login" } },
+      { type: "assistant", uuid: "h2", piBlockIndex: 0, message: { id: "m0", role: "assistant", content: [{ type: "text", text: "Done refactoring." }] } },
+    ],
+    cursor: null, events: [], runtime: null, terminal: terminalOwns ? { terminalId: "term-1" } : null,
+  } }));
+  const actions: Array<{ action: string; body: Record<string, unknown> }> = [];
+  await page.route(`**/api/claude/chat/${id}/*`, async (route) => {
+    const action = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
+    if (action === "events") return route.fallback();
+    actions.push({ action, body: route.request().postDataJSON() as Record<string, unknown> });
+    if (action === "claim") terminalOwns = false;
+    return route.fulfill({ status: action === "send" ? 202 : 200, json: { ok: true } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.locator("button[aria-expanded]").filter({ hasText: "Claude" }).last().click();
+  await page.getByText("Refactor login", { exact: true }).click();
+  const chat = page.locator("section").filter({ hasText: "Claude Chat · Refactor login" });
+  await expect(chat.getByText("Done refactoring.")).toBeVisible();
+
+  // A terminal resuming the session owns it until the user stops it here.
+  await chat.getByRole("alert").filter({ hasText: "open in a Claude terminal" }).getByRole("button", { name: "Stop terminal" }).click();
+  await expect.poll(() => actions.map((entry) => entry.action)).toEqual(["claim"]);
+  await expect(chat.getByText("open in a Claude terminal")).toHaveCount(0);
+
+  await chat.locator("button[title=\"Chat configuration\"]").click();
+  await chat.getByLabel("Permissions").selectOption("plan");
+  const composer = chat.getByPlaceholder("Message…", { exact: true });
+  await composer.fill("run the tests");
+  await composer.press("Enter");
+  await expect.poll(() => actions.find((entry) => entry.action === "send")?.body).toMatchObject({ cwd: "/tmp/pi-web-e2e", text: "run the tests", permissionMode: "plan", model: "" });
+  const uuid = actions.find((entry) => entry.action === "send")?.body.uuid;
+  await expect(chat.getByText("run the tests")).toBeVisible();
+
+  const emit = (event: Record<string, unknown>) => emitCodexEvent(page, event);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __codexStreams?: unknown[] }).__codexStreams?.length ?? 0)).toBeGreaterThan(0);
+  await emit({ type: "pi/connected", sessionId: id, runtimeId: "r1" });
+  await emit({ type: "user", uuid, message: { role: "user", content: "run the tests" }, piSeq: 1, piRuntime: "r1" });
+  await emit({ type: "control_request", request_id: "req-1", request: { subtype: "can_use_tool", tool_name: "Bash", input: { command: "npm test", description: "Run tests" }, permission_suggestions: [{ type: "addRules" }] }, piSeq: 2, piRuntime: "r1" });
+  const card = chat.getByRole("alert", { name: "Permission required" });
+  await expect(card.getByText("npm test")).toBeVisible();
+  // While a turn runs, messages are queued for the next one.
+  await expect(chat.getByPlaceholder("Queue a message for the next turn…")).toBeVisible();
+  await card.getByRole("button", { name: "Allow for session" }).click();
+  await expect.poll(() => actions.find((entry) => entry.action === "respond")?.body).toEqual({ cwd: "/tmp/pi-web-e2e", requestId: "req-1", decision: "allowSession" });
+  await expect(card).toHaveCount(0);
+
+  await emit({ type: "assistant", uuid: "a1", piBlockIndex: 0, message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "tool-1", name: "Bash", input: { command: "npm test" } }] }, piSeq: 3, piRuntime: "r1" });
+  await emit({ type: "user", uuid: "a2", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: "12 passing" }] }, piSeq: 4, piRuntime: "r1" });
+  await emit({ type: "assistant", uuid: "a3", piBlockIndex: 1, message: { id: "m1", role: "assistant", content: [{ type: "text", text: "All tests pass." }] }, piSeq: 5, piRuntime: "r1" });
+  // A replayed event is ignored.
+  await emit({ type: "assistant", uuid: "a3", piBlockIndex: 1, message: { id: "m1", role: "assistant", content: [{ type: "text", text: "replayed" }] }, piSeq: 5, piRuntime: "r1" });
+  await emit({ type: "result", subtype: "success", is_error: false, piSeq: 6, piRuntime: "r1" });
+  await expect(chat.getByText("All tests pass.")).toBeVisible();
+  await expect(chat.getByText("replayed")).toHaveCount(0);
+  await expect(chat.getByPlaceholder("Message…", { exact: true })).toBeVisible();
+});
+
+test("starts a new Claude chat whose first message creates the session", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const id = "66666666-6666-4666-8666-666666666666";
+  await fakeCodexStreams(page);
+  await mockClaudeWorkspace(page, []);
+  const created: Array<Record<string, unknown>> = [];
+  await page.route("**/api/claude/chat", async (route) => {
+    created.push(route.request().postDataJSON() as Record<string, unknown>);
+    return route.fulfill({ status: 201, json: { sessionId: id } });
+  });
+  let loads = 0;
+  await page.route(`**/api/claude/chat/${id}?*`, async (route) => { loads += 1; return route.fulfill({ json: { session: { id, title: null }, history: [], cursor: null, events: [], runtime: { runtimeId: "r1", running: true, model: null, launchModel: null, permissionMode: "default", process: true, requests: [] }, terminal: null } }); });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.getByRole("button", { name: "New Claude chat" }).click();
+  const chat = page.locator("section").filter({ hasText: "Claude Chat · New chat" });
+  await expect(chat).toBeVisible();
+  expect(loads).toBe(0);
+  const composer = chat.getByPlaceholder("Message…", { exact: true });
+  await composer.fill("explain the build");
+  await composer.press("Enter");
+  await expect.poll(() => created.length).toBe(1);
+  expect(created[0]).toMatchObject({ cwd: "/tmp/pi-web-e2e", text: "explain the build", permissionMode: "default", model: "" });
+  await expect.poll(() => page.evaluate((sessionId) => (window as unknown as { __codexStreams?: { url: string }[] }).__codexStreams?.some((stream) => stream.url.includes(sessionId)) ?? false, id)).toBe(true);
+  await expect(page.getByRole("tab", { name: /explain the build/ })).toHaveCount(1);
+  await expect(page.getByText("explain the build").first()).toBeVisible();
 });
 
 test("searches and manages files from Explorer", async ({ page }, testInfo) => {

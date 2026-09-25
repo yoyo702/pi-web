@@ -53,7 +53,7 @@ test("add persists entries newest first and pushes a notifications snapshot", (t
 
 test("add rejects unknown kinds and events", (t) => {
   useLog(t);
-  assert.equal(notifications.add({ kind: "claude", event: "completed", targetId: "a" }), null);
+  assert.equal(notifications.add({ kind: "gemini", event: "completed", targetId: "a" }), null);
   assert.equal(notifications.add({ kind: "codex", event: "started", targetId: "a" }), null);
   assert.equal(notifications.add({ kind: "codex", event: "completed", targetId: "" }), null);
   assert.equal(notifications.list().length, 0);

@@ -9,15 +9,15 @@ import { ProjectRail } from "./ProjectRail";
 import { ChatWindow } from "./ChatWindow";
 import { NewAgentDialog } from "./agents/NewAgentDialog";
 import { TabBar } from "./TabBar";
-import { codexChatTabId, terminalTabId, GIT_REVIEW_TAB_ID, type CenterTab, type TabStatus, type TerminalTab } from "@/lib/workspace/tabs";
+import { claudeChatTabId, codexChatTabId, terminalTabId, GIT_REVIEW_TAB_ID, type CenterTab, type ClaudePermissionMode, type TabStatus, type TerminalTab } from "@/lib/workspace/tabs";
 import { centerReducer, sideReducer, initialCenterState, initialSideState, type TerminalSplit } from "@/lib/workspace/panel-state";
 import { loadCenterState, saveCenterState, loadSideState, saveSideState, type SideSnapshotCache } from "@/lib/workspace/panel-storage";
 import { getMissingSplitTerminalTabs } from "@/lib/terminal-restore";
 import { CenterWorkspace } from "./workspace/CenterWorkspace";
 import { SidePanel } from "./workspace/SidePanel";
 import { TopBar } from "./workspace/TopBar";
-import { TerminalTabView, CodexChatTabView, FileTabView, GitTabView } from "./workspace/tab-views";
-import { WorkspaceActionsProvider, type CodexChatTarget, type WorkspaceActions } from "./workspace/WorkspaceActions";
+import { TerminalTabView, CodexChatTabView, ClaudeChatTabView, FileTabView, GitTabView } from "./workspace/tab-views";
+import { WorkspaceActionsProvider, type ClaudeChatTarget, type CodexChatTarget, type WorkspaceActions } from "./workspace/WorkspaceActions";
 
 // Heavy on-demand panels are declared in ./workspace/tab-views (dynamic,
 // ssr: false) so they stay out of the initial chat bundle.
@@ -48,6 +48,10 @@ const rightPanelHeaderButtonStyle: React.CSSProperties = { width: 36, height: 36
 const rightPanelToolMenuStyle: React.CSSProperties = { position: "absolute", zIndex: 500, top: 38, right: 2, width: 190, display: "grid", gap: 2, padding: 5, border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", boxShadow: "0 14px 36px rgba(0,0,0,.26)" };
 const rightPanelToolItemStyle: React.CSSProperties = { minHeight: 32, display: "flex", alignItems: "center", gap: 8, padding: "0 9px", border: 0, borderRadius: 5, background: "transparent", color: "var(--text)", cursor: "pointer", font: "12px/1.2 inherit", textAlign: "left" };
 
+/** Settings the caller knows; merging an unknown one would wipe what an open tab saved. */
+function definedOnly<T extends Record<string, unknown>>(values: T): Partial<T> {
+  return Object.fromEntries(Object.entries(values).filter(([, value]) => value !== undefined)) as Partial<T>;
+}
 
 /** Current SessionInfo for a session (the list is cached server-side); `cached` on any failure. */
 async function fetchFreshSessionInfo(cached: SessionInfo): Promise<SessionInfo> {
@@ -660,7 +664,7 @@ export function AppShell() {
 
   const handleCloseWorkspaceTab = useCallback((tabId: string) => {
     const tab = workspaceTabs.find((item) => item.id === tabId);
-    const terminal = tab && tab.kind !== "pi" && tab.terminalId ? terminals[tab.terminalId] : null;
+    const terminal = tab && "terminalId" in tab && tab.terminalId ? terminals[tab.terminalId] : null;
     if (terminal?.state === "running") {
       setTerminalCloseError(null);
       setPendingTerminalClose({ tabId, terminal });
@@ -710,16 +714,16 @@ export function AppShell() {
   const handleCodexSessionChanged = useCallback((change: { id: string; action: "rename" | "archive" | "unarchive" | "delete"; name?: string }) => {
     if (change.action === "rename" && change.name) {
       const name = change.name;
-      dispatchCenter({ type: "update", update: (tab) => tab.kind !== "pi" && tab.sourceSessionId === change.id ? { ...tab, label: name, ...(tab.kind === "codex-chat" ? { sessionName: name } : {}) } : tab });
+      dispatchCenter({ type: "update", update: (tab) => tab.kind !== "pi" && tab.sourceSessionId === change.id ? { ...tab, label: name, ...(tab.kind === "codex-chat" || tab.kind === "claude-chat" ? { sessionName: name } : {}) } : tab });
       return;
     }
     if (change.action !== "archive" && change.action !== "delete") return;
-    dispatchCenter({ type: "removeWhere", predicate: (tab) => tab.kind === "codex-chat" && tab.sourceSessionId === change.id });
+    dispatchCenter({ type: "removeWhere", predicate: (tab) => (tab.kind === "codex-chat" || tab.kind === "claude-chat") && tab.sourceSessionId === change.id });
   }, []);
 
   const handleAgentTerminalRemoved = useCallback((terminalId: string) => {
     updateTerminals((current) => current.filter((terminal) => terminal.id !== terminalId));
-    dispatchCenter({ type: "removeWhere", predicate: (tab) => tab.kind !== "pi" && tab.terminalId === terminalId });
+    dispatchCenter({ type: "removeWhere", predicate: (tab) => "terminalId" in tab && tab.terminalId === terminalId });
   }, [updateTerminals]);
 
   const openGitReview = useCallback(() => {
@@ -780,7 +784,7 @@ export function AppShell() {
   }, []);
 
   const handleOpenCodexSessionChat = useCallback((target: CodexChatTarget) => {
-    const settings = { sessionName: target.sessionName || undefined, cwd: target.cwd, model: target.model, reasoningEffort: target.reasoningEffort, serviceTier: target.serviceTier, approvalPolicy: target.approvalPolicy };
+    const settings = { sessionName: target.sessionName || undefined, cwd: target.cwd, ...definedOnly({ model: target.model, reasoningEffort: target.reasoningEffort, serviceTier: target.serviceTier, approvalPolicy: target.approvalPolicy }) };
     // An empty name falls back to the panel's own title and the thread's name;
     // an open tab keeps its label then (e.g. the first message of a new chat).
     const fields = { label: target.sessionName || "Codex Chat", ...settings };
@@ -799,6 +803,29 @@ export function AppShell() {
       const saved = loadCenterState(localStorage, cwd);
       saveCenterState(localStorage, cwd, { ...saved, tabs: saved.tabs.map(update) });
     }
+  }, []);
+
+  const handleOpenClaudeSessionChat = useCallback((target: ClaudeChatTarget) => {
+    const settings = { sessionName: target.sessionName || undefined, cwd: target.cwd, ...definedOnly({ model: target.model, permissionMode: target.permissionMode }) };
+    const fields = { label: target.sessionName || "Claude Chat", ...settings };
+    dispatchCenter({ type: "open", tab: { id: claudeChatTabId(target.sessionId), kind: "claude-chat", sourceSessionId: target.sessionId, ...fields }, mergeExisting: target.sessionName ? fields : settings });
+  }, []);
+
+  const handleNewClaudeChat = useCallback((cwd: string) => {
+    dispatchCenter({ type: "open", tab: { id: claudeChatTabId(`new-${randomId()}`), label: "New Claude chat", kind: "claude-chat", cwd, newChat: true, permissionMode: "default" } });
+  }, []);
+
+  const handleClaudeChatCreated = useCallback((tabId: string, cwd: string, sessionId: string, title: string) => {
+    const update = (tab: CenterTab): CenterTab => tab.id === tabId && tab.kind === "claude-chat" ? { ...tab, sourceSessionId: sessionId, newChat: false, label: title || tab.label } : tab;
+    dispatchCenter({ type: "update", update });
+    if (cwd !== centerHydratedCwdRef.current) {
+      const saved = loadCenterState(localStorage, cwd);
+      saveCenterState(localStorage, cwd, { ...saved, tabs: saved.tabs.map(update) });
+    }
+  }, []);
+
+  const handleClaudeTabConfiguration = useCallback((tabId: string, configuration: { model?: string; permissionMode?: ClaudePermissionMode }) => {
+    dispatchCenter({ type: "update", update: (tab) => tab.id === tabId && tab.kind === "claude-chat" ? { ...tab, ...configuration } : tab });
   }, []);
 
   const handleTerminalChanged = useCallback((terminal: TerminalSession) => {
@@ -912,6 +939,10 @@ export function AppShell() {
         if (token !== projectSwitchTokenRef.current || intent.seq !== activityOpenSeqRef.current || selectedSessionIdRef.current !== selectedAtOpen) return;
         handleSelectSession(session);
       });
+    } else if (item.kind === "claude") {
+      const existing = workspaceTabs.find((tab) => tab.kind === "claude-chat" && (tab.id === claudeChatTabId(item.id) || tab.sourceSessionId === item.id));
+      if (existing) activateWorkspaceTab(existing.id);
+      else handleOpenClaudeSessionChat({ sessionId: item.id, sessionName: "", cwd: item.cwd });
     } else {
       const threadId = item.id;
       const existing = workspaceTabs.find((tab) => tab.kind === "codex-chat" && (tab.id === codexChatTabId(threadId) || tab.sourceSessionId === threadId));
@@ -920,7 +951,7 @@ export function AppShell() {
       // defaults. No session name, so the panel shows the thread's own name.
       else handleOpenCodexSessionChat({ sessionId: threadId, sessionName: "", cwd: item.cwd, approvalPolicy: "untrusted" });
     }
-  }, [activateWorkspaceTab, activeCwd, activityOpenIntent, centerHydratedCwd, closeMobileOverlays, handleOpenCodexSessionChat, handleSelectSession, isMobile, openTerminalTab, terminals, terminalsLoaded, workspaceTabs]);
+  }, [activateWorkspaceTab, activeCwd, activityOpenIntent, centerHydratedCwd, closeMobileOverlays, handleOpenClaudeSessionChat, handleOpenCodexSessionChat, handleSelectSession, isMobile, openTerminalTab, terminals, terminalsLoaded, workspaceTabs]);
 
   // The context value is ref-backed so its identity never changes. Consumers
   // derive callbacks from it (e.g. ChatWindow's onOpenFile) and MessageView's
@@ -932,6 +963,8 @@ export function AppShell() {
     openTerminal: handleTerminalCreated,
     openCodexChat: handleOpenCodexSessionChat,
     newCodexChat: handleNewCodexChat,
+    openClaudeChat: handleOpenClaudeSessionChat,
+    newClaudeChat: handleNewClaudeChat,
     closeTab: (tabId) => (fileTabs.some((tab) => tab.id === tabId) ? handleCloseFileTab(tabId) : handleCloseWorkspaceTab(tabId)),
     revealInExplorer: handleRevealFileInExplorer,
   };
@@ -943,6 +976,8 @@ export function AppShell() {
     openTerminal: (terminal, label) => workspaceActionsRef.current.openTerminal(terminal, label),
     openCodexChat: (target) => workspaceActionsRef.current.openCodexChat(target),
     newCodexChat: (cwd) => workspaceActionsRef.current.newCodexChat(cwd),
+    openClaudeChat: (target) => workspaceActionsRef.current.openClaudeChat(target),
+    newClaudeChat: (cwd) => workspaceActionsRef.current.newClaudeChat(cwd),
     closeTab: (tabId) => workspaceActionsRef.current.closeTab(tabId),
     revealInExplorer: (filePath) => workspaceActionsRef.current.revealInExplorer(filePath),
   }), []);
@@ -967,7 +1002,7 @@ export function AppShell() {
   const runningTasks = runningTerminals.filter((terminal) => terminal.provider === "shell" && terminal.title?.startsWith("Task: "));
   const runningAgents = runningTerminals.filter((terminal) => terminal.provider !== "shell");
   const runningShells = runningTerminals.filter((terminal) => terminal.provider === "shell" && !terminal.title?.startsWith("Task: "));
-  const activeCodexChats = workspaceTabs.filter((tab) => tab.kind === "codex-chat" && (tab.status === "running" || tab.status === "approval"));
+  const activeCodexChats = workspaceTabs.filter((tab) => (tab.kind === "codex-chat" || tab.kind === "claude-chat") && (tab.status === "running" || tab.status === "approval"));
   const approvalCount = activeCodexChats.filter((tab) => tab.status === "approval").length;
   const activityCount = runningTerminals.length + activeCodexChats.length;
   const showWorkspaceTabBar = workspaceTabs.length > 1;
@@ -1295,6 +1330,7 @@ export function AppShell() {
           ) : null}
           </div>
           <CenterWorkspace state={center} renderTab={(tab) => {
+            if (tab.kind === "claude-chat") return <ClaudeChatTabView tab={tab} activeCwd={activeCwd} onStatusChange={handleCodexTabStatus} onConfigurationChange={handleClaudeTabConfiguration} onCreated={handleClaudeChatCreated} />;
             const terminal = tab.terminalId ? terminals[tab.terminalId] ?? null : null;
             return tab.kind === "codex-chat" && (terminal || tab.sourceSessionId || tab.newChat)
               ? <CodexChatTabView tab={tab} terminal={terminal} activeCwd={activeCwd} onStatusChange={handleCodexTabStatus} onConfigurationChange={handleCodexTabConfiguration} onCreated={handleCodexChatCreated} />

@@ -5,7 +5,7 @@ import { joinFilePath } from "@/lib/file-paths";
 import type { TerminalSession } from "@/lib/agents/terminal";
 import type { TerminalConnectionState } from "@/hooks/useTerminalSocket";
 import type { TerminalSplit } from "@/lib/workspace/panel-state";
-import type { CenterTab, CodexApprovalPolicy, CodexChatTab, FileTab, TerminalTab } from "@/lib/workspace/tabs";
+import type { CenterTab, ClaudeChatTab, ClaudePermissionMode, CodexApprovalPolicy, CodexChatTab, FileTab, TerminalTab } from "@/lib/workspace/tabs";
 import { useWorkspaceActions } from "./WorkspaceActions";
 
 // Panels below pull in heavy dependencies (xterm, assistant-ui, provider icon
@@ -13,6 +13,7 @@ import { useWorkspaceActions } from "./WorkspaceActions";
 // of the initial chat bundle.
 const AgentTerminalPanel = dynamic(() => import("../agents/AgentTerminalPanel").then((m) => m.AgentTerminalPanel), { ssr: false });
 const CodexChatPanel = dynamic(() => import("../agents/codex/CodexChatPanel").then((m) => m.CodexChatPanel), { ssr: false });
+const ClaudeChatPanel = dynamic(() => import("../agents/claude/ClaudeChatPanel").then((m) => m.ClaudeChatPanel), { ssr: false });
 const FileViewer = dynamic(() => import("../FileViewer").then((m) => m.FileViewer), { ssr: false });
 const GitReviewPanel = dynamic(() => import("../GitReviewPanel").then((m) => m.GitReviewPanel), { ssr: false });
 
@@ -110,6 +111,38 @@ export function CodexChatTabView({
         const absolutePath = filePath.startsWith("/") ? filePath : joinFilePath(tab.cwd ?? activeCwd ?? "", filePath);
         actions.openFile(absolutePath, { sourceSessionId: tab.sourceSessionId });
       }}
+    />
+  );
+}
+
+/** Claude chat tab body: a saved Claude session, or a new chat created by its first message. */
+export function ClaudeChatTabView({
+  tab,
+  activeCwd,
+  onStatusChange,
+  onConfigurationChange,
+  onCreated,
+}: {
+  tab: ClaudeChatTab;
+  activeCwd: string | null;
+  onStatusChange: (tabId: string, status: "idle" | "running" | "approval") => void;
+  onConfigurationChange: (tabId: string, configuration: { model?: string; permissionMode?: ClaudePermissionMode }) => void;
+  onCreated: (tabId: string, cwd: string, sessionId: string, title: string) => void;
+}) {
+  const actions = useWorkspaceActions();
+  const cwd = tab.cwd ?? activeCwd ?? "";
+  return (
+    <ClaudeChatPanel
+      sessionId={tab.sourceSessionId ?? null}
+      cwd={cwd}
+      sessionName={tab.sessionName}
+      model={tab.model ?? ""}
+      permissionMode={tab.permissionMode ?? "default"}
+      workspaceTabId={tab.id}
+      onCreated={onCreated}
+      onStatusChange={onStatusChange}
+      onConfigurationChange={onConfigurationChange}
+      onOpenFile={(filePath) => actions.openFile(filePath.startsWith("/") ? filePath : joinFilePath(cwd, filePath))}
     />
   );
 }

@@ -4,11 +4,14 @@
 const catalog = require("./claude-sessions.cjs");
 const terminalApi = require("./terminal-api.cjs");
 const terminalManager = require("./terminal-manager.cjs");
+const claudeChat = require("./claude-chat-runtime.cjs");
 const { readBody } = require("../http-body.cjs");
 
-// Session file paths stay on the server.
+// Session file paths stay on the server. The runtime is the terminal resuming
+// the session or the Claude Chat process writing it.
+function runtimeFor(id) { return terminalManager.runtimeForSession(id) ?? claudeChat.runtimeForSession(id); }
 function withRuntime(session) {
-  const result = { ...session, runtime: terminalManager.runtimeForSession(session.id) };
+  const result = { ...session, runtime: runtimeFor(session.id) };
   delete result.path;
   return result;
 }
@@ -32,6 +35,9 @@ function requireCwd(cwd) {
 function assertNotBusy(session, cwd) {
   if (terminalManager.runtimeForSession(session.id)) {
     throw Object.assign(new Error("This Claude session is open in a terminal. Stop the terminal first."), { code: "session_busy" });
+  }
+  if (claudeChat.runtimeForSession(session.id) || claudeChat.isBusySession(session.id)) {
+    throw Object.assign(new Error("This Claude session is open in Claude Chat. Close the chat first."), { code: "session_busy" });
   }
   const writer = terminalManager.listTerminals(cwd).find((terminal) => terminal.provider === "claude" && terminal.state === "running" && terminal.createdAt <= session.updatedAt);
   if (writer) throw Object.assign(new Error("A running Claude terminal in this workspace may be writing this session. Stop it first."), { code: "session_busy" });

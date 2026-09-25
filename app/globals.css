@@ -1345,6 +1345,11 @@ span.linenumber {
 .codex-aui-approval button.is-danger{color:#ef4444}
 .codex-aui-approval button:disabled{opacity:.5;cursor:default}
 .codex-aui-approval a{color:var(--accent);overflow-wrap:anywhere}
+.claude-permission-diff .is-added{color:#22c55e}
+.claude-permission-diff .is-removed{color:#f87171}
+.claude-permission-plan{max-height:320px;overflow:auto;margin:10px 0;padding:4px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg)}
+.codex-aui-item-notice{margin:2px 0 10px;color:var(--text-dim);font-size:11px;font-style:italic}
+.codex-aui-item-notice.is-error{color:#f87171;font-style:normal}
 .codex-aui-request-field{display:grid;gap:6px;margin:10px 0;padding:0;border:0}
 .codex-aui-request-field legend{margin-bottom:4px;color:var(--text);font-weight:600}
 .codex-aui-request-field p{margin:0 0 4px}

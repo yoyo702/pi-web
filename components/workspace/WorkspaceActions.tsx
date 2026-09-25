@@ -2,7 +2,7 @@
 
 import { createContext, useContext, type ReactNode } from "react";
 import type { TerminalSession } from "@/lib/agents/terminal";
-import type { CodexApprovalPolicy } from "@/lib/workspace/tabs";
+import type { ClaudePermissionMode, CodexApprovalPolicy } from "@/lib/workspace/tabs";
 
 export interface CodexChatTarget {
   sessionId: string;
@@ -12,6 +12,14 @@ export interface CodexChatTarget {
   reasoningEffort?: string;
   serviceTier?: string;
   approvalPolicy: CodexApprovalPolicy;
+}
+
+export interface ClaudeChatTarget {
+  sessionId: string;
+  sessionName: string;
+  cwd: string;
+  model?: string;
+  permissionMode?: ClaudePermissionMode;
 }
 
 /**
@@ -26,6 +34,9 @@ export interface WorkspaceActions {
   openCodexChat(target: CodexChatTarget): void;
   /** Opens an empty Codex chat in `cwd`; its first message creates the session. */
   newCodexChat(cwd: string): void;
+  openClaudeChat(target: ClaudeChatTarget): void;
+  /** Opens an empty Claude chat in `cwd`; its first message creates the session. */
+  newClaudeChat(cwd: string): void;
   closeTab(tabId: string): void;
   revealInExplorer(filePath: string): void;
 }

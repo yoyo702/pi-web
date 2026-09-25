@@ -1,4 +1,4 @@
-import type { CodexChatTab, FileTab, GitTab, Tab, TerminalTab } from "./tabs";
+import type { ClaudeChatTab, CodexChatTab, FileTab, GitTab, Tab, TerminalTab } from "./tabs";
 
 export type TabSlot = "center" | "side";
 
@@ -31,6 +31,11 @@ export const TAB_KINDS: { [K in Tab["kind"]]: TabKindDefinition<Extract<Tab, { k
     slot: "center",
     // A restored chat is not running until its panel reconnects.
     parse: (raw, scope) => hasIdentity(raw) && raw.cwd === scope.cwd ? { ...(raw as unknown as CodexChatTab), status: "idle" } : null,
+  },
+  "claude-chat": {
+    kind: "claude-chat",
+    slot: "center",
+    parse: (raw, scope) => hasIdentity(raw) && raw.cwd === scope.cwd ? { ...(raw as unknown as ClaudeChatTab), status: "idle" } : null,
   },
   file: {
     kind: "file",

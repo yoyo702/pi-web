@@ -8,12 +8,22 @@ export interface CodexRuntimeStatus {
   connected?: boolean;
 }
 
+/** A Claude Chat process (server/agents/claude-chat-runtime.cjs). */
+export interface ClaudeRuntimeStatus {
+  sessionId: string;
+  cwd: string;
+  title?: string | null;
+  owner?: "chat";
+  state: "idle" | "running" | "approval";
+  connected?: boolean;
+}
+
 /** One entry of the server's activity notification log (server/notifications.cjs). */
 export interface ActivityNotification {
   id: string;
-  kind: "codex" | "pi" | "terminal";
+  kind: "codex" | "claude" | "pi" | "terminal";
   event: "completed" | "failed" | "approval";
-  /** Codex thread id, Pi session id or terminal id. */
+  /** Codex thread id, Claude session id, Pi session id or terminal id. */
   targetId: string;
   cwd: string;
   /** Main checkout of a worktree cwd. */
@@ -32,6 +42,7 @@ export interface WorkspaceStatusSnapshot {
   terminals: TerminalSession[] | null;
   terminalLimits: TerminalStats["limits"] | null;
   codexRuntimes: CodexRuntimeStatus[] | null;
+  claudeRuntimes: ClaudeRuntimeStatus[] | null;
   /** Newest first. */
   notifications: ActivityNotification[] | null;
   unreadNotifications: number;
@@ -53,6 +64,7 @@ const EMPTY_SNAPSHOT: WorkspaceStatusSnapshot = {
   terminals: null,
   terminalLimits: null,
   codexRuntimes: null,
+  claudeRuntimes: null,
   notifications: null,
   unreadNotifications: 0,
 };
@@ -99,6 +111,11 @@ export function createWorkspaceStatusStore(): WorkspaceStatusStore {
         case "codex_runtimes": {
           if (!Array.isArray(message.runtimes)) return;
           notify({ ...snapshot, codexRuntimes: message.runtimes as CodexRuntimeStatus[] });
+          return;
+        }
+        case "claude_runtimes": {
+          if (!Array.isArray(message.runtimes)) return;
+          notify({ ...snapshot, claudeRuntimes: message.runtimes as ClaudeRuntimeStatus[] });
           return;
         }
         case "notifications": {

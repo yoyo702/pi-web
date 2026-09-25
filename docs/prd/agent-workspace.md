@@ -19,6 +19,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - Agent/Terminal 在中央工作区以标签打开，支持多标签和终端分屏。
 - 支持 Shell、Codex、Claude 三种启动类型。
 - Codex 支持 Chat 和 Terminal Session；Chat 支持模型、推理、服务等级和审批策略。
+- Claude 支持 Chat 和 Terminal Session；Chat 支持模型、权限模式和权限卡片。
 - Session 支持新建、恢复、Fork、重命名、归档和删除确认。
 - Terminal 支持停止、重启、删除记录、清理已结束任务和重连缓冲区。
 - Chat 支持中断运行及处理审批卡片。
@@ -103,6 +104,36 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - 会话被另一个 Codex 客户端（如 ChatGPT 桌面端）占用（app-server 报 “already has an active writer”）：409 `writer_conflict`，提示完全退出该应用后重试，或从 Agents 面板 Fork。
 - 聊天接口错误码：400 参数错误，403 目录未授权，404 会话不存在；409 用于已归档、正在归档/删除或有一轮在跑（`session_busy`）、终端占用（`terminal_owns_session`、`terminal_conflict`）、`writer_conflict`、审批已过期（`approval_expired`）、没有进行中的一轮（`no_active_turn`）；503 app-server 不可用；其余 500。app-server 自身的错误（`rpc_error`）、超时和运行时退出原因会显示，但其中的文件路径替换为 `<path>`；其他 500/503 只返回通用提示，详情写服务端日志（stderr 只进日志）。
 
+## Claude 聊天运行时
+
+- 每个会话一个 `claude --print --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio --allow-dangerously-skip-permissions` 进程（`server/agents/claude-chat-runtime.cjs`，接口 `claude-chat-api.cjs`），所有浏览器共用。
+  - 打开聊天只读会话文件，不启动进程；第一条消息才启动（已有会话用 `--resume <id>`，新聊天用 `--session-id <新 id>`）。
+  - 没有页面在看、也没有进行中的一轮和未决审批时，30 秒后关闭进程；一轮进行中或有审批时一直保留。因此发起一轮后关掉页面，这一轮会跑完。
+  - `--permission-prompt-tool stdio` 让权限请求走 `control_request can_use_tool`，由浏览器回答；不加这个参数，权限请求会被自动拒绝。`--allow-dangerously-skip-permissions` 只是允许之后切到 `bypassPermissions`，不会直接开启它。
+- 接口（所有 POST 请求体都带 `cwd`；cwd 须是已授权目录，会话须属于该目录）：
+  - `GET /api/claude/chat/:id?cwd=&before=`：返回 `{session, history, cursor, events, runtime, terminal}`。`history` 是会话文件末尾约 512 KiB 的记录（带 `before` 时取更早的一页，只返回 `history`/`cursor`；`cursor` 为 null 表示已到文件开头）。一行超过窗口时窗口扩大；超过 32 MiB 的行跳过。`events` 是运行时缓冲的事件（最多 2000 条），`runtime` 包含 `runtimeId`、是否运行、模型、权限模式、未决请求。`terminal` 非空表示有 `resume` 终端正在写该会话。
+  - `GET /api/claude/chat/:id/events?cwd=&after=runtimeId:seq`：SSE。先发 `pi/connected {sessionId, runtimeId}`，事件 id 为 `runtimeId:seq`；`after` 属于当前运行时时只重放之后的事件，否则从头重放；`after` 之后的事件已被挤出缓冲时改发 `pi/reset`（无事件 id），前端重新读取快照（`GET /api/claude/chat/:id`）后再订阅。前端已知的 `runtimeId` 与 `pi/connected` 不同（运行时闲置关闭后被重建）时同样重新读取快照。
+  - `POST /api/claude/chat`：新聊天的第一条消息，`{cwd, text, uuid, model, permissionMode}`，返回 201 `{sessionId}`。
+  - `POST /api/claude/chat/:id/send`（202）、`/interrupt`、`/respond`（`{requestId, decision: allow|allowSession|deny, message?, updatedInput?}`，204）、`/claim`（停止恢复该会话的终端，204）。
+- 事件：转发 Claude 的 stream-json 记录（`stream_event`、`assistant`、`user`、`result`、`control_request`；`system` 只保留 init/status 中的模型和权限模式），每条加 `piSeq`、`piRuntime`，`assistant` 记录加 `piBlockIndex`（对应流式事件的内容块序号，用于把流式文本替换成最终文本）。另有服务端事件：`pi/resolved`（请求已回答，或 Claude 发来 `control_cancel_request` 取消了它）、`pi/closed`（进程意外退出，附原因）、`pi/stopped`（进程被主动停止）。一轮结束（`result`）后，缓冲中的 `stream_event` 被丢弃，只保留完整记录。前端的运行状态只跟随事件（`user` → 运行中，`result`/`pi/closed`/`pi/stopped` → 空闲），不因 POST 成功而设置。
+- 聊天界面（Claude Chat 标签，复用 Codex 聊天的消息列表和输入框）：
+  - 标题 “Claude Chat · <会话名> · <目录>”；有更早历史时显示 “Load earlier”。
+  - 发送时浏览器生成消息 uuid，先显示为待发送，收到同一 uuid 的记录后替换，不重复显示。
+  - Claude 在跑时不能插话：输入框提示 “Queue a message for the next turn…”，消息排队，这一轮结束后发送。服务端对进行中的会话再次发送返回 409 `session_busy`。
+  - Esc 或停止按钮中断这一轮（`interrupt` 控制请求）；Claude 以 `result` 结束这一轮，进程保留。
+  - 模型：Default / Sonnet / Opus / Haiku；权限模式：Ask before edits（`default`）/ Accept edits / Plan mode / Bypass permissions。都作用于下一条消息：与运行中进程的启动参数不同时，服务端先停止进程再用新参数启动（比较的是启动时请求的模型别名 `launchModel`，不是 Claude 回报的完整模型名，所以同一模型不会每次重启）。
+  - “Allow for session” 可能让 Claude 切换权限模式（如接受编辑），`system` 记录回报新模式后，界面和标签配置随之更新。
+  - 工具显示：Bash 显示为命令和输出；Edit / MultiEdit / Write 显示为差异；其他工具显示名称、输入和结果。斜杠命令按输入显示，命令输出显示为提示；“[Request interrupted by user]” 显示为 “Interrupted”。`result` 带 `is_error` 时显示错误提示。
+  - 暂不支持：图片（发送时提示移除）、子代理详情、斜杠命令菜单、Fork。
+- 权限卡片（`control_request can_use_tool`）：
+  - 普通工具：显示命令 / 差异 / 输入 JSON、文件路径和原因；按钮 Allow、Allow for session（仅当 Claude 给出建议规则时，同时应用这些规则）、Deny。
+  - `ExitPlanMode`：显示计划，按钮 “Approve plan” / “Keep planning”。
+  - `AskUserQuestion`（“Claude has a question”）：每个问题选项或填写 “Other answer”，全部回答后 Submit，答案按问题文本放进 `updatedInput.answers`（多选用 “, ” 连接）；Skip 为拒绝。
+  - Claude 取消请求（`control_cancel_request`）或请求已不存在时，卡片消失；回答已过期的请求返回 409 `approval_expired`。
+- 入口：Agents 面板 Claude 分组中点击会话，或菜单 “Open in Chat”；分组的聊天按钮（“New Claude chat”）打开空白聊天，第一条消息创建会话，标签名改为第一条消息（前 60 字）。项目栏和通知中的 Claude 聊天条目打开对应标签。
+- 状态：运行时状态通过工作区状态 SSE 的 `claude_runtimes` 推送（`idle` / `running` / `approval`），用于项目栏活动、通知（kind `claude`）和 Agents 面板的状态点。
+- 接口错误码：400 参数错误（含不支持的模型、权限模式），403 目录未授权，404 会话不存在；409 `session_busy`、`terminal_owns_session`、`approval_expired`、`no_active_turn`；503 进程不可用或控制请求超时（10 秒）；其余 500。
+
 ## 活动通知
 
 跑完、失败或等待审批的任务会留下一条通知，手机和电脑共用同一份列表和已读状态：在手机上发起、锁屏后，回到电脑上能看到结果。
@@ -130,7 +161,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - `stopped`：用户主动停止。
 - `failed/offline`：进程异常或连接不可用。
 
-Codex Chat 的审批来自 app-server 协议；普通 Terminal 不通过输出文本推断审批。
+Codex Chat 的审批来自 app-server 协议，Claude Chat 的审批来自 stream-json 的 `can_use_tool` 控制请求；普通 Terminal 不通过输出文本推断审批。
 
 ## 所有权规则
 
@@ -145,6 +176,10 @@ Codex Chat 的审批来自 app-server 协议；普通 Terminal 不通过输出�
 - 创建 `resume` 终端时：该会话正在归档/删除（`session_busy`）、聊天标签仍打开（`chat_input_owned`，需先关闭聊天）、聊天正在运行一轮或有审批（`session_busy`）时返回 409，不会中断聊天里正在跑的一轮；聊天空闲则先关闭聊天运行时再启动终端。聊天接管期间，`resume` 终端的输入被拒绝（`chat_input_owned`）。
 - 归档或删除 Codex 会话时，整个过程持有删除锁：期间不能启动聊天运行时或创建 `resume` 终端（409 `session_busy`）。若聊天运行时非空闲或有终端正在恢复（`resume`）该会话，返回 409（`session_busy`），面板显示“先停止聊天或终端”；空闲的聊天运行时先关闭，关闭后再检查一次是否有新的写入者，再执行操作；对已归档的会话再次归档直接返回 409，不关闭运行时。
 - Claude 会话：同一会话同一时间只允许一个 `resume` 终端；删除时的写入者判断见“Claude 会话目录”。
+  - Claude Chat 与 `resume` 终端互斥：有 `resume` 终端在写该会话时，聊天显示 “This session is open in a Claude terminal” 和 “Stop terminal”，发送返回 409 `terminal_owns_session`；点击后调用 `claim`（先 Ctrl+C 再停止终端）并重新加载历史。
+  - 创建 `resume` 终端时：聊天正在跑一轮或有审批返回 409 `session_busy`；聊天空闲则先停止聊天进程，聊天标签可稍后重新打开。
+  - 删除 Claude 会话时，聊天进程存在或正在启动返回 409 `session_busy`（“Close the chat first”）。
+  - 已知限制：只识别 pi-web 启动的 `resume` 终端。`new` / `fork` 终端里用 `/resume` 切到该会话、普通 Shell 里运行的 `claude`、pi-web 之外的 Claude 都无法检测；两个进程同时写同一会话文件会导致历史错乱。终端所在目录通过符号链接与聊天目录不同时也不会匹配（不做 realpath）。
 - 只有 `resume` 终端算作其 `sourceSessionId` 会话的写入者；`fork` 终端记录的是父会话 id，但写的是新会话，不会被父会话的聊天停止，父会话也不会因此从列表隐藏。
 
 ## 验收标准

@@ -1,4 +1,4 @@
-/** Adapts Codex app-server events into renderable agent conversation items. */
+/** Adapts Codex app-server events into renderable agent conversation items (Claude Chat uses the same items). */
 export type CodexConversationItem =
   | { id: string; kind: "message"; role: "user" | "assistant"; text: string; streaming?: boolean; pending?: boolean }
   | { id: string; kind: "reasoning"; summary: string; content: string }
@@ -6,7 +6,10 @@ export type CodexConversationItem =
   | { id: string; kind: "fileChange"; files: string[]; done: boolean }
   | { id: string; kind: "tool"; title: string; output?: string; done: boolean }
   | { id: string; kind: "plan"; text: string; streaming?: boolean }
-  | { id: string; kind: "review"; text: string; done: boolean };
+  | { id: string; kind: "review"; text: string; done: boolean }
+  // A tool call shown with its input and result; `diff` is a unified diff of the edit.
+  | { id: string; kind: "toolCall"; toolName: string; input: Record<string, unknown>; output?: string; isError?: boolean; diff?: string; done: boolean }
+  | { id: string; kind: "notice"; text: string; tone?: "error" };
 
 type AppItem = { id?: string; clientId?: string; type?: string; text?: string; command?: string; cwd?: string; aggregatedOutput?: string | null; exitCode?: number | null; durationMs?: number | null; status?: string; changes?: { path?: string }[]; summary?: string[]; content?: (string | { type?: string; text?: string })[] };
 type AppEvent = { method?: string; params?: { item?: AppItem; itemId?: string; delta?: string; turnId?: string; text?: string } };

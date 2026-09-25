@@ -33,7 +33,7 @@ export async function GET(req: Request) {
         const text = `data: ${JSON.stringify(data)}\n\n`;
         controller.enqueue(new TextEncoder().encode(text));
       };
-      // Status snapshots (terminals, codex_runtimes, notifications) are
+      // Status snapshots (terminals, codex_runtimes, claude_runtimes, notifications) are
       // coalesced upstream by the bus, so under backpressure we keep only the latest per kind and
       // flush it once the stream drains, instead of dropping it outright.
       const sendSnapshot = (message: { type: string }) => {
@@ -79,7 +79,7 @@ export async function GET(req: Request) {
       encode({ type: "running", runningSessionIds: getRunningRpcSessionIds() });
       // A failing provider skips its kind; it must not fail the whole stream
       // (and leak the subscriptions above, whose cleanup is installed below).
-      for (const kind of ["terminals", "codex_runtimes", "notifications"]) {
+      for (const kind of ["terminals", "codex_runtimes", "claude_runtimes", "notifications"]) {
         try {
           sendSnapshot(workspaceStatus.snapshot(kind));
         } catch (error) {

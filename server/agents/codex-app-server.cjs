@@ -146,6 +146,8 @@ function spawnRuntime(threadId, cwd) {
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => { state.stderrTail = `${state.stderrTail}${chunk}`.slice(-16_384); });
   child.on("error", (error) => failState(state, new Error(`Unable to start Codex app-server: ${error.message}`)));
+  // EPIPE after Codex exits; unhandled, it would crash the server.
+  child.stdin.on("error", (error) => failState(state, error));
   child.on("exit", () => failState(state, new Error("Codex app-server exited")));
   state.request = (method, params) => new Promise((resolve, reject) => { if (state.failure) { reject(state.failure); return; } const id = state.nextId++; const timer = setTimeout(() => { if (state.pending.delete(id)) reject(Object.assign(new Error(`Codex did not answer ${method} in time`), { code: "runtime_timeout" })); }, 60_000); state.pending.set(id, { resolve, reject, timer }); state.child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`, (error) => { if (error) failState(state, error); }); });
   return state;
@@ -265,6 +267,7 @@ async function readModels(cwd) {
   child.stderr.setEncoding("utf8");
   child.stderr.on("data", (chunk) => { stderrTail = `${stderrTail}${chunk}`.slice(-16_384); });
   child.on("error", (error) => fail(new Error(`Unable to start Codex app-server: ${error.message}`)));
+  child.stdin.on("error", (error) => fail(error));
   child.on("exit", () => fail(new Error("Codex app-server exited")));
   const request = (method, params) => new Promise((resolve, reject) => {
     if (failure) return reject(failure);

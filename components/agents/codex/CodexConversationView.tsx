@@ -13,6 +13,7 @@ export function CodexConversationView({ items, cwd }: { items: CodexConversation
     if (item.kind === "command") return <section key={item.id} style={cardStyle}><div style={labelStyle}>{item.done ? "✓" : "…"} Command {item.exitCode != null && `(exit ${item.exitCode})`}</div><code>{item.command}</code>{item.cwd && <div style={mutedStyle}>{item.cwd}</div>}{item.output && <pre style={outputStyle}>{item.output}</pre>}</section>;
     if (item.kind === "fileChange") return <section key={item.id} style={cardStyle}><div style={labelStyle}>{item.done ? "✓" : "…"} File changes</div>{item.files.map((file) => <code key={file} style={{ display: "block" }}>{file}</code>)}</section>;
     if (item.kind === "tool") return <section key={item.id} style={cardStyle}><div style={labelStyle}>{item.done ? "✓" : "…"} {item.title}</div>{item.output && <pre style={outputStyle}>{item.output}</pre>}</section>;
+    if (item.kind === "toolCall" || item.kind === "notice") return null;
     return <section key={item.id} style={cardStyle}><div style={labelStyle}>Review</div><MarkdownBody cwd={cwd}>{item.text}</MarkdownBody></section>;
   })}</>;
 }

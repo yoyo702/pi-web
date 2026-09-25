@@ -21,10 +21,11 @@ export function notificationTarget(notification: ActivityNotification): Activity
       session: { path: notification.path ?? "", id: notification.targetId, cwd: notification.cwd, created: "", modified: "", messageCount: 0, firstMessage: notification.title, ...(notification.projectRoot ? { projectRoot: notification.projectRoot } : {}) },
     };
   }
+  if (notification.kind === "claude") return { kind: "claude", id: notification.targetId, cwd: notification.cwd, title: notification.title };
   return { kind: notification.kind, id: notification.targetId, cwd: notification.cwd };
 }
 
-const KIND_LABEL: Record<ActivityNotification["kind"], string> = { pi: "Pi session", terminal: "Terminal", codex: "Codex chat" };
+const KIND_LABEL: Record<ActivityNotification["kind"], string> = { pi: "Pi session", terminal: "Terminal", codex: "Codex chat", claude: "Claude chat" };
 const EVENT_LABEL: Record<ActivityNotification["event"], string> = { completed: "Completed", failed: "Failed", approval: "Needs your input" };
 
 export function notificationKindLabel(notification: Pick<ActivityNotification, "kind">): string {
