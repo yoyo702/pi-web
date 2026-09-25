@@ -1248,6 +1248,8 @@ async function fakeCodexStreams(page: Page) {
       }
       emit(data: unknown) { this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(data) })); }
       close() { this.readyState = 2; }
+      // The server refused the stream: the browser gives up without retrying.
+      fail() { this.readyState = 2; this.onerror?.(new Event("error")); }
     }
     window.EventSource = function (url: string | URL, init?: EventSourceInit) {
       return /\/api\/(codex|claude)\/chat\//.test(String(url)) ? new FakeEventSource(String(url)) : new RealEventSource(url, init);
@@ -1367,6 +1369,12 @@ test("shows Codex chat retries, turn failures, the terminal conflict prompt, que
   await emit({ method: "turn/completed", params: { turn: { id: "turn-2", status: "completed", error: null } }, piSeq: 7, piRuntime: "run1" });
   await expect.poll(() => sent.length).toBe(3);
   expect(sent[2]).toMatchObject({ text: "then summarize", terminals: "ignore" });
+
+  // A refused stream shows the server's reason, not just "disconnected".
+  await page.route(`**/api/codex/chat/${id}/events*`, async (route) => route.fulfill({ status: 409, json: { error: "This session is open in another Codex client.", code: "writer_conflict" } }));
+  await page.evaluate(() => (window as unknown as { __codexStreams: Array<{ fail(): void }> }).__codexStreams.at(-1)?.fail());
+  await expect(alert).toContainText("Codex chat disconnected: This session is open in another Codex client.");
+  await expect(alert.getByRole("button", { name: "Reconnect" })).toBeVisible();
 });
 
 test("starts a new Codex chat whose first message creates the session", async ({ page }, testInfo) => {

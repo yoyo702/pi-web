@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { claudeConversationItems, type ClaudeRecord } from "@/lib/agents/claude-conversation";
 import type { ChatDraftImage } from "@/lib/draft-store";
+import { streamFailure } from "@/lib/agents/stream-failure";
 import type { ClaudePermissionMode } from "@/lib/workspace/tabs";
 import { CodexAssistantThread, type PermissionOption } from "../codex/CodexAssistantThread";
 import { ClaudePermissionCard, type ClaudePermissionAnswer, type ClaudePermissionRequest } from "./ClaudePermissionCard";
@@ -88,12 +89,14 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
     if (!sessionId) return;
     let closed = false;
     let source: EventSource | null = null;
+    const probe = new AbortController();
     runtimeIdRef.current = ""; lastSeqRef.current = 0;
     setConnection("loading"); setTerminalConflict(false);
     const connect = () => {
       const params = new URLSearchParams({ cwd });
       if (runtimeIdRef.current && lastSeqRef.current) params.set("after", `${runtimeIdRef.current}:${lastSeqRef.current}`);
-      source = new EventSource(`/api/claude/chat/${encodeURIComponent(sessionId)}/events?${params}`);
+      const url = `/api/claude/chat/${encodeURIComponent(sessionId)}/events?${params}`;
+      source = new EventSource(url);
       source.onopen = () => { setConnection("connected"); setError((current) => current?.includes("connection") ? null : current); };
       source.onmessage = (raw) => {
         let event: ClaudeEvent;
@@ -114,7 +117,14 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         setEvents((current) => event.type === "result" ? [...current.filter((item) => item.type !== "stream_event"), event] : [...current, event]);
       };
       source.onerror = () => {
-        if (source?.readyState === EventSource.CLOSED) { setConnection("failed"); setError("Claude chat disconnected."); return; }
+        if (source?.readyState === EventSource.CLOSED) {
+          setConnection("failed"); setError("Claude chat disconnected.");
+          void streamFailure(url, probe.signal).then((failure) => {
+            if (closed || !failure) return;
+            setError(`Claude chat disconnected: ${failure.message}`);
+          });
+          return;
+        }
         setConnection("reconnecting"); setError("Claude chat connection interrupted; retrying…");
       };
     };
@@ -140,7 +150,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         connect();
       })
       .catch((cause) => { if (!closed) { setConnection("failed"); setError(cause instanceof Error ? cause.message : "Unable to load the Claude session"); } });
-    return () => { closed = true; source?.close(); };
+    return () => { closed = true; probe.abort(); source?.close(); };
   }, [adoptPermissionMode, apply, cwd, reloadKey, sessionId]);
 
   const items = useMemo(() => {

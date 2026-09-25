@@ -6,6 +6,7 @@ import { CodexAssistantThread } from "./CodexAssistantThread";
 import { isCodexCardRequest, type CodexRequestAnswer, type CodexServerRequest } from "./CodexRequestCard";
 import { reduceCodexEvent, type CodexConversationItem } from "@/lib/agents/codex-conversation";
 import { setDraft, type ChatDraftImage } from "@/lib/draft-store";
+import { streamFailure } from "@/lib/agents/stream-failure";
 import { useWorkspaceStatusSelector } from "@/hooks/useWorkspaceStatus";
 import { randomId } from "@/lib/random-id";
 import type { CodexApprovalPolicy } from "@/lib/workspace/tabs";
@@ -119,13 +120,15 @@ export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCr
     }
     let closed = false;
     let source: EventSource | null = null;
+    const probe = new AbortController();
     const connect = () => {
       const params = new URLSearchParams();
       if (terminal.model) params.set("model", terminal.model);
       if (terminal.serviceTier) params.set("serviceTier", terminal.serviceTier);
       if (terminal.approvalPolicy) params.set("approvalPolicy", terminal.approvalPolicy);
       if (lastEventSeqRef.current && runtimeIdRef.current) params.set("after", `${runtimeIdRef.current}:${lastEventSeqRef.current}`);
-      source = new EventSource(`/api/codex/chat/${encodeURIComponent(threadId)}/events${params.size ? `?${params}` : ""}`);
+      const url = `/api/codex/chat/${encodeURIComponent(threadId)}/events${params.size ? `?${params}` : ""}`;
+      source = new EventSource(url);
       source.onopen = () => { setConnection("connected"); setError((current) => current?.includes("connection") ? null : current); };
       source.onmessage = (raw) => {
         try {
@@ -168,7 +171,15 @@ export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCr
       };
       source.onerror = () => {
         // CLOSED: the server refused the stream (e.g. the session is busy); the browser won't retry.
-        if (source?.readyState === EventSource.CLOSED) { setConnection("failed"); setError("Codex chat disconnected."); return; }
+        if (source?.readyState === EventSource.CLOSED) {
+          setConnection("failed"); setError("Codex chat disconnected.");
+          void streamFailure(url, probe.signal).then((failure) => {
+            if (closed || !failure) return;
+            if (failure.code === "terminal_owns_session") setConflict({ kind: "owns", message: failure.message });
+            setError(`Codex chat disconnected: ${failure.message}`);
+          });
+          return;
+        }
         setConnection("reconnecting"); setError("Codex chat connection interrupted; retrying…");
       };
     };
@@ -209,7 +220,7 @@ export function CodexChatPanel({ terminal, workspaceTabId, newChat = false, onCr
         connect();
       })
       .catch((cause) => { setConnection("failed"); setError(cause instanceof Error ? cause.message : "Unable to load Codex history"); });
-    return () => { closed = true; source?.close(); };
+    return () => { closed = true; probe.abort(); source?.close(); };
   }, [newChat, reloadKey, terminal.approvalPolicy, terminal.model, terminal.serviceTier, terminal.sessionName, threadId]);
 
   // This thread's pushed runtime state as a primitive, so the panel re-renders
