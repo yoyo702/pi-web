@@ -17,7 +17,7 @@ import { CenterWorkspace } from "./workspace/CenterWorkspace";
 import { SidePanel } from "./workspace/SidePanel";
 import { TopBar } from "./workspace/TopBar";
 import { TerminalTabView, CodexChatTabView, ClaudeChatTabView, FileTabView, GitTabView } from "./workspace/tab-views";
-import { WorkspaceActionsProvider, type ClaudeChatTarget, type CodexChatTarget, type WorkspaceActions } from "./workspace/WorkspaceActions";
+import { WorkspaceActionsProvider, type ClaudeChatTarget, type ClaudeForkTarget, type CodexChatTarget, type WorkspaceActions } from "./workspace/WorkspaceActions";
 
 // Heavy on-demand panels are declared in ./workspace/tab-views (dynamic,
 // ssr: false) so they stay out of the initial chat bundle.
@@ -28,6 +28,7 @@ import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { getFileName } from "@/lib/file-paths";
 import { randomId } from "@/lib/random-id";
+import { setDraft } from "@/lib/draft-store";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
@@ -815,8 +816,15 @@ export function AppShell() {
     dispatchCenter({ type: "open", tab: { id: claudeChatTabId(`new-${randomId()}`), label: "New Claude chat", kind: "claude-chat", cwd, newChat: true, permissionMode: "default" } });
   }, []);
 
+  const handleForkClaudeChat = useCallback((target: ClaudeForkTarget) => {
+    const id = claudeChatTabId(`new-${randomId()}`);
+    if (target.draft) setDraft(`claude:${id}`, { value: target.draft, images: [] });
+    const label = `${target.sessionName || "Claude Chat"} (fork)`;
+    dispatchCenter({ type: "open", tab: { id, label, sessionName: label, kind: "claude-chat", cwd: target.cwd, newChat: true, forkOf: { sessionId: target.sessionId, ...definedOnly({ at: target.at }) }, permissionMode: target.permissionMode ?? "default", ...definedOnly({ model: target.model }) } });
+  }, []);
+
   const handleClaudeChatCreated = useCallback((tabId: string, cwd: string, sessionId: string, title: string) => {
-    const update = (tab: CenterTab): CenterTab => tab.id === tabId && tab.kind === "claude-chat" ? { ...tab, sourceSessionId: sessionId, newChat: false, label: title || tab.label } : tab;
+    const update = (tab: CenterTab): CenterTab => tab.id === tabId && tab.kind === "claude-chat" ? { ...tab, sourceSessionId: sessionId, newChat: false, forkOf: undefined, label: title || tab.label } : tab;
     dispatchCenter({ type: "update", update });
     if (cwd !== centerHydratedCwdRef.current) {
       const saved = loadCenterState(localStorage, cwd);
@@ -965,6 +973,7 @@ export function AppShell() {
     newCodexChat: handleNewCodexChat,
     openClaudeChat: handleOpenClaudeSessionChat,
     newClaudeChat: handleNewClaudeChat,
+    forkClaudeChat: handleForkClaudeChat,
     closeTab: (tabId) => (fileTabs.some((tab) => tab.id === tabId) ? handleCloseFileTab(tabId) : handleCloseWorkspaceTab(tabId)),
     revealInExplorer: handleRevealFileInExplorer,
   };
@@ -978,6 +987,7 @@ export function AppShell() {
     newCodexChat: (cwd) => workspaceActionsRef.current.newCodexChat(cwd),
     openClaudeChat: (target) => workspaceActionsRef.current.openClaudeChat(target),
     newClaudeChat: (cwd) => workspaceActionsRef.current.newClaudeChat(cwd),
+    forkClaudeChat: (target) => workspaceActionsRef.current.forkClaudeChat(target),
     closeTab: (tabId) => workspaceActionsRef.current.closeTab(tabId),
     revealInExplorer: (filePath) => workspaceActionsRef.current.revealInExplorer(filePath),
   }), []);

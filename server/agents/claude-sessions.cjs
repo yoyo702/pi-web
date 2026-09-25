@@ -4,6 +4,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const readline = require("node:readline");
 
 // Claude Code keeps one JSONL file per session in
 // `<config dir>/projects/<encoded cwd>/<session id>.jsonl`, where the encoded
@@ -320,4 +321,41 @@ function readHistory(id, cwd, { before } = {}) {
   } finally { fs.closeSync(handle); }
 }
 
-module.exports = { listSessions, requireSession, remove, encodeCwd, sessionFile, readHistory, compactRecord };
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * Where a fork that drops the prompt `uuid` and everything after it resumes
+ * (Claude's `--resume-session-at`): the last message before that prompt.
+ * Entries between them (turn durations, attachments) are skipped: Claude
+ * resumes at a message. Claude cannot resume before a compaction.
+ */
+async function forkPoint(id, cwd, uuid) {
+  const file = sessionFile(id, cwd);
+  if (!file) throw error("not_found", "Claude session not found in this workspace");
+  // Main-chain entries before the prompt: uuid → parentUuid, and which are messages.
+  const parents = new Map();
+  const messages = new Set();
+  let target = null;
+  let compacted = false;
+  const lines = readline.createInterface({ input: fs.createReadStream(file, "utf8"), crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (target && !line.includes("compact_boundary")) continue;
+      let record;
+      try { record = JSON.parse(line); } catch { continue; }
+      if (!record || record.isSidechain || typeof record.uuid !== "string") continue;
+      if (target) { if (record.type === "system" && record.subtype === "compact_boundary") { compacted = true; break; } continue; }
+      if (record.type === "user" && record.uuid === uuid) { target = record; continue; }
+      parents.set(record.uuid, record.parentUuid);
+      if (record.type === "user" || record.type === "assistant") messages.add(record.uuid);
+    }
+  } finally { lines.close(); }
+  if (!target) throw error("not_found", "That message is not in the saved session");
+  if (compacted) throw error("invalid_request", "This conversation was compacted after that message. Fork from a later message.");
+  let at = target.parentUuid;
+  for (let hops = 0; typeof at === "string" && !messages.has(at) && hops < parents.size; hops += 1) at = parents.get(at);
+  // `at` goes on Claude's command line.
+  if (typeof at !== "string" || !messages.has(at) || !UUID.test(at)) throw error("invalid_request", "There is nothing before this message to keep");
+  return at;
+}
+
+module.exports = { listSessions, requireSession, remove, encodeCwd, sessionFile, readHistory, forkPoint, compactRecord };

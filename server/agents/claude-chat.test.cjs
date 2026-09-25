@@ -269,6 +269,126 @@ test("the API creates a chat, reads its history and answers events", async (t) =
   assert.equal((await request("POST", "/api/claude/chat", { cwd, text: " " })).status, 400);
 });
 
+test("images go to Claude as base64 blocks before the text; clients only see placeholders", async (t) => {
+  const { cwd, stdin } = useFakeClaude(t);
+  const png = "iVBORw0KGgo=";
+  const created = await request("POST", "/api/claude/chat", { cwd, text: "what is this", images: [`data:image/png;base64,${png}`] });
+  assert.equal(created.status, 201);
+  const state = chat.get(created.body.sessionId);
+  await waitFor(() => state.events.some((event) => event.type === "result"));
+  assert.deepEqual(stdin()[0].message.content, [{ type: "image", source: { type: "base64", media_type: "image/png", data: png } }, { type: "text", text: "what is this" }]);
+  assert.deepEqual(state.events[0].message.content, [{ type: "image" }, { type: "text", text: "what is this" }]);
+  assert.equal(state.events.find((event) => event.type === "assistant").message.content[0].text, "Echo: what is this [1 image]");
+
+  // An image alone is a message; its title falls back to "Image".
+  const imageOnly = await request("POST", "/api/claude/chat", { cwd, images: [`data:image/gif;base64,${png}`] });
+  assert.equal(imageOnly.status, 201);
+  assert.equal(chat.get(imageOnly.body.sessionId).title, "Image");
+  // Over the API's 5 MB base64 limit per image.
+  const tooLarge = `data:image/png;base64,${"A".repeat(5_000_004)}`;
+  for (const images of [["data:text/plain;base64,aGk="], "data:image/png;base64,x", Array(6).fill(`data:image/png;base64,${png}`), [tooLarge]]) {
+    assert.equal((await request("POST", "/api/claude/chat", { cwd, text: "hi", images })).status, 400);
+  }
+});
+
+test("a fork copies a session, whole or up to a message, into a new session id", async (t) => {
+  const { cwd, launches, transcript } = useFakeClaude(t);
+  const state = chat.open(ID, cwd);
+  t.after(collect(state).off);
+  const first = "33333333-3333-4333-8333-333333333333";
+  const second = "44444444-4444-4444-8444-444444444444";
+  await chat.send(state, { text: "one", uuid: first });
+  await waitFor(() => !state.running);
+  await chat.send(state, { text: "two", uuid: second });
+  await waitFor(() => !state.running);
+  const source = fs.readFileSync(transcript(), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const beforeSecond = source.find((entry) => entry.uuid === second).parentUuid;
+  const sessionArgs = (args) => args.slice(args.indexOf("--resume"), args.indexOf("--session-id") + 2);
+
+  const whole = await request("POST", "/api/claude/chat", { cwd, text: "three", fork: { sessionId: ID } });
+  assert.equal(whole.status, 201);
+  const wholeState = chat.get(whole.body.sessionId);
+  await waitFor(() => wholeState.events.some((event) => event.type === "result"));
+  assert.deepEqual(sessionArgs(launches()[1]), ["--resume", ID, "--fork-session", "--session-id", whole.body.sessionId]);
+  const wholeCopy = fs.readFileSync(transcript(whole.body.sessionId), "utf8");
+  assert.ok(wholeCopy.includes(second) && wholeCopy.includes("three"));
+
+  const partial = await request("POST", "/api/claude/chat", { cwd, text: "again", fork: { sessionId: ID, at: second } });
+  assert.equal(partial.status, 201);
+  const partialState = chat.get(partial.body.sessionId);
+  await waitFor(() => partialState.events.some((event) => event.type === "result"));
+  assert.deepEqual(sessionArgs(launches()[2]), ["--resume", ID, "--fork-session", "--resume-session-at", beforeSecond, "--session-id", partial.body.sessionId]);
+  const partialCopy = fs.readFileSync(transcript(partial.body.sessionId), "utf8");
+  assert.ok(partialCopy.includes(first) && !partialCopy.includes(second));
+  // The source is unchanged, and the fork resumes itself from now on.
+  assert.equal(fs.readFileSync(transcript(), "utf8").trim().split("\n").length, source.length);
+  // It reopens without the fork once idle.
+  await chat.stopAndWait(partial.body.sessionId);
+  await waitFor(() => !chat.get(partial.body.sessionId));
+  assert.equal((await request("POST", `/api/claude/chat/${partial.body.sessionId}/send`, { cwd, text: "later" })).status, 202);
+  await waitFor(() => !chat.get(partial.body.sessionId).running);
+  assert.deepEqual(launches()[3].slice(launches()[3].indexOf("--resume"), launches()[3].indexOf("--resume") + 2), ["--resume", partial.body.sessionId]);
+  assert.equal(launches()[3].includes("--fork-session"), false);
+
+  // The first prompt has nothing before it; unknown sessions and messages fail.
+  const noParent = fs.readFileSync(transcript(), "utf8").trim().split("\n").map((line) => JSON.parse(line)).find((entry) => entry.uuid === first);
+  assert.equal(noParent.parentUuid, null);
+  assert.equal((await request("POST", "/api/claude/chat", { cwd, text: "x", fork: { sessionId: ID, at: first } })).status, 400);
+  assert.equal((await request("POST", "/api/claude/chat", { cwd, text: "x", fork: { sessionId: ID, at: "55555555-5555-4555-8555-555555555555" } })).status, 404);
+  assert.equal((await request("POST", "/api/claude/chat", { cwd, text: "x", fork: { sessionId: "66666666-6666-4666-8666-666666666666" } })).status, 404);
+  assert.equal((await request("POST", "/api/claude/chat", { cwd, text: "x", fork: { sessionId: ID, at: "not-a-uuid" } })).status, 400);
+  // A turn in progress is not forked.
+  await chat.send(state, { text: "long" });
+  assert.equal((await request("POST", "/api/claude/chat", { cwd, text: "x", fork: { sessionId: ID } })).body.code, "session_busy");
+});
+
+test("a fork resumes at the last message before the prompt, never before a compaction", async (t) => {
+  const { cwd, transcript } = useFakeClaude(t);
+  const uuid = (n) => `${String(n).repeat(8)}-0000-4000-8000-000000000000`;
+  const write = (entries) => fs.appendFileSync(transcript(), entries.map((entry) => `${JSON.stringify({ sessionId: ID, cwd, ...entry })}\n`).join(""));
+  fs.mkdirSync(path.dirname(transcript()), { recursive: true });
+  write([
+    { type: "user", uuid: uuid(1), parentUuid: null, message: { role: "user", content: "one" } },
+    { type: "assistant", uuid: uuid(2), parentUuid: uuid(1), message: { role: "assistant", content: [{ type: "text", text: "ok" }] } },
+    { type: "system", subtype: "turn_duration", uuid: uuid(3), parentUuid: uuid(2) },
+    { type: "attachment", uuid: uuid(4), parentUuid: uuid(3) },
+    { type: "user", uuid: uuid(5), parentUuid: uuid(4), message: { role: "user", content: "two" } },
+  ]);
+  // Entries between two messages are skipped.
+  assert.equal(await catalog.forkPoint(ID, cwd, uuid(5)), uuid(2));
+  write([
+    { type: "system", subtype: "compact_boundary", uuid: uuid(6), parentUuid: null },
+    { type: "user", uuid: uuid(7), parentUuid: uuid(6), isCompactSummary: true, message: { role: "user", content: "summary" } },
+    { type: "user", uuid: uuid(8), parentUuid: uuid(7), message: { role: "user", content: "three" } },
+  ]);
+  await assert.rejects(catalog.forkPoint(ID, cwd, uuid(5)), { code: "invalid_request", message: /compacted/ });
+  assert.equal(await catalog.forkPoint(ID, cwd, uuid(8)), uuid(7));
+});
+
+test("a fork that fails before writing its session says so and forks again on the next message", async (t) => {
+  const { cwd, launches } = useFakeClaude(t);
+  const source = chat.open(ID, cwd);
+  t.after(collect(source).off);
+  await chat.send(source, { text: "one" });
+  await waitFor(() => !source.running);
+  const id = "77777777-7777-4777-8777-777777777777";
+  const state = chat.open(id, cwd, { fork: { sessionId: ID, resumeAt: "88888888-8888-4888-8888-888888888888" } });
+  const { events, off } = collect(state);
+  t.after(off);
+  // Until Claude writes it, the session reads as just created.
+  const read = await request("GET", `/api/claude/chat/${id}?cwd=${encodeURIComponent(cwd)}`);
+  assert.deepEqual([read.body.session.created, read.body.history], [true, []]);
+  const warn = console.warn;
+  console.warn = () => undefined;
+  t.after(() => { console.warn = warn; });
+  await chat.send(state, { text: "two" }).catch(() => undefined);
+  await waitFor(() => events.some((event) => event.type === "pi/closed"));
+  assert.equal(events.find((event) => event.type === "pi/closed").code, "fork_failed");
+  await chat.send(state, { text: "two" }).catch(() => undefined);
+  await waitFor(() => events.filter((event) => event.type === "pi/closed").length === 2);
+  assert.deepEqual(launches().slice(1).map((args) => args.includes("--fork-session")), [true, true]);
+});
+
 test("a chat never writes a session a terminal is resuming", async (t) => {
   const { cwd } = useFakeClaude(t);
   let terminal = { owner: "terminal", state: "running", terminalId: "t1" };

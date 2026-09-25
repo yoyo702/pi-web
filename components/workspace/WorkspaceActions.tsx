@@ -22,6 +22,13 @@ export interface ClaudeChatTarget {
   permissionMode?: ClaudePermissionMode;
 }
 
+/** A Claude session to fork into a new chat; `at` drops that prompt and what follows. */
+export interface ClaudeForkTarget extends ClaudeChatTarget {
+  at?: string;
+  /** Put in the new chat's composer (the message forked from). */
+  draft?: string;
+}
+
 /**
  * Commands that open or close workspace tabs. Any component under AppShell
  * (sidebar, chat, viewers, and future status/command UIs) calls these instead
@@ -37,6 +44,8 @@ export interface WorkspaceActions {
   openClaudeChat(target: ClaudeChatTarget): void;
   /** Opens an empty Claude chat in `cwd`; its first message creates the session. */
   newClaudeChat(cwd: string): void;
+  /** Opens a new Claude chat whose first message forks `target`. */
+  forkClaudeChat(target: ClaudeForkTarget): void;
   closeTab(tabId: string): void;
   revealInExplorer(filePath: string): void;
 }

@@ -8,7 +8,9 @@ const terminals = require("./terminal-api.cjs");
 const terminalManager = require("./terminal-manager.cjs");
 const { readBody } = require("../http-body.cjs");
 
-const MAX_BODY_BYTES = 1024 * 1024;
+// Five images at the limit, plus the text.
+const MAX_IMAGE_BASE64 = 5_000_000;
+const MAX_BODY_BYTES = 26 * 1024 * 1024;
 function isPath(pathname) { return pathname === "/api/claude/chat" || /^\/api\/claude\/chat\/[0-9a-f-]+(?:\/(?:events|send|interrupt|respond|claim))?$/i.test(pathname); }
 function requestError(message, code = "invalid_request") { return Object.assign(new Error(message), { code }); }
 async function read(req) {
@@ -37,10 +39,38 @@ function assertNoTerminal(id) {
   const terminal = terminalManager.runtimeForSession(id);
   if (terminal) throw Object.assign(requestError("This session is open in a Claude terminal. Stop the terminal to continue here.", "terminal_owns_session"), { terminalId: terminal.terminalId });
 }
+// Images arrive as data URLs, as in Codex Chat.
+function imageInputs(value) {
+  if (value == null) return [];
+  if (!Array.isArray(value) || value.length > 5) throw requestError("images must contain at most 5 items");
+  return value.map((url) => {
+    const match = typeof url === "string" ? /^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(url) : null;
+    if (!match) throw requestError("invalid image attachment");
+    // The Anthropic API refuses larger images, and Claude would resend the
+    // saved image with every later turn of the session.
+    if (match[2].length > MAX_IMAGE_BASE64) throw requestError("An image is too large: the limit is 3.75 MB per image");
+    return { mediaType: match[1], data: match[2] };
+  });
+}
 function messageInput(body) {
-  if (typeof body.text !== "string" || !body.text.trim()) throw requestError("A message is required");
-  if (body.text.length > 200_000) throw requestError("The message is too long");
-  return { text: body.text, uuid: body.uuid, model: typeof body.model === "string" ? body.model : "", permissionMode: typeof body.permissionMode === "string" ? body.permissionMode : "default" };
+  if (body.text != null && typeof body.text !== "string") throw requestError("text must be a string");
+  const text = body.text ?? "";
+  const images = imageInputs(body.images);
+  if (!text.trim() && !images.length) throw requestError("A message is required");
+  if (text.length > 200_000) throw requestError("The message is too long");
+  return { text, images, uuid: body.uuid, model: typeof body.model === "string" ? body.model : "", permissionMode: typeof body.permissionMode === "string" ? body.permissionMode : "default" };
+}
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// `{ sessionId, at }`: copy that session, dropping the prompt `at` and what
+// follows it (everything is kept without `at`).
+async function forkInput(fork, cwd) {
+  if (!fork || typeof fork !== "object" || typeof fork.sessionId !== "string") throw requestError("fork.sessionId is required");
+  if (fork.at != null && (typeof fork.at !== "string" || !UUID.test(fork.at))) throw requestError("fork.at must be a message id");
+  catalog.requireSession(fork.sessionId, cwd);
+  const resumeAt = fork.at ? await catalog.forkPoint(fork.sessionId, cwd, fork.at) : null;
+  // A turn in progress would be copied half-finished.
+  if (chat.isBusySession(fork.sessionId)) throw requestError("Claude is still working in that session. Fork it when the turn ends.", "session_busy");
+  return { sessionId: fork.sessionId, resumeAt };
 }
 function afterSeq(req, url, state) {
   // Event ids are "<runtimeId>:<seq>"; a different runtime replays from the start.
@@ -60,13 +90,15 @@ function sendError(res, cause) {
 async function handle(req, res, url) {
   try {
     if (url.pathname === "/api/claude/chat") {
-      // A new chat: the first message creates the session under a new id.
+      // A new chat: the first message creates the session under a new id,
+      // empty or (with `fork`) a copy of another session.
       if (req.method !== "POST") return send(res, 405, { error: "method not allowed" });
       const body = await read(req);
       const cwd = requireCwd(body.cwd);
       const input = messageInput(body);
+      const fork = body.fork == null ? null : await forkInput(body.fork, cwd);
       const sessionId = crypto.randomUUID();
-      await chat.send(chat.open(sessionId, cwd), input);
+      await chat.send(chat.open(sessionId, cwd, { fork }), input);
       return send(res, 201, { sessionId });
     }
     const [, , , , id, action] = url.pathname.split("/");
@@ -80,7 +112,9 @@ async function handle(req, res, url) {
         const state = chat.get(id);
         const terminal = terminalManager.runtimeForSession(id);
         return send(res, 200, {
-          session: { id, title: session.title ?? null },
+          // `created`: Claude has not written the session yet (a fork's copied
+          // history appears once it has).
+          session: { id, title: session.title ?? null, ...(session.created ? { created: true } : {}) },
           history: history.records,
           cursor: history.cursor,
           // Older pages only need the transcript.

@@ -57,15 +57,20 @@ function emit(state, record) {
   for (const listener of state.listeners) listener(event);
 }
 
-/** The chat for this session, created if needed. It has no process yet. */
-function open(sessionId, cwd, { title = "" } = {}) {
+/**
+ * The chat for this session, created if needed. It has no process yet.
+ * `fork` (`{ sessionId, resumeAt }`) makes a new session a copy of another:
+ * its first process forks that session, keeping the entries through
+ * `resumeAt` (all of them when it is unset).
+ */
+function open(sessionId, cwd, { title = "", fork = null } = {}) {
   const existing = sessions.get(sessionId);
   if (existing) {
     if (existing.cwd !== cwd) throw fail("not_found", "Claude session not found in this workspace");
     return existing;
   }
   const state = {
-    sessionId, cwd, title,
+    sessionId, cwd, title, fork,
     // Event sequence numbers restart with each chat; runtimeId lets a
     // reconnecting client tell a new chat from the one it last saw.
     runtimeId: crypto.randomUUID().slice(0, 8),
@@ -176,7 +181,11 @@ function onExit(state, child, error) {
     state.incoming.clear();
   }
   // stderr may name local paths; it goes to the server log, not to clients.
-  emit(state, { type: "pi/closed", error: error.message });
+  // A fork that exited before writing its session forks again on the next message.
+  const forkFailed = Boolean(state.fork) && !catalog.sessionFile(state.sessionId, state.cwd);
+  emit(state, forkFailed
+    ? { type: "pi/closed", code: "fork_failed", error: "Claude could not fork the session (details are in the server log). Send the message again to retry." }
+    : { type: "pi/closed", error: error.message });
   workspaceStatus.notify("claude_runtimes");
   scheduleIdleShutdown(state);
 }
@@ -189,9 +198,14 @@ function write(state, message) {
 
 function spawnChild(state, { model, permissionMode }) {
   const resume = Boolean(catalog.sessionFile(state.sessionId, state.cwd));
+  // A fork keeps its source until the new session is written, so a process
+  // that failed before writing it forks again.
+  const fork = !resume && state.fork
+    ? ["--resume", state.fork.sessionId, "--fork-session", ...(state.fork.resumeAt ? ["--resume-session-at", state.fork.resumeAt] : [])]
+    : [];
   const args = [
     ...runtimeOptions.args, ...PROTOCOL_ARGS,
-    ...(resume ? ["--resume", state.sessionId] : ["--session-id", state.sessionId]),
+    ...(resume ? ["--resume", state.sessionId] : [...fork, "--session-id", state.sessionId]),
     ...(model ? ["--model", model] : []),
     ...(permissionMode ? ["--permission-mode", permissionMode] : []),
   ];
@@ -226,11 +240,12 @@ function spawnChild(state, { model, permissionMode }) {
 }
 
 /**
- * Sends one user message. A model or permission mode other than the running
- * process's restarts it (the chat is idle, so nothing is lost).
+ * Sends one user message: `text` and `images` (`{ mediaType, data }`, base64).
+ * A model or permission mode other than the running process's restarts it
+ * (the chat is idle, so nothing is lost).
  */
-async function send(state, { text, uuid, model = "", permissionMode = "default" }) {
-  if (typeof text !== "string" || !text.trim()) throw fail("invalid_request", "A message is required");
+async function send(state, { text = "", images = [], uuid, model = "", permissionMode = "default" }) {
+  if (typeof text !== "string" || !Array.isArray(images) || (!text.trim() && !images.length)) throw fail("invalid_request", "A message is required");
   if (!MODELS.has(model)) throw fail("invalid_request", "Unsupported model");
   if (!PERMISSION_MODES.has(permissionMode)) throw fail("invalid_request", "Unsupported permission mode");
   if (isBusy(state)) throw fail("session_busy", "Claude is still working on the previous message");
@@ -243,12 +258,16 @@ async function send(state, { text, uuid, model = "", permissionMode = "default" 
     if (sessions.get(state.sessionId) !== state) throw fail("runtime_unavailable", "Claude chat was closed");
     if (!state.child) spawnChild(state, { model, permissionMode });
   } finally { state.starting = false; scheduleIdleShutdown(state); }
-  if (!state.title) state.title = text.replace(/\s+/g, " ").trim().slice(0, 120);
+  if (!state.title) state.title = text.replace(/\s+/g, " ").trim().slice(0, 120) || "Image";
   cancelIdleShutdown(state);
   state.running = true;
   state.blockIndex = 0;
-  emit(state, { type: "user", uuid: id, timestamp: new Date().toISOString(), message: { role: "user", content: text } });
-  write(state, { type: "user", uuid: id, session_id: "", parent_tool_use_id: null, message: { role: "user", content: text } });
+  // Images go before the text, as Claude Code sends pasted images.
+  const blocks = (image) => [...images.map(image), ...(text.trim() ? [{ type: "text", text }] : [])];
+  const content = images.length ? blocks(({ mediaType, data }) => ({ type: "image", source: { type: "base64", media_type: mediaType, data } })) : text;
+  // Clients get `{ type: "image" }`, as in the transcript history.
+  emit(state, { type: "user", uuid: id, timestamp: new Date().toISOString(), message: { role: "user", content: images.length ? blocks(() => ({ type: "image" })) : text } });
+  write(state, { type: "user", uuid: id, session_id: "", parent_tool_use_id: null, message: { role: "user", content } });
   workspaceStatus.notify("claude_runtimes");
   return { uuid: id };
 }

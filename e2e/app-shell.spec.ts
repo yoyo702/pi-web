@@ -1623,6 +1623,74 @@ test("starts a new Claude chat whose first message creates the session", async (
   await expect(page.getByText("explain the build").first()).toBeVisible();
 });
 
+test("forks a Claude chat from a message into a new tab whose first message, with an image, starts the fork", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const id = "77777777-7777-4777-8777-777777777777";
+  const forkId = "88888888-8888-4888-8888-888888888888";
+  const first = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const second = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  await fakeCodexStreams(page);
+  await mockClaudeWorkspace(page, [{ id, title: "Plan work", firstMessage: "first step", cwd: "/tmp/pi-web-e2e", gitBranch: null, createdAt: null, updatedAt: "2026-08-03T00:00:00.000Z", size: 2048, runtime: null }]);
+  await page.route(`**/api/claude/chat/${id}?*`, async (route) => route.fulfill({ json: {
+    session: { id, title: "Plan work" },
+    history: [
+      { type: "user", uuid: first, message: { role: "user", content: "first step" } },
+      { type: "assistant", uuid: "h2", piBlockIndex: 0, message: { id: "m0", role: "assistant", content: [{ type: "text", text: "First done." }] } },
+      { type: "user", uuid: second, message: { role: "user", content: "second step" } },
+      { type: "assistant", uuid: "h4", piBlockIndex: 0, message: { id: "m1", role: "assistant", content: [{ type: "text", text: "Second done." }] } },
+    ],
+    cursor: null, events: [], runtime: null, terminal: null,
+  } }));
+  const created: Array<Record<string, unknown>> = [];
+  await page.route("**/api/claude/chat", async (route) => {
+    created.push(route.request().postDataJSON() as Record<string, unknown>);
+    return route.fulfill({ status: 201, json: { sessionId: forkId } });
+  });
+  // Claude has not written the fork yet; after the first turn it holds the copy.
+  let forkReads = 0;
+  await page.route(`**/api/claude/chat/${forkId}?*`, async (route) => {
+    forkReads += 1;
+    return route.fulfill({ json: forkReads === 1
+      ? { session: { id: forkId, title: "Plan work", created: true }, history: [], cursor: null, events: [], runtime: { runtimeId: "r1", running: true, model: null, launchModel: null, permissionMode: "default", process: true, requests: [] }, terminal: null }
+      : { session: { id: forkId, title: "Plan work" }, history: [
+        { type: "user", uuid: first, message: { role: "user", content: "first step" } },
+        { type: "assistant", uuid: "h2", piBlockIndex: 0, message: { id: "m0", role: "assistant", content: [{ type: "text", text: "First done." }] } },
+      ], cursor: null, events: [{ type: "user", uuid: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", piSeq: 1, message: { role: "user", content: [{ type: "image" }, { type: "text", text: "second step" }] } }, { type: "result", piSeq: 2 }], runtime: { runtimeId: "r1", running: false, model: null, launchModel: null, permissionMode: "default", process: true, requests: [] }, terminal: null } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.locator("button[aria-expanded]").filter({ hasText: "Claude" }).last().click();
+  await page.getByText("Plan work", { exact: true }).click();
+  const chat = page.locator("section").filter({ hasText: "Claude Chat · Plan work" });
+  await expect(chat.getByText("Second done.")).toBeVisible();
+  await chat.getByText("More", { exact: true }).click();
+  await expect(chat.getByRole("button", { name: "Fork chat" })).toBeEnabled();
+
+  // The first prompt has nothing before it, so only the second can fork.
+  await expect(chat.getByRole("button", { name: "New session" })).toHaveCount(1);
+  await chat.getByText("second step", { exact: true }).hover();
+  await chat.getByRole("button", { name: "New session" }).click();
+  const fork = page.locator("section").filter({ hasText: "Claude Chat · Plan work (fork)" });
+  await expect(fork.getByText("Your first message starts a fork with the conversation before the chosen message.")).toBeVisible();
+  const composer = fork.getByPlaceholder("Message…", { exact: true });
+  await expect(composer).toHaveValue("second step");
+  expect(created).toEqual([]);
+
+  await fork.locator("input[type=file]").setInputFiles({ name: "dot.png", mimeType: "image/png", buffer: Buffer.from("iVBORw0KGgo=", "base64") });
+  await expect(fork.getByRole("img", { name: "Attachment 1" })).toBeVisible();
+  await composer.press("Enter");
+  await expect.poll(() => created.length).toBe(1);
+  expect(created[0]).toMatchObject({ cwd: "/tmp/pi-web-e2e", text: "second step", images: ["data:image/png;base64,iVBORw0KGgo="], fork: { sessionId: id, at: second } });
+  await expect(page.getByRole("tab", { name: /Plan work \(fork\)/ })).toHaveCount(1);
+  await expect(fork.getByText("[Image]", { exact: false })).toBeVisible();
+  await expect(fork.getByText("Your first message starts a fork")).toHaveCount(0);
+  await expect.poll(() => forkReads).toBe(1);
+  await emitCodexEvent(page, { type: "result", piSeq: 2, piRuntime: "r1" });
+  await expect(fork.getByText("First done.")).toBeVisible();
+  expect(forkReads).toBe(2);
+});
+
 test("searches and manages files from Explorer", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.startsWith("mobile"), "desktop Explorer test");
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);

@@ -139,10 +139,12 @@ export function ClaudeChatTabView({
       sessionName={tab.sessionName}
       model={tab.model ?? ""}
       permissionMode={tab.permissionMode ?? "default"}
+      forkOf={tab.sourceSessionId ? undefined : tab.forkOf}
       workspaceTabId={tab.id}
       onCreated={onCreated}
       onStatusChange={onStatusChange}
       onConfigurationChange={onConfigurationChange}
+      onFork={actions.forkClaudeChat}
       onOpenFile={(filePath) => actions.openFile(filePath.startsWith("/") ? filePath : joinFilePath(cwd, filePath))}
     />
   );

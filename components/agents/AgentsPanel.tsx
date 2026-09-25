@@ -7,7 +7,7 @@ import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
 import { useWorkspaceStatus } from "@/hooks/useWorkspaceStatus";
 import { useClaudeSessions, type ClaudeSession } from "@/hooks/useClaudeSessions";
 import { ProductStatusDot } from "@/components/ProductStatus";
-import type { ClaudeChatTarget, CodexChatTarget } from "@/components/workspace/WorkspaceActions";
+import type { ClaudeChatTarget, ClaudeForkTarget, CodexChatTarget } from "@/components/workspace/WorkspaceActions";
 
 /** Structurally identical to `CodexChatTarget`; kept as a distinct export so AgentsPanel stays usable outside the workspace-actions context. */
 export type CodexSessionTarget = CodexChatTarget;
@@ -44,12 +44,14 @@ interface Props {
   onOpenClaudeChat?: (target: ClaudeChatTarget) => void;
   /** Opens an empty Claude chat in the folder. */
   onNewClaudeChat?: (cwd: string) => void;
+  /** Opens a new Claude chat whose first message forks the session. */
+  onForkClaudeChat?: (target: ClaudeForkTarget) => void;
   onOpenTerminal?: (terminal: TerminalSession, label?: string) => void;
   onTerminalRemoved?: (terminalId: string) => void;
   onCodexSessionChanged?: (change: { id: string; action: "rename" | "archive" | "unarchive" | "delete"; name?: string }) => void;
 }
 
-export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAgent, onOpenCodexSession, onNewCodexChat, onOpenClaudeChat, onNewClaudeChat, onOpenTerminal, onTerminalRemoved, onCodexSessionChanged }: Props) {
+export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAgent, onOpenCodexSession, onNewCodexChat, onOpenClaudeChat, onNewClaudeChat, onForkClaudeChat, onOpenTerminal, onTerminalRemoved, onCodexSessionChanged }: Props) {
   const [open, setOpen] = useState(true);
   const [shellOpen, setShellOpen] = useState(false);
   const [codexOpen, setCodexOpen] = useState(false);
@@ -692,6 +694,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
                 </button>
                 <ActionMenu label={`Manage ${session.title}`}>
                   {onOpenClaudeChat && <MenuButton onClick={() => onOpenClaudeChat({ sessionId: session.id, sessionName: session.title, cwd })}>Open in Chat</MenuButton>}
+                  {onForkClaudeChat && <MenuButton onClick={() => onForkClaudeChat({ sessionId: session.id, sessionName: session.title, cwd })}>Fork to Chat</MenuButton>}
                   <MenuButton onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "resume", permission: "confirm" }); }}>Resume in Terminal…</MenuButton>
                   <MenuButton onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "fork", permission: "confirm" }); }}>Fork to Terminal…</MenuButton>
                   <span style={menuDividerStyle} />

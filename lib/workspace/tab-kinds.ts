@@ -35,7 +35,14 @@ export const TAB_KINDS: { [K in Tab["kind"]]: TabKindDefinition<Extract<Tab, { k
   "claude-chat": {
     kind: "claude-chat",
     slot: "center",
-    parse: (raw, scope) => hasIdentity(raw) && raw.cwd === scope.cwd ? { ...(raw as unknown as ClaudeChatTab), status: "idle" } : null,
+    parse: (raw, scope) => {
+      if (!hasIdentity(raw) || raw.cwd !== scope.cwd) return null;
+      const tab = { ...(raw as unknown as ClaudeChatTab), status: "idle" as const };
+      const forkOf = tab.forkOf as unknown;
+      // A malformed fork source is dropped; the tab stays a new chat.
+      if (forkOf !== undefined && !(forkOf && typeof forkOf === "object" && typeof (forkOf as { sessionId?: unknown }).sessionId === "string" && ["undefined", "string"].includes(typeof (forkOf as { at?: unknown }).at))) delete tab.forkOf;
+      return tab;
+    },
   },
   file: {
     kind: "file",

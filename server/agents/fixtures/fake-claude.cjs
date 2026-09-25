@@ -7,14 +7,17 @@
 // interrupts and a `result` per turn. Transcripts go to
 // $CLAUDE_CONFIG_DIR/projects/<encoded cwd>/<session>.jsonl.
 // The prompt picks the scenario: "write" asks for permission, "long" runs
-// until interrupted, "crash" exits mid-turn; anything else answers at once.
+// until interrupted, "crash" exits mid-turn; anything else answers at once,
+// counting the prompt's images. `--fork-session` copies the `--resume`
+// transcript (through `--resume-session-at`) to the `--session-id` one.
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
 const argv = process.argv.slice(2);
 const flag = (name) => { const index = argv.indexOf(name); return index >= 0 ? argv[index + 1] : undefined; };
-const sessionId = flag("--resume") || flag("--session-id");
+const forking = argv.includes("--fork-session");
+const sessionId = forking ? flag("--session-id") : flag("--resume") || flag("--session-id");
 let model = flag("--model") || "claude-default";
 let permissionMode = flag("--permission-mode") || "default";
 const log = process.env.FAKE_CLAUDE_LOG;
@@ -22,9 +25,25 @@ const record = (entry) => { if (log) fs.appendFileSync(log, `${JSON.stringify(en
 record({ argv });
 
 const transcript = path.join(process.env.CLAUDE_CONFIG_DIR, "projects", process.cwd().replace(/[^a-zA-Z0-9]/g, "-"), `${sessionId}.jsonl`);
+if (forking) {
+  const source = path.join(path.dirname(transcript), `${flag("--resume")}.jsonl`);
+  const at = flag("--resume-session-at");
+  const kept = [];
+  for (const line of fs.readFileSync(source, "utf8").split("\n").filter(Boolean)) {
+    const entry = JSON.parse(line);
+    kept.push(JSON.stringify({ ...entry, sessionId }));
+    if (at && entry.uuid === at) break;
+  }
+  // As Claude does, a fork point that is not a message in the chain fails.
+  if (at && !kept.some((line) => JSON.parse(line).uuid === at)) { process.stderr.write(`No message found with message.uuid of: ${at}\n`); process.exit(1); }
+  fs.writeFileSync(transcript, `${kept.join("\n")}\n`);
+}
+// Entries chain through `parentUuid`, as in Claude's transcripts.
+let lastUuid = fs.existsSync(transcript) ? fs.readFileSync(transcript, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line).uuid).filter(Boolean).pop() ?? null : null;
 function persist(entry) {
   fs.mkdirSync(path.dirname(transcript), { recursive: true });
-  fs.appendFileSync(transcript, `${JSON.stringify({ ...entry, sessionId, cwd: process.cwd(), timestamp: new Date().toISOString() })}\n`);
+  fs.appendFileSync(transcript, `${JSON.stringify({ parentUuid: lastUuid, ...entry, sessionId, cwd: process.cwd(), timestamp: new Date().toISOString() })}\n`);
+  lastUuid = entry.uuid;
 }
 const out = (message) => process.stdout.write(`${JSON.stringify({ ...message, session_id: sessionId })}\n`);
 let pendingPermission = null;
@@ -80,7 +99,10 @@ process.stdin.on("data", (chunk) => {
     record({ stdin: input });
     if (input.type === "user") {
       persist({ type: "user", uuid: input.uuid || crypto.randomUUID(), message: input.message });
-      turn(typeof input.message.content === "string" ? input.message.content : "");
+      const content = input.message.content;
+      const images = Array.isArray(content) ? content.filter((block) => block.type === "image" && block.source?.type === "base64").length : 0;
+      const text = typeof content === "string" ? content : content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+      turn(images ? `${text} [${images} image${images === 1 ? "" : "s"}]` : text);
     } else if (input.type === "control_request") {
       const subtype = input.request?.subtype;
       if (subtype === "interrupt") {

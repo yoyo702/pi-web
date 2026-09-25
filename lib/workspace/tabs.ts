@@ -53,6 +53,8 @@ export interface ClaudeChatTab extends TabBase {
   sessionName?: string;
   /** A chat whose session is created by its first message; `sourceSessionId` is set once it exists. */
   newChat?: boolean;
+  /** A new chat whose first message forks this session: all of it, or the part before the prompt `at`. */
+  forkOf?: { sessionId: string; at?: string };
 }
 
 export interface FileTab extends TabBase { kind: "file"; filePath: string; sourceSessionId?: string | null }

@@ -5,16 +5,18 @@ import { claudeConversationItems, type ClaudeRecord } from "@/lib/agents/claude-
 import type { ChatDraftImage } from "@/lib/draft-store";
 import { streamFailure } from "@/lib/agents/stream-failure";
 import type { ClaudePermissionMode } from "@/lib/workspace/tabs";
+import type { ClaudeForkTarget } from "../../workspace/WorkspaceActions";
 import { CodexAssistantThread, type PermissionOption } from "../codex/CodexAssistantThread";
 import { ClaudePermissionCard, type ClaudePermissionAnswer, type ClaudePermissionRequest } from "./ClaudePermissionCard";
 
-type ClaudeEvent = ClaudeRecord & { piRuntime?: string; runtimeId?: string; request_id?: string; request?: ClaudePermissionRequest["request"]; requestId?: string; permissionMode?: string; model?: string; interrupted?: boolean; error?: string };
+type ClaudeEvent = ClaudeRecord & { piRuntime?: string; runtimeId?: string; request_id?: string; request?: ClaudePermissionRequest["request"]; requestId?: string; permissionMode?: string; model?: string; interrupted?: boolean; error?: string; code?: string };
 type Runtime = { runtimeId: string; running: boolean; model: string | null; permissionMode: string | null; process: boolean; requests: ClaudePermissionRequest[] };
-type ChatRead = { session?: { id: string; title: string | null }; history?: ClaudeRecord[]; cursor?: number | null; events?: ClaudeEvent[]; runtime?: Runtime | null; terminal?: { terminalId: string } | null };
+type ChatRead = { session?: { id: string; title: string | null; created?: boolean }; history?: ClaudeRecord[]; cursor?: number | null; events?: ClaudeEvent[]; runtime?: Runtime | null; terminal?: { terminalId: string } | null };
 type ApiError = { error?: string; code?: string };
 
 const MODEL_OPTIONS = [{ id: "sonnet", label: "Sonnet" }, { id: "opus", label: "Opus" }, { id: "haiku", label: "Haiku" }];
 const PERMISSION_OPTIONS: PermissionOption[] = [{ value: "default", label: "Ask before edits" }, { value: "acceptEdits", label: "Accept edits" }, { value: "plan", label: "Plan mode" }, { value: "bypassPermissions", label: "Bypass permissions" }];
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isPermissionMode = (value: unknown): value is ClaudePermissionMode => PERMISSION_OPTIONS.some((option) => option.value === value);
 const post = (url: string, body: unknown) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 async function failure(response: Response, fallback: string) {
@@ -26,8 +28,10 @@ async function failure(response: Response, fallback: string) {
  * A Claude Code session driven by a server-side `claude --print` process
  * (server/agents/claude-chat-runtime.cjs). The transcript is loaded in pages;
  * live events arrive on the chat's SSE stream and replay from `after`.
+ * Without a session, the first message creates one: empty, or a copy of
+ * `forkOf` (Claude only forks while starting a turn).
  */
-export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName, model: initialModel, permissionMode: initialPermissionMode, workspaceTabId, onCreated, onOpenFile, onStatusChange, onConfigurationChange }: { sessionId: string | null; cwd: string; sessionName?: string; model: string; permissionMode: ClaudePermissionMode; workspaceTabId: string; onCreated?: (tabId: string, cwd: string, sessionId: string, title: string) => void; onOpenFile?: (filePath: string) => void; onStatusChange?: (tabId: string, status: "idle" | "running" | "approval") => void; onConfigurationChange?: (tabId: string, configuration: { model?: string; permissionMode?: ClaudePermissionMode }) => void }) {
+export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName, model: initialModel, permissionMode: initialPermissionMode, workspaceTabId, forkOf, onCreated, onFork, onOpenFile, onStatusChange, onConfigurationChange }: { sessionId: string | null; cwd: string; sessionName?: string; model: string; permissionMode: ClaudePermissionMode; workspaceTabId: string; forkOf?: { sessionId: string; at?: string }; onCreated?: (tabId: string, cwd: string, sessionId: string, title: string) => void; onFork?: (target: ClaudeForkTarget) => void; onOpenFile?: (filePath: string) => void; onStatusChange?: (tabId: string, status: "idle" | "running" | "approval") => void; onConfigurationChange?: (tabId: string, configuration: { model?: string; permissionMode?: ClaudePermissionMode }) => void }) {
   const [sessionId, setSessionId] = useState(initialSessionId);
   const [title, setTitle] = useState(sessionName ?? "");
   const [history, setHistory] = useState<ClaudeRecord[]>([]);
@@ -49,6 +53,9 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
   // Sequence numbers restart with each chat runtime on the server.
   const runtimeIdRef = useRef("");
   const lastSeqRef = useRef(0);
+  // The snapshot predates the session file (a new chat or fork): reload it
+  // after the first turn, when Claude has written the file.
+  const createdRef = useRef(false);
 
   const runState = requests.length ? "approval" : running || sending ? "running" : "idle";
   useEffect(() => { onStatusChange?.(workspaceTabId, runState); }, [onStatusChange, runState, workspaceTabId]);
@@ -72,9 +79,10 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
     else if (event.type === "result") {
       setRunning(false); setRequests([]);
       if (event.interrupted) setNotice("Turn interrupted");
+      if (createdRef.current) { createdRef.current = false; setReloadKey((key) => key + 1); }
     } else if (event.type === "pi/closed" || event.type === "pi/stopped") {
       setRunning(false); setRequests([]);
-      if (event.type === "pi/closed") setError((current) => current ?? "Claude exited. Send a message to start it again.");
+      if (event.type === "pi/closed") setError((current) => current ?? (event.code === "fork_failed" && event.error ? event.error : "Claude exited. Send a message to start it again."));
     } else if (event.type === "control_request" && event.request_id && event.request) {
       const request = { request_id: event.request_id, request: event.request };
       setRequests((current) => [...current.filter((item) => item.request_id !== request.request_id), request]);
@@ -135,6 +143,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
       })
       .then((data) => {
         if (closed) return;
+        createdRef.current = Boolean(data.session?.created);
         if (data.session?.title) setTitle((current) => current || data.session?.title || "");
         setHistory(data.history ?? []);
         setCursor(data.cursor ?? null);
@@ -173,19 +182,20 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
 
   const send = useCallback(async (textOverride?: string, images: ChatDraftImage[] = []): Promise<boolean> => {
     const text = textOverride?.trim() ?? "";
-    if (images.length) { setError("Claude Chat does not support images yet. Remove them to send."); return false; }
-    if (!text || connection !== "connected") return false;
+    if ((!text && !images.length) || connection !== "connected") return false;
     const uuid = crypto.randomUUID();
     setSending(true); setError(null);
-    setPending((current) => [...current, { type: "user", uuid, pending: true, message: { role: "user", content: text } }]);
-    const body = { cwd, text, uuid, model, permissionMode };
+    // The transcript keeps an `image` block per image, before the text.
+    const content = images.length ? [...images.map(() => ({ type: "image" })), ...(text ? [{ type: "text", text }] : [])] : text;
+    setPending((current) => [...current, { type: "user", uuid, pending: true, message: { role: "user", content } }]);
+    const body = { cwd, text, images: images.map((image) => `data:${image.mimeType};base64,${image.data}`), uuid, model, permissionMode };
     try {
       if (!sessionId) {
         // The first message of a new chat creates the session.
-        const response = await post("/api/claude/chat", body);
-        if (!response.ok) throw await failure(response, "Unable to start a Claude chat");
+        const response = await post("/api/claude/chat", forkOf ? { ...body, fork: forkOf } : body);
+        if (!response.ok) throw await failure(response, forkOf ? "Unable to fork the Claude session" : "Unable to start a Claude chat");
         const data = await response.json() as { sessionId: string };
-        const name = text.replace(/\s+/g, " ").slice(0, 60);
+        const name = forkOf && title ? title : text.replace(/\s+/g, " ").slice(0, 60) || "Image";
         setTitle(name); setSessionId(data.sessionId);
         onCreated?.(workspaceTabId, cwd, data.sessionId, name);
         return true;
@@ -200,7 +210,26 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
       else setError(cause instanceof Error ? cause.message : "Unable to send the message to Claude");
       return false;
     } finally { setSending(false); }
-  }, [connection, cwd, model, onCreated, permissionMode, sessionId, workspaceTabId]);
+  }, [connection, cwd, forkOf, model, onCreated, permissionMode, sessionId, title, workspaceTabId]);
+
+  // `at`: fork from that prompt, leaving it (as a draft) and what follows out.
+  const fork = useCallback((at?: string, draft?: string) => {
+    if (!sessionId) return;
+    // The browser never gets image data: a forked prompt's images are attached again by hand.
+    const forkDraft = draft?.split("\n").filter((line) => line !== "[Image]").join("\n").trim();
+    onFork?.({ sessionId, sessionName: title || "Claude Chat", cwd, permissionMode, ...(model ? { model } : {}), ...(at ? { at } : {}), ...(forkDraft ? { draft: forkDraft } : {}) });
+  }, [cwd, model, onFork, permissionMode, sessionId, title]);
+  // Any saved prompt but the session's first (nothing precedes it).
+  const forkPoints = useMemo(() => {
+    const points = new Map<string, string>();
+    let first = cursor === null;
+    for (const item of items) {
+      if (item.kind !== "message" || item.role !== "user" || item.pending) continue;
+      if (!first && UUID.test(item.id)) points.set(item.id, item.id);
+      first = false;
+    }
+    return points;
+  }, [cursor, items]);
 
   const stop = useCallback(async () => {
     if (!sessionId) return;
@@ -241,10 +270,14 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
     {terminalConflict ? <div role="alert" style={{ padding: "7px 10px", color: "#fbbf24", fontSize: 12 }}>
       This session is open in a Claude terminal. Stop the terminal to continue here.
       <button type="button" onClick={() => void claim()} disabled={sending} style={{ ...buttonStyle, marginLeft: 8 }}>Stop terminal</button>
+    </div> : !sessionId && forkOf && !error ? <div style={{ padding: "7px 10px", color: "var(--text-muted)", fontSize: 12 }}>
+      {forkOf.at ? "Your first message starts a fork with the conversation before the chosen message." : "Your first message starts a fork with a copy of the whole conversation."} The original session is left unchanged.
     </div> : error && <div role="alert" style={{ padding: "7px 10px", color: "#fca5a5", fontSize: 12 }}>{error}{connection === "failed" ? <button type="button" onClick={() => { setError(null); setReloadKey((key) => key + 1); }} style={{ ...buttonStyle, marginLeft: 8 }}>Reconnect</button> : null}</div>}
     <div style={{ flex: 1, minHeight: 0 }}>
       <CodexAssistantThread
         items={items}
+        // Base64 grows it to the API's 5 MB image limit.
+        maxImageBytes={3_750_000}
         running={runState !== "idle"}
         requestCards={requests.map((request, index) => <ClaudePermissionCard key={request.request_id} request={request} position={index + 1} total={requests.length} onAnswer={(requestId, value) => void answer(requestId, value)} />)}
         canSteer={false}
@@ -263,12 +296,15 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         statusLabel={connection !== "connected" ? connection === "reconnecting" ? "Reconnecting" : connection === "loading" ? "Loading" : "Offline" : runState === "approval" ? "Approval" : runState === "running" ? "Working" : "Ready"}
         activityLabel={runState === "running" ? "Claude is working…" : undefined}
         noticeLabel={notice || undefined}
-        forkDisabled
+        forkDisabled={!sessionId || runState !== "idle" || connection !== "connected"}
+        forkPoints={forkPoints}
         onModelToggle={() => undefined}
         onModelChange={(value) => { setModel(value); onConfigurationChange?.(workspaceTabId, { model: value || undefined }); setNotice(value ? `Model changed to ${MODEL_OPTIONS.find((option) => option.id === value)?.label ?? value} · applies to the next message` : "Using the default model on the next message"); }}
         onReasoningEffortChange={() => undefined}
         onServiceTierChange={() => undefined}
         onApprovalPolicyChange={(value) => { if (!isPermissionMode(value)) return; setPermissionMode(value); onConfigurationChange?.(workspaceTabId, { permissionMode: value }); setNotice("Permission mode updated · applies to the next message"); }}
+        onFork={onFork && sessionId ? () => fork() : undefined}
+        onForkFrom={onFork ? fork : undefined}
         onSend={send}
         onSteer={async () => "queue"}
         onStop={stop}

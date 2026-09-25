@@ -8,7 +8,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 
 - 在当前项目启动 Shell、Codex 或 Claude。
 - 恢复、Fork、重命名、归档或删除 Codex Session。
-- 查看、搜索、删除当前项目的 Claude 会话，并在终端中恢复或 Fork。
+- 查看、搜索、删除当前项目的 Claude 会话，在终端中恢复或 Fork，在聊天中打开或 Fork。
 - 在 Chat 与 Terminal 两种交互界面之间选择。
 - 保留模型、推理强度、权限策略等每个标签的配置。
 - 在运行、审批或失败时获得清晰反馈并可终止任务。
@@ -19,7 +19,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - Agent/Terminal 在中央工作区以标签打开，支持多标签和终端分屏。
 - 支持 Shell、Codex、Claude 三种启动类型。
 - Codex 支持 Chat 和 Terminal Session；Chat 支持模型、推理、服务等级和审批策略。
-- Claude 支持 Chat 和 Terminal Session；Chat 支持模型、权限模式和权限卡片。
+- Claude 支持 Chat 和 Terminal Session；Chat 支持模型、权限模式、权限卡片、图片和 Fork。
 - Session 支持新建、恢复、Fork、重命名、归档和删除确认。
 - Terminal 支持停止、重启、删除记录、清理已结束任务和重连缓冲区。
 - Chat 支持中断运行及处理审批卡片。
@@ -113,13 +113,14 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 ## Claude 聊天运行时
 
 - 每个会话一个 `claude --print --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio --allow-dangerously-skip-permissions` 进程（`server/agents/claude-chat-runtime.cjs`，接口 `claude-chat-api.cjs`），所有浏览器共用。
-  - 打开聊天只读会话文件，不启动进程；第一条消息才启动（已有会话用 `--resume <id>`，新聊天用 `--session-id <新 id>`）。
+  - 打开聊天只读会话文件，不启动进程；第一条消息才启动（已有会话用 `--resume <id>`，新聊天用 `--session-id <新 id>`，Fork 见下）。
   - 没有页面在看、也没有进行中的一轮和未决审批时，30 秒后关闭进程；一轮进行中或有审批时一直保留。因此发起一轮后关掉页面，这一轮会跑完。
   - `--permission-prompt-tool stdio` 让权限请求走 `control_request can_use_tool`，由浏览器回答；不加这个参数，权限请求会被自动拒绝。`--allow-dangerously-skip-permissions` 只是允许之后切到 `bypassPermissions`，不会直接开启它。
 - 接口（所有 POST 请求体都带 `cwd`；cwd 须是已授权目录，会话须属于该目录）：
   - `GET /api/claude/chat/:id?cwd=&before=`：返回 `{session, history, cursor, events, runtime, terminal}`。`history` 是会话文件末尾约 512 KiB 的记录（带 `before` 时取更早的一页，只返回 `history`/`cursor`；`cursor` 为 null 表示已到文件开头）。一行超过窗口时窗口扩大；超过 32 MiB 的行跳过。`events` 是运行时缓冲的事件（最多 2000 条），`runtime` 包含 `runtimeId`、是否运行、模型、权限模式、未决请求。`terminal` 非空表示有 `resume` 终端正在写该会话。
   - `GET /api/claude/chat/:id/events?cwd=&after=runtimeId:seq`：SSE。先发 `pi/connected {sessionId, runtimeId}`，事件 id 为 `runtimeId:seq`；`after` 属于当前运行时时只重放之后的事件，否则从头重放；`after` 之后的事件已被挤出缓冲时改发 `pi/reset`（无事件 id），前端重新读取快照（`GET /api/claude/chat/:id`）后再订阅。前端已知的 `runtimeId` 与 `pi/connected` 不同（运行时闲置关闭后被重建）时同样重新读取快照。服务端拒绝事件流（如会话不属于该目录）时，聊天与 Codex 一样再请求一次事件地址读出原因，显示 “Claude chat disconnected: <原因>” 与 “Reconnect”。
-  - `POST /api/claude/chat`：新聊天的第一条消息，`{cwd, text, uuid, model, permissionMode}`，返回 201 `{sessionId}`。
+  - `POST /api/claude/chat`：新聊天的第一条消息，`{cwd, text, images?, uuid, model, permissionMode, fork?}`，返回 201 `{sessionId}`。带 `fork: {sessionId, at?}` 时新会话是 `sessionId` 的副本（见 Fork）。
+  - 消息体（这里和 `/send`）：`text` 与 `images` 至少有一个；`images` 最多 5 张，每张是 `data:image/(png|jpeg|webp|gif);base64,...`（与 Codex 相同），base64 部分不超过 5,000,000 字符（约 3.75 MB 原图），请求体上限 26 MiB。原因：Anthropic API 拒绝超过 5 MB 的 base64 图片，而 Claude 已把图片写进会话，之后每次 `--resume` 都会重发并再次失败。聊天输入框只附加不超过 3.75 MB 的图片，更大的跳过并提示。服务端把图片转成 `{type:"image", source:{type:"base64", media_type, data}}` 内容块放在文字前发给 Claude；推给浏览器的 `user` 事件里图片只剩 `{type:"image"}`（与历史记录的裁剪一致），显示为 “[Image]”。只发图片时会话标题为 “Image”。
   - `POST /api/claude/chat/:id/send`（202）、`/interrupt`、`/respond`（`{requestId, decision: allow|allowSession|deny, message?, updatedInput?}`，204）、`/claim`（停止恢复该会话的终端，204）。
 - 事件：转发 Claude 的 stream-json 记录（`stream_event`、`assistant`、`user`、`result`、`control_request`；`system` 只保留 init/status 中的模型和权限模式），每条加 `piSeq`、`piRuntime`，`assistant` 记录加 `piBlockIndex`（对应流式事件的内容块序号，用于把流式文本替换成最终文本）。另有服务端事件：`pi/resolved`（请求已回答，或 Claude 发来 `control_cancel_request` 取消了它）、`pi/closed`（进程意外退出，附原因）、`pi/stopped`（进程被主动停止）。一轮结束（`result`）后，缓冲中的 `stream_event` 被丢弃，只保留完整记录。前端的运行状态只跟随事件（`user` → 运行中，`result`/`pi/closed`/`pi/stopped` → 空闲），不因 POST 成功而设置。
 - 聊天界面（Claude Chat 标签，复用 Codex 聊天的消息列表和输入框）：
@@ -131,7 +132,11 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - “Allow for session” 可能让 Claude 切换权限模式（如接受编辑），`system` 记录回报新模式后，界面和标签配置随之更新。
   - 工具显示：Bash 显示为命令和输出；Edit / MultiEdit / Write 显示为差异；其他工具显示名称、输入和结果。
   - 任务列表：`TaskCreate` / `TaskUpdate`（Claude Code 2.x 的任务工具）和旧的 `TodoWrite` 不显示为工具调用，而是合成一张 “Tasks” 卡片，放在最近一次改动的位置。新任务的编号取自 `TaskCreate` 的结果（“Task #N created …”），`TaskUpdate` 只更新已知编号（`deleted` 删除）；创建在未加载的更早历史里的任务，其更新被忽略。斜杠命令按输入显示，命令输出显示为提示；“[Request interrupted by user]” 显示为 “Interrupted”。`result` 带 `is_error` 时显示错误提示。
-  - 暂不支持：图片（发送时提示移除）、子代理详情、斜杠命令菜单、Fork。
+  - Fork（都在新标签打开，原会话不变）：输入框 “More → Fork chat” 复制整个会话；用户消息上的 “New session” 从这条消息分叉，只保留它之前的内容，这条消息放进新标签的输入框（浏览器拿不到图片数据，所以这条消息的图片不会带过去，“[Image]” 占位行被去掉，需要重新附加）。会话第一条消息（已加载到文件开头时）没有之前的内容，不显示该按钮；运行中、未连接或还没有会话时不能 Fork。Agents 面板 Claude 会话菜单的 “Fork to Chat” 同样复制整个会话。
+    - Claude 只在开始一轮时 Fork，所以新标签先是空白聊天（标题 “<原名> (fork)”，提示第一条消息会开始 Fork），不读原会话。第一条消息调用 `POST /api/claude/chat`，带 `fork: {sessionId, at?}`（`at` 是所选用户消息的 uuid），标签随后与新聊天一样指向新会话。Claude 写出新会话文件之前，读取接口返回 `session.created: true` 和空历史；第一轮结束（`result`）后聊天重新读取一次，显示复制过来的内容。
+    - 服务端找到 `at` 这条用户记录，沿 `parentUuid` 往前找到最近的一条消息（`user` 或 `assistant`；中间的 `system`（如 turn_duration）、`attachment` 等记录跳过，因为 Claude 只能在消息处恢复），以 `--resume <原 id> --fork-session --resume-session-at <该消息 uuid> --session-id <新 id>` 启动；不带 `at` 时不加 `--resume-session-at`。（`--resume-session-at` 是 Claude Code 2.1 的隐藏参数，与 `--resume` 一起使用；`--session-id` 与 `--fork-session` 一起时生效，所以新会话 id 由服务端事先决定。）新会话文件写出之前重启进程会再次 Fork；之后就是普通的 `--resume <新 id>`。进程在写出新会话之前退出时，聊天收到 `pi/closed`（`code: "fork_failed"`），显示 “Claude could not fork the session…”，详细原因（stderr）只在服务端日志里；再发一次消息会重试 Fork。聊天空闲关闭后（无人查看 30 秒）这个未写出的会话就不存在了，标签会报会话不存在，需要从原会话重新 Fork。
+    - 错误：原会话不在该目录或 `at` 不在会话文件中 404；`at` 之前没有消息 400；`at` 之后会话被压缩过（`/compact` 或自动压缩，文件里有之后的 `compact_boundary`）400，提示从更晚的消息 Fork——Claude 不能在压缩之前的位置恢复；原会话正在跑一轮时 409 `session_busy`（否则会复制半轮）。Fork 不检查原会话是否被终端占用（只读原文件）。
+  - 暂不支持：子代理详情、斜杠命令菜单。
 - 权限卡片（`control_request can_use_tool`）：
   - 普通工具：显示命令 / 差异 / 输入 JSON、文件路径和原因；按钮 Allow、Allow for session（仅当 Claude 给出建议规则时，同时应用这些规则）、Deny。
   - `ExitPlanMode`：显示计划，按钮 “Approve plan” / “Keep planning”。
