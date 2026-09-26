@@ -162,7 +162,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - 记录的事件：
   - Codex 聊天：一轮完成（Completed）、失败（Failed，带 `turn.error` 原因）、等待审批或提问（Needs your input）；这一轮中途运行时意外退出算失败（用户停止或服务端正常关闭时先停止运行时，不记录）。被中断（interrupted）的一轮不记录；pi-web 不支持而直接拒绝的请求不记录。标题为会话名，无名字时用第一条消息。
   - Pi 会话：等整次运行结束（`agent_settled`）后，按最后一次 `agent_end` 的最后一条助手消息判断：`stopReason: "error"` 记为失败（带错误信息），用户中止（aborted）不记录，其余记为完成。Pi 自动重试成功、或上下文溢出后压缩并继续成功的，只记一条完成。标题为会话名，否则第一条用户消息。worktree 里的会话同时记录项目根目录，用来找到对应项目。
-  - 终端：退出码非 0 或被信号结束记为失败（“Exited with code N” / “Killed by signal …”）；Codex/Claude 终端和项目任务终端（“Task: <脚本>”）正常退出记为完成；普通 shell 正常退出、用户点 Stop 停止的终端不记录。Claude/Codex 终端运行中还会记录：等待审批（Needs your input，附审批内容）和一轮完成、等待下一条消息（Finished，Claude 附最后一条回复，见“Terminal 活动状态”）。
+  - 终端：退出码非 0 或被信号结束记为失败（“Exited with code N” / “Killed by signal …”）；Codex/Claude 终端和项目任务终端（“Task: <脚本>”）正常退出记为完成（Codex/Claude 在等待输入时退出不记：最后一轮已经记过完成，或者还没发过消息）；普通 shell 正常退出、用户点 Stop 停止的终端不记录。Claude/Codex 终端运行中还会记录：等待审批（Needs your input，附审批内容）和一轮完成、等待下一条消息（Finished，Claude 附最后一条回复，见“Terminal 活动状态”）。
 - 已读：同一个聊天、会话或终端有新通知时，它之前未读的通知自动标为已读（只需关注最新状态；同一聊天连续两个审批时，只有后一个显示为未读，两个审批卡片仍都在聊天里）。点击通知标为已读，“Mark all read” 全部标为已读；已读状态保存在服务端，所有设备同步。接口 `POST /api/notifications/read`，请求体 `{"ids": [...]}`（最多 500 个）或 `{"all": true}`，返回 `{changed}`；格式错误 400，非 POST 405。
 - 推送：通知列表作为 `notifications` 快照（`{notifications, unread}`，新的在前）通过状态 SSE（`/api/agent/running/events`）推送，连接时先发一次完整快照。
 - 活动中心（`components/ActivityCenter.tsx`）：项目栏铃铛和中间工具栏的 “Workspace activity” 按钮（手机上也有）打开同一个面板（对话框 “Workspace activity”）。活动数据由 `hooks/useWorkspaceActivity.ts` 在 AppShell 里算一次，项目栏角标、弹出菜单和活动中心共用（规则见 `lib/rail-activity.ts`）。
@@ -205,9 +205,9 @@ Codex Chat 的审批来自 app-server 协议，Claude Chat 的审批来自 strea
 
 Claude/Codex 终端运行时带 `activity`：`working`（正在跑一轮）、`waiting`（等待下一条消息）、`approval`（等待审批或回答问题）；普通 shell、Windows 上的 Claude、还没报告过的 Codex 为 `null`（按运行中处理，与以前相同）。终端结束后为 `null`。
 
-- Claude：启动时用 `--settings` 加四个 hook（不改用户的 `~/.claude` 设置，用户自己的 hook 照常运行）：`UserPromptSubmit` → working，`Stop` → waiting（附 `last_assistant_message`），`Notification`（`permission_prompt|elicitation_dialog`）→ approval（附提示文字），`Notification`（`idle_prompt`，Claude 停在输入框约 60 秒后发出）→ waiting，不记通知（拒绝审批、本地命令等没有 `Stop` 的情况靠它纠正）。hook 运行 `server/terminal-hook.cjs`，把状态 POST 到 `/api/terminal-hook`：
+- Claude：启动时用 `--settings` 加四个 hook（不改用户的 `~/.claude` 设置，用户自己的 hook 照常运行）：`UserPromptSubmit` → working，`Stop` → waiting（附 `last_assistant_message`），`Notification`（`permission_prompt|elicitation_dialog`）→ approval（附提示文字），`Notification`（`idle_prompt`，Claude 停在输入框约 60 秒后发出）→ waiting，不记通知（拒绝审批、本地命令等没有 `Stop` 的情况靠它纠正）。hook 运行 `server/terminal-hook.cjs`，把状态 POST 到 `/api/terminal-hook`（`server/terminal-hook-api.cjs`）：
   - 地址来自环境变量 `PI_WEB_TERMINAL_HOOK_URL`（本机地址；服务监听 0.0.0.0 时用 127.0.0.1，监听 :: 时用 [::1]，其他地址原样使用；HTTPS 时不校验证书），凭据是每个终端随机生成的 `PI_WEB_TERMINAL_HOOK_TOKEN`；这两个变量只加给 Claude 终端。
-  - 接口不需要登录，靠 token 认证：token 不对返回 404，状态非法 404，非 POST 405。另外只接受来自本机地址的请求（403），这只是额外防护：经本机反向代理（如 Tailscale Serve）来的请求也显示为本机地址。
+  - 接口不需要登录，靠 token 认证：token 不对返回 404，状态非法 404，请求体不是 JSON 400，非 POST 405。另外只接受来自本机地址的请求（403），这只是额外防护：经本机反向代理（如 Tailscale Serve）来的请求也显示为本机地址。
   - token 在 Claude 运行的所有命令的环境里都可见，所以 Claude 自己跑的命令能伪造本终端的状态和通知文字（最多 300 字）；只影响这一个终端。
   - 脚本 1 秒内读完 stdin、3 秒超时，总是静默退出 0，服务不在时不影响 Claude。
   - 新 Claude 终端一开始是 waiting。审批时 Claude 不再发 hook，所以在终端里按 Enter 或数字键选择后改回 working；按 Esc 或 Ctrl+C（中断这一轮或拒绝审批）改为 waiting，不记完成通知（Esc/Ctrl+C 没真的中断时，下一个 hook 会纠正）。只移动方向键不改变状态。
