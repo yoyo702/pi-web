@@ -110,13 +110,19 @@ export interface RailActivityResult {
   nextExpiry: number;
 }
 
+/** A running terminal that is not a Claude or Codex CLI waiting for the next message. */
+export function terminalIsBusy(terminal: Pick<TerminalSession, "state" | "activity">): boolean {
+  return terminal.state === "running" && terminal.activity !== "waiting";
+}
+
 export function computeRailActivity(input: RailActivityInput): RailActivityResult {
   const { terminals, runningSessionIds, codexRuntimes, claudeRuntimes = [], sessionsById, previousRunning, now } = input;
   const running = new Map<string, RailActivityItem>();
   for (const terminal of terminals) {
-    if (terminal.state !== "running") continue;
+    // A Claude or Codex terminal waiting for the next message is idle, so a finished turn lists it as completed.
+    if (!terminalIsBusy(terminal)) continue;
     const key = `terminal:${terminal.id}`;
-    running.set(key, { key, kind: "terminal", id: terminal.id, label: terminalActivityLabel(terminal), state: "working", cwd: terminal.cwd, terminal });
+    running.set(key, { key, kind: "terminal", id: terminal.id, label: terminalActivityLabel(terminal), state: terminal.activity === "approval" ? "approval" : "working", cwd: terminal.cwd, terminal });
   }
   for (const id of runningSessionIds) {
     // A session whose project is unknown cannot be placed on a workspace yet.
