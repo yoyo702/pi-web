@@ -1,7 +1,11 @@
+import crypto from "crypto";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
 import { runGit } from "./git-exec";
+import { buildPartialPatch, parsePatch, selectedAddedContent } from "./git-partial-patch";
+import { conflict, badRequest } from "./http-error";
 import type {
   GitBranch,
   GitBranchesResponse,
@@ -9,6 +13,7 @@ import type {
   GitCommitFile,
   GitFileDiffResponse,
   GitFileStatus,
+  GitLineAction,
   GitFileStatusKind,
   GitLogResponse,
   GitStatusResponse,
@@ -262,10 +267,15 @@ async function createTrackedFilePatch(
     ? ["--cached"]
     : scope === "combined" ? ["HEAD"] : [];
   try {
+    // Line actions apply this patch back with `git apply`, so it must be the
+    // plain diff whatever the user's diff settings (prefixes, textconv).
     return await git(repositoryRoot, [
       "diff",
       "--no-color",
       "--no-ext-diff",
+      "--no-textconv",
+      "--src-prefix=a/",
+      "--dst-prefix=b/",
       "--unified=3",
       ...scopeArgs,
       "--",
@@ -303,7 +313,7 @@ export async function getGitFileDiff(
     const currentBuffer = fs.readFileSync(resolvedFilePath);
     if (hasNullByte(currentBuffer)) return { supported: false };
     const patch = createAddedFilePatch(relativePath, currentBuffer.toString("utf8"));
-    return { supported: true, status, scope, patch };
+    return { supported: true, status, scope, patch, ...(currentBuffer.length > 0 && lineActionsSafe(patch) ? { fingerprint: patchFingerprint(patch) } : {}) };
   }
 
   if (status === "untracked") return { supported: false };
@@ -312,7 +322,81 @@ export async function getGitFileDiff(
   // A valid Git diff with no hunks means this file has no changes in this scope
   // (for example, a staged-only file viewed in the unstaged group).
   if (!patch || !patch.includes("\n@@ ")) return { supported: false };
-  return { supported: true, status, scope, patch };
+  // Renames keep whole-file actions only: a partial patch would also move the file.
+  const lineActions = trackedScope !== "combined" && !entry.originalPath && lineActionsSafe(patch);
+  return { supported: true, status, scope, patch, ...(lineActions ? { fingerprint: patchFingerprint(patch) } : {}) };
+}
+
+/**
+ * Git output is decoded as UTF-8; text in another encoding shows replacement
+ * characters and would be written back changed, so it keeps whole-file actions.
+ */
+function lineActionsSafe(patch: string): boolean {
+  return !patch.includes("\uFFFD");
+}
+
+function patchFingerprint(patch: string): string {
+  return crypto.createHash("sha256").update(patch).digest("hex");
+}
+
+const LINE_ACTIONS: Record<"staged" | "unstaged" | "untracked", GitLineAction[]> = {
+  unstaged: ["stage", "discard"],
+  staged: ["unstage"],
+  untracked: ["stage"],
+};
+
+/**
+ * Stages, unstages or discards some lines of one file's diff. The diff is
+ * generated again and must match `fingerprint`, so lines chosen in an older
+ * view are never applied to content that changed since.
+ */
+export async function applyGitLineSelection(
+  cwd: string,
+  filePath: string,
+  input: { scope: "staged" | "unstaged" | "untracked"; action: GitLineAction; fingerprint: string; lineIds: number[] },
+): Promise<GitStatusResponse> {
+  if (!LINE_ACTIONS[input.scope]?.includes(input.action)) throw badRequest(`Cannot ${input.action} lines of ${input.scope} changes`);
+  const repositoryRoot = await requireRepositoryRoot(cwd);
+  const diff = await getGitFileDiff(cwd, filePath, input.scope);
+  if (diff.supported && !diff.fingerprint) throw badRequest("Lines of this file can only be changed as a whole file");
+  if (!diff.patch || diff.fingerprint !== input.fingerprint) throw conflict("This diff changed. Refresh and select the lines again.");
+  const parsed = parsePatch(diff.patch);
+  if (input.lineIds.length === 0 || input.lineIds.some((id) => id >= parsed.changeCount)) throw badRequest("Select changed lines of this diff");
+  const relativePath = toGitPath(path.relative(repositoryRoot, path.resolve(filePath)));
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-git-lines-"));
+  try {
+    if (input.scope === "untracked") {
+      // Only the chosen lines become the staged file; the working copy is untouched.
+      const content = path.join(temp, "content");
+      fs.writeFileSync(content, selectedAddedContent(parsed, input.lineIds));
+      const mode = fs.statSync(path.resolve(filePath)).mode & 0o111 ? "100755" : "100644";
+      const blob = (await gitWrite(repositoryRoot, ["hash-object", "-w", `--path=${relativePath}`, content])).trim();
+      await gitWrite(repositoryRoot, ["update-index", "--add", "--cacheinfo", `${mode},${blob},${relativePath}`]);
+    } else {
+      const patch = buildPartialPatch(parsed, input.lineIds, input.action === "stage" ? "forward" : "reverse");
+      if (!patch) throw badRequest("Select at least one changed line");
+      const patchFile = path.join(temp, "selection.patch");
+      fs.writeFileSync(patchFile, patch);
+      const target = input.action === "discard" ? [] : ["--cached"];
+      const reverse = input.action === "stage" ? [] : ["-R"];
+      await gitWrite(repositoryRoot, ["apply", ...target, ...reverse, "--whitespace=nowarn", patchFile]);
+    }
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+  return getGitStatus(cwd);
+}
+
+/** Git writes that fail because another Git holds the index lock, or the patch no longer fits, are conflicts. */
+async function gitWrite(repositoryRoot: string, args: string[]): Promise<string> {
+  try {
+    return await git(repositoryRoot, args);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("index.lock")) throw conflict("Git is busy in this repository. Try again in a moment.");
+    if (args[0] === "apply") throw conflict(`Git could not apply the selected lines: ${message.split("\n")[0]}`);
+    throw error;
+  }
 }
 
 const GIT_LOG_MAX_BUFFER = 32 * 1024 * 1024;

@@ -77,7 +77,15 @@ export interface GitFileDiffResponse {
   status?: GitFileStatusKind;
   scope?: GitDiffScope;
   patch?: string;
+  /**
+   * Set when single hunks or lines of this diff can be staged, unstaged or
+   * discarded; sent back with the request so a diff that changed meanwhile
+   * is refused.
+   */
+  fingerprint?: string;
 }
+
+export type GitLineAction = "stage" | "unstage" | "discard";
 
 export interface GitBranch {
   name: string;

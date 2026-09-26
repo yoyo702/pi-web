@@ -49,13 +49,13 @@ const DISPLAY_MODE_LABELS: Record<DisplayMode, string> = {
   diff: "Diff",
 };
 
-const FILE_CODE_STYLE: CSSProperties = {
+export const FILE_CODE_STYLE: CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: 13,
   lineHeight: 1.6,
 };
 
-const FILE_LINE_NUMBER_STYLE: CSSProperties = {
+export const FILE_LINE_NUMBER_STYLE: CSSProperties = {
   width: 48,
   minWidth: 48,
   padding: "0 10px",

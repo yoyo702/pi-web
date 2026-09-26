@@ -2215,3 +2215,57 @@ test("searches and manages files from Explorer", async ({ page }, testInfo) => {
   await page.getByRole("menu", { name: "README-renamed.md tab actions" }).getByRole("menuitem", { name: "Close All Tabs" }).click();
   await expect(rightPanel).toHaveClass(/right-panel-closed/);
 });
+
+test("stages and discards selected lines in Git Review", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop Git Review test");
+  const repo = "/tmp/pi-web-e2e/service-a";
+  const file = { filePath: `${repo}/a.txt`, status: "modified", code: "M", indexStatus: " ", worktreeStatus: "M" };
+  const patch = [
+    "diff --git a/a.txt b/a.txt", "index 1111111..2222222 100644", "--- a/a.txt", "+++ b/a.txt",
+    "@@ -1,3 +1,4 @@", " one", "-two", "+TWO", "+two and a half", " three", "",
+  ].join("\n");
+  const lineRequests: Array<Record<string, unknown>> = [];
+  let staged = false;
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
+    id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
+    created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
+  }], runningSessionIds: [] } }));
+  await page.route("**/api/files/**", async (route) => route.fulfill({ json: { entries: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
+  await page.route("**/api/git/repositories?*", async (route) => route.fulfill({ json: { repositories: [
+    { path: repo, repositoryRoot: repo, label: "service-a", relativePath: "service-a" },
+  ] } }));
+  const status = () => ({ isGitRepository: true, repositoryRoot: repo, branch: "main", remotes: [], files: [{ ...file, indexStatus: staged ? "M" : " " }] });
+  await page.route("**/api/git/status?*", async (route) => route.fulfill({ json: status() }));
+  await page.route("**/api/git/diff?*", async (route) => route.fulfill({ json: { supported: true, status: "modified", scope: "unstaged", patch, fingerprint: staged ? "fp-2" : "fp-1" } }));
+  await page.route("**/api/git/lines", async (route) => {
+    lineRequests.push(route.request().postDataJSON());
+    staged = true;
+    return route.fulfill({ json: status() });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Show file panel" }).click();
+  await page.getByRole("button", { name: "Open Git Review" }).click();
+  await page.getByTitle(`View diff: ${file.filePath}`).click();
+
+  const toolbar = page.getByRole("toolbar", { name: "Line selection" });
+  await page.getByRole("button", { name: "Select removed line 2" }).click();
+  await page.getByRole("button", { name: "Select added line 3" }).click({ modifiers: ["Shift"] });
+  await expect(toolbar.getByText("3 lines selected")).toBeVisible();
+  await page.getByRole("button", { name: "Deselect added line 2" }).click();
+  await expect(toolbar.getByText("2 lines selected")).toBeVisible();
+
+  let dialogMessage = "";
+  page.once("dialog", async (dialog) => { dialogMessage = dialog.message(); await dialog.dismiss(); });
+  await toolbar.getByRole("button", { name: "Discard" }).click();
+  expect(dialogMessage).toBe("Discard 2 lines in a.txt? This cannot be undone.");
+  expect(lineRequests).toHaveLength(0);
+
+  await toolbar.getByRole("button", { name: "Stage" }).click();
+  await expect.poll(() => lineRequests).toEqual([{ cwd: repo, path: file.filePath, scope: "unstaged", action: "stage", fingerprint: "fp-1", lineIds: [0, 2] }]);
+  // The diff reloads with a new fingerprint, which clears the selection.
+  await expect(toolbar.getByText("Click a line's gutter to select it", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "Stage hunk" }).click();
+  await expect.poll(() => lineRequests.at(-1)).toMatchObject({ fingerprint: "fp-2", lineIds: [0, 1, 2] });
+});
