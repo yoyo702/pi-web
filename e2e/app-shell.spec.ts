@@ -1509,7 +1509,7 @@ test("shows Codex file diffs and task lists, and forks a chat from a message int
   await expect(forkChat.getByPlaceholder("Message… Type / for commands", { exact: true })).toHaveValue("rename b");
 });
 
-async function mockClaudeWorkspace(page: Page, sessions: Array<Record<string, unknown>>) {
+async function mockClaudeWorkspace(page: Page, sessions: Array<Record<string, unknown>>, commands: Array<Record<string, unknown>> = []) {
   await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
     id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
     created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
@@ -1524,6 +1524,7 @@ async function mockClaudeWorkspace(page: Page, sessions: Array<Record<string, un
   ]);
   await page.route("**/api/project-scripts?*", async (route) => route.fulfill({ json: { scripts: [], runner: "npm" } }));
   await page.route("**/api/claude/sessions?*", async (route) => route.fulfill({ json: { sessions, nextCursor: null } }));
+  await page.route("**/api/claude/chat/commands?*", async (route) => route.fulfill({ json: { commands } }));
 }
 
 test("opens a Claude session in Claude Chat, answers permissions and stops a terminal that owns it", async ({ page }, testInfo) => {
@@ -1592,6 +1593,80 @@ test("opens a Claude session in Claude Chat, answers permissions and stops a ter
   await expect(chat.getByText("All tests pass.")).toBeVisible();
   await expect(chat.getByText("replayed")).toHaveCount(0);
   await expect(chat.getByPlaceholder("Message…", { exact: true })).toBeVisible();
+});
+
+test("Claude Chat lists Claude's slash commands and shows a sub-agent's steps under its tool call", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const id = "99999999-9999-4999-8999-999999999999";
+  await fakeCodexStreams(page);
+  await mockClaudeWorkspace(page, [{ id, title: "Survey", firstMessage: "Survey", cwd: "/tmp/pi-web-e2e", gitBranch: null, createdAt: null, updatedAt: "2026-08-03T00:00:00.000Z", size: 2048, runtime: null }], [
+    { name: "compact", description: "Clear conversation history but keep a summary", argumentHint: "<optional custom summarization instructions>" },
+    { name: "context", description: "Show current context usage", argumentHint: "" },
+    { name: "superpowers:brainstorming", description: "Explore an idea first", argumentHint: "", aliases: ["brainstorming"] },
+  ]);
+  await page.route(`**/api/claude/chat/${id}?*`, async (route) => route.fulfill({ json: {
+    session: { id, title: "Survey" },
+    history: [
+      { type: "user", uuid: "h1", message: { role: "user", content: "Survey" } },
+      { type: "assistant", uuid: "h2", piBlockIndex: 0, message: { id: "m0", role: "assistant", content: [{ type: "tool_use", id: "toolu_saved", name: "Agent", input: { description: "List files", prompt: "List the files" } }] } },
+      { type: "user", uuid: "h3", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_saved", content: [{ type: "text", text: "Found a.txt" }] }] } },
+      { type: "system", subtype: "compact_boundary", uuid: "h4" },
+    ],
+    cursor: null, events: [], runtime: null, terminal: null,
+  } }));
+  const agentReads: string[] = [];
+  await page.route(`**/api/claude/chat/${id}/agents/*`, async (route) => {
+    const toolUseId = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
+    agentReads.push(toolUseId);
+    if (toolUseId !== "toolu_saved") return route.fulfill({ status: 404, json: { error: "This agent's steps were not saved", code: "not_found" } });
+    return route.fulfill({ json: { truncated: false, records: [
+      { type: "user", uuid: "s1", parentToolUseId: "toolu_saved", message: { role: "user", content: "List the files" } },
+      { type: "assistant", uuid: "s2", parentToolUseId: "toolu_saved", message: { id: "ms", role: "assistant", content: [{ type: "tool_use", id: "toolu_ls", name: "Bash", input: { command: "ls -la" } }] } },
+      { type: "user", uuid: "s3", parentToolUseId: "toolu_saved", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_ls", content: "a.txt" }] } },
+      { type: "assistant", uuid: "s4", parentToolUseId: "toolu_saved", message: { id: "ms", role: "assistant", content: [{ type: "text", text: "Only a.txt is here." }] } },
+    ] } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.locator("button[aria-expanded]").filter({ hasText: "Claude" }).last().click();
+  await page.getByText("Survey", { exact: true }).click();
+  const chat = page.locator("section").filter({ hasText: "Claude Chat · Survey" });
+  await expect(chat.getByText("Conversation compacted")).toBeVisible();
+
+  // Commands match by name, alias or the part after a plugin prefix.
+  const composer = chat.getByPlaceholder("Message… Type / for commands", { exact: true });
+  await composer.fill("/c");
+  const menu = chat.getByRole("listbox", { name: "Commands" });
+  await expect(menu.getByRole("option")).toHaveCount(2);
+  await expect(menu.getByRole("option", { name: /\/compact <optional custom summarization instructions>/ })).toBeVisible();
+  await composer.fill("/brain");
+  await expect(menu.getByRole("option", { name: /superpowers:brainstorming/ })).toBeVisible();
+  await composer.fill("/comp");
+  await composer.press("Enter");
+  await expect(composer).toHaveValue("/compact ");
+  await composer.fill("");
+
+  await chat.getByRole("button", { name: /Agent steps/ }).click();
+  await expect(chat.getByText("Only a.txt is here.")).toBeVisible();
+  await expect(chat.getByText("ls -la")).toBeVisible();
+  await expect.poll(() => agentReads).toEqual(["toolu_saved"]);
+
+  // Live: progress shows before the steps are saved.
+  const emit = (event: Record<string, unknown>) => emitCodexEvent(page, event);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __codexStreams?: unknown[] }).__codexStreams?.length ?? 0)).toBeGreaterThan(0);
+  await emit({ type: "pi/connected", sessionId: id, runtimeId: "r1" });
+  await emit({ type: "user", uuid: "l1", message: { role: "user", content: "again" }, piSeq: 1, piRuntime: "r1" });
+  await emit({ type: "system", subtype: "status", compacting: true, piSeq: 2, piRuntime: "r1" });
+  await expect(chat.getByText("Compacting the conversation…")).toBeVisible();
+  await emit({ type: "system", subtype: "status", compacting: false, piSeq: 3, piRuntime: "r1" });
+  await emit({ type: "assistant", uuid: "l2", piBlockIndex: 0, message: { id: "m2", role: "assistant", content: [{ type: "tool_use", id: "toolu_live", name: "Agent", input: { description: "Check", prompt: "Check it" } }] }, piSeq: 4, piRuntime: "r1" });
+  await emit({ type: "system", subtype: "task_progress", tool_use_id: "toolu_live", last_tool_name: "Grep", usage: { tool_uses: 2 }, piSeq: 5, piRuntime: "r1" });
+  await emit({ type: "assistant", uuid: "l3", parentToolUseId: "toolu_live", message: { id: "ml", role: "assistant", content: [{ type: "text", text: "Live sub-agent note" }] }, piSeq: 6, piRuntime: "r1" });
+  await expect(chat.getByText("Live sub-agent note")).toHaveCount(0);
+  const live = chat.getByRole("button", { name: /Agent steps.*Running Grep · 2 tool uses/ });
+  await live.click();
+  await expect(chat.getByText("Live sub-agent note")).toBeVisible();
 });
 
 test("starts a new Claude chat whose first message creates the session", async ({ page }, testInfo) => {

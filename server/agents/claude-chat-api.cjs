@@ -11,7 +11,7 @@ const { readBody } = require("../http-body.cjs");
 // Five images at the limit, plus the text.
 const MAX_IMAGE_BASE64 = 5_000_000;
 const MAX_BODY_BYTES = 26 * 1024 * 1024;
-function isPath(pathname) { return pathname === "/api/claude/chat" || /^\/api\/claude\/chat\/[0-9a-f-]+(?:\/(?:events|send|interrupt|respond|claim))?$/i.test(pathname); }
+function isPath(pathname) { return pathname === "/api/claude/chat" || pathname === "/api/claude/chat/commands" || /^\/api\/claude\/chat\/[0-9a-f-]+(?:\/(?:events|send|interrupt|respond|claim|agents\/[\w-]+))?$/i.test(pathname); }
 function requestError(message, code = "invalid_request") { return Object.assign(new Error(message), { code }); }
 async function read(req) {
   let text;
@@ -101,11 +101,17 @@ async function handle(req, res, url) {
       await chat.send(chat.open(sessionId, cwd, { fork }), input);
       return send(res, 201, { sessionId });
     }
-    const [, , , , id, action] = url.pathname.split("/");
+    if (url.pathname === "/api/claude/chat/commands") {
+      if (req.method !== "GET") return send(res, 405, { error: "method not allowed" });
+      return send(res, 200, { commands: await chat.commandsFor(requireCwd(url.searchParams.get("cwd"))) });
+    }
+    const [, , , , id, action, toolUseId] = url.pathname.split("/");
     if (req.method === "GET") {
-      if (action && action !== "events") return send(res, 405, { error: "method not allowed" });
+      if (action && action !== "events" && action !== "agents") return send(res, 405, { error: "method not allowed" });
       const cwd = requireCwd(url.searchParams.get("cwd"));
       const session = sessionFor(id, cwd);
+      // A sub-agent's saved steps, by the Agent tool call that started it.
+      if (action === "agents") return send(res, 200, session.created ? { records: [], truncated: false } : catalog.agentTranscript(id, cwd, toolUseId));
       if (!action) {
         const before = url.searchParams.get("before");
         const history = session.created ? { records: [], cursor: null } : catalog.readHistory(id, cwd, { before });

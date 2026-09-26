@@ -243,21 +243,40 @@ function compactBlock(block) {
   if (block.type === "text") return { type: "text", text: clip(block.text ?? "") };
   return { type: block.type };
 }
+const SYNTHETIC = "<synthetic>";
+const LOCAL_OUTPUT = /^\s*<local-command-(?:stdout|stderr)>([\s\S]*)<\/local-command-(?:stdout|stderr)>\s*$/;
 /**
- * The part of a `user`/`assistant` record Claude Chat shows, or null for
- * records it skips (sub-agent turns, injected context, compaction summaries).
+ * The part of a record Claude Chat shows, or null for records it skips
+ * (injected context, compaction summaries):
+ * - `user`/`assistant` messages. A sub-agent's messages (on Claude's output,
+ *   or from its own transcript with `sidechain`) carry `parentToolUseId`,
+ *   the Agent tool call that started it, when Claude names it.
+ * - A local command's output (`/context`): the transcript saves it as a
+ *   `system` record; Claude's output sends it as a synthetic assistant
+ *   message with the same uuid. Both become an assistant message whose id is
+ *   that uuid, so the two are one item.
+ * - A compaction (`compact_boundary`).
  */
-function compactRecord(record) {
-  if ((record?.type !== "user" && record?.type !== "assistant") || record.isSidechain || record.isMeta || record.isCompactSummary) return null;
-  if (record.parent_tool_use_id) return null;
+function compactRecord(record, { sidechain = false } = {}) {
+  if (!record || (record.isSidechain && !sidechain) || record.isMeta || record.isCompactSummary || record.isSynthetic) return null;
+  const uuid = typeof record.uuid === "string" ? record.uuid : undefined;
+  const timestamp = typeof record.timestamp === "string" ? record.timestamp : undefined;
+  if (record.type === "system") {
+    if (record.subtype === "compact_boundary") return { type: "system", subtype: "compact_boundary", uuid, timestamp };
+    const output = record.subtype === "local_command" && typeof record.content === "string" ? LOCAL_OUTPUT.exec(record.content)?.[1]?.trim() : "";
+    return output && uuid ? { type: "assistant", uuid, timestamp, piBlockIndex: 0, message: { id: uuid, role: "assistant", model: SYNTHETIC, content: [{ type: "text", text: clip(output) }] } } : null;
+  }
+  if (record.type !== "user" && record.type !== "assistant") return null;
   const message = record.message ?? {};
   const content = typeof message.content === "string" ? clip(message.content) : Array.isArray(message.content) ? message.content.map(compactBlock) : "";
+  const synthetic = record.type === "assistant" && message.model === SYNTHETIC && uuid;
   return {
     type: record.type,
-    uuid: typeof record.uuid === "string" ? record.uuid : undefined,
-    timestamp: typeof record.timestamp === "string" ? record.timestamp : undefined,
-    ...(typeof record.apiBlockIndex === "number" ? { piBlockIndex: record.apiBlockIndex } : {}),
-    message: { id: message.id, role: message.role ?? record.type, model: message.model, content },
+    uuid,
+    timestamp,
+    ...(typeof record.parent_tool_use_id === "string" ? { parentToolUseId: record.parent_tool_use_id } : {}),
+    ...(synthetic ? { piBlockIndex: 0 } : typeof record.apiBlockIndex === "number" ? { piBlockIndex: record.apiBlockIndex } : {}),
+    message: { id: synthetic ? uuid : message.id, role: message.role ?? record.type, model: message.model, content },
   };
 }
 
@@ -358,4 +377,43 @@ async function forkPoint(id, cwd, uuid) {
   return at;
 }
 
-module.exports = { listSessions, requireSession, remove, encodeCwd, sessionFile, readHistory, forkPoint, compactRecord };
+const TOOL_USE_ID = /^toolu_[A-Za-z0-9_-]{1,128}$/;
+const AGENT_FILE_MAX = 4 * 1024 * 1024;
+/**
+ * The records of the sub-agent that the Agent tool call `toolUseId` started:
+ * `{ records, truncated }`. Claude saves each sub-agent in
+ * `<session id>/subagents/agent-<agent id>.jsonl`, next to a `.meta.json`
+ * naming its tool call. Only the last 4 MiB are read (`truncated`).
+ */
+function agentTranscript(id, cwd, toolUseId) {
+  if (typeof toolUseId !== "string" || !TOOL_USE_ID.test(toolUseId)) throw error("invalid_request", "Invalid tool call id");
+  const file = sessionFile(id, cwd);
+  if (!file) throw error("not_found", "Claude session not found in this workspace");
+  const directory = path.join(path.dirname(file), id, "subagents");
+  let names = [];
+  try { names = fs.readdirSync(directory).filter((name) => /^agent-[A-Za-z0-9_-]+\.meta\.json$/.test(name)); } catch { /* no sub-agents */ }
+  const meta = names.find((name) => {
+    try { return JSON.parse(fs.readFileSync(path.join(directory, name), "utf8"))?.toolUseId === toolUseId; } catch { return false; }
+  });
+  if (!meta) throw error("not_found", "This agent's steps were not saved");
+  let handle;
+  try { handle = fs.openSync(path.join(directory, meta.replace(/\.meta\.json$/, ".jsonl")), "r"); } catch { throw error("not_found", "This agent's steps were not saved"); }
+  try {
+    const size = fs.fstatSync(handle).size;
+    const start = Math.max(0, size - AGENT_FILE_MAX);
+    const buffer = Buffer.alloc(size - start);
+    fs.readSync(handle, buffer, 0, buffer.length, start);
+    // A read that starts mid-line begins after its first newline.
+    const text = buffer.subarray(start > 0 ? buffer.indexOf(10) + 1 : 0).toString("utf8");
+    const records = [];
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      let record;
+      try { record = compactRecord(JSON.parse(line), { sidechain: true }); } catch { continue; }
+      if (record) records.push({ ...record, parentToolUseId: toolUseId });
+    }
+    return { records, truncated: start > 0 };
+  } finally { fs.closeSync(handle); }
+}
+
+module.exports = { listSessions, requireSession, remove, encodeCwd, sessionFile, readHistory, forkPoint, agentTranscript, compactRecord };

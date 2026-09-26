@@ -22,14 +22,105 @@ const PROTOCOL_ARGS = [
 const DEFAULT_RUNTIME_OPTIONS = { command: "claude", args: [], env: undefined, idleMs: 30_000 };
 let runtimeOptions = DEFAULT_RUNTIME_OPTIONS;
 /** Tests point runtimes at a fake `claude`; `null` restores the defaults. */
-function configure(options) { runtimeOptions = options ? { ...DEFAULT_RUNTIME_OPTIONS, ...options } : DEFAULT_RUNTIME_OPTIONS; }
-if (!global.__piWebClaudeChatCleanup) { global.__piWebClaudeChatCleanup = true; process.once("exit", () => { for (const state of sessions.values()) state.child?.kill(); }); }
+function configure(options) { runtimeOptions = options ? { ...DEFAULT_RUNTIME_OPTIONS, ...options } : DEFAULT_RUNTIME_OPTIONS; commandCache.clear(); }
+const probes = new Set();
+if (!global.__piWebClaudeChatCleanup) { global.__piWebClaudeChatCleanup = true; process.once("exit", () => { for (const state of sessions.values()) state.child?.kill(); for (const child of probes) child.kill(); }); }
 
 const MODELS = new Set(["", "sonnet", "opus", "haiku"]);
 const PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "bypassPermissions"]);
 const EVENTS_MAX = 2_000;
+// Sub-agent progress, shown on the Agent tool call that started it.
+const TASK_EVENTS = new Set(["task_started", "task_progress", "task_notification"]);
 
 function fail(code, message) { return Object.assign(new Error(message), { code }); }
+
+// Slash commands, per folder (project commands and skills differ). Claude
+// lists them in its `initialize` answer; `system/init` names the ones that
+// only work in a terminal (seeded with Claude 2.1's). `/clear` starts a new
+// session under another id, which the chat would not follow.
+const CLEAR_COMMANDS = new Set(["clear", "reset", "new"]);
+let terminalCommands = new Set(["doctor", "color", "reload-plugins"]);
+const COMMANDS_TTL = 5 * 60_000;
+// A failed probe (no CLI, slow startup) is not retried on every panel open.
+const COMMANDS_FAILED_TTL = 60_000;
+const commandCache = new Map();
+const commandProbes = new Map();
+function commandList(raw) {
+  if (!Array.isArray(raw)) return [];
+  const names = (value) => Array.isArray(value) ? value.filter((name) => typeof name === "string" && name) : [];
+  const seen = new Set();
+  return raw.filter((command) => typeof command?.name === "string" && /^[\w:.-]+$/.test(command.name) && !command.name.startsWith("__") && !terminalCommands.has(command.name) && ![command.name, ...names(command.aliases)].some((name) => CLEAR_COMMANDS.has(name)))
+    .filter((command) => !seen.has(command.name) && seen.add(command.name))
+    .slice(0, 500)
+    .map((command) => ({
+      name: command.name,
+      description: typeof command.description === "string" ? command.description.slice(0, 300) : "",
+      argumentHint: typeof command.argumentHint === "string" ? command.argumentHint.slice(0, 200) : "",
+      ...(names(command.aliases).length ? { aliases: names(command.aliases).slice(0, 10) } : {}),
+    }));
+}
+function rememberCommands(cwd, raw, ttl = COMMANDS_TTL) {
+  const commands = commandList(raw);
+  commandCache.delete(cwd);
+  commandCache.set(cwd, { until: Date.now() + ttl, commands });
+  while (commandCache.size > 50) commandCache.delete(commandCache.keys().next().value);
+  return commands;
+}
+// A `claude` that answers `initialize` and is stopped: it starts no session
+// and makes no model request.
+function probeCommands(cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(runtimeOptions.command, [...runtimeOptions.args, ...PROTOCOL_ARGS], { cwd, env: runtimeOptions.env, stdio: ["pipe", "pipe", "ignore"] });
+    probes.add(child);
+    let buffer = "";
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      probes.delete(child);
+      try { child.kill(); } catch { /* already exited */ }
+      if (error) reject(error); else resolve(value);
+    };
+    const timer = setTimeout(() => finish(fail("runtime_timeout", "Claude did not list its commands in time")), 15_000);
+    timer.unref?.();
+    child.on("error", (error) => finish(fail("runtime_unavailable", `Unable to start Claude: ${error.message}`)));
+    child.on("exit", () => finish(fail("runtime_unavailable", "Claude exited before listing its commands")));
+    child.stdin.on("error", () => { /* the exit reports it */ });
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk;
+      let index;
+      while ((index = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, index);
+        buffer = buffer.slice(index + 1);
+        let record;
+        try { record = JSON.parse(line); } catch { continue; }
+        if (record?.type !== "control_response" || record.response?.request_id !== "pi-web-commands") continue;
+        if (record.response.subtype === "success") finish(null, record.response.response?.commands);
+        else finish(fail("rpc_error", record.response.error || "Claude did not list its commands"));
+      }
+    });
+    child.stdin.write(`${JSON.stringify({ type: "control_request", request_id: "pi-web-commands", request: { subtype: "initialize" } })}\n`);
+  });
+}
+/**
+ * Claude's slash commands for `cwd`: `{ name, description, argumentHint, aliases? }[]`;
+ * empty (for a minute) when Claude cannot list them.
+ */
+function commandsFor(cwd) {
+  const cached = commandCache.get(cwd);
+  if (cached && Date.now() < cached.until) return Promise.resolve(cached.commands);
+  let probe = commandProbes.get(cwd);
+  if (!probe) {
+    probe = probeCommands(cwd).then((raw) => rememberCommands(cwd, raw), (error) => {
+      console.warn(`[pi-web] Unable to list Claude's slash commands in ${cwd}: ${error.message}`);
+      return rememberCommands(cwd, [], COMMANDS_FAILED_TTL);
+    }).finally(() => commandProbes.delete(cwd));
+    commandProbes.set(cwd, probe);
+  }
+  return probe;
+}
 // `starting` covers a send that is still restarting the process.
 function isBusy(state) { return Boolean(state.running || state.starting || state.incoming.size); }
 function cancelIdleShutdown(state) { if (state.idleTimer) { clearTimeout(state.idleTimer); state.idleTimer = null; } }
@@ -75,7 +166,7 @@ function open(sessionId, cwd, { title = "", fork = null } = {}) {
     // reconnecting client tell a new chat from the one it last saw.
     runtimeId: crypto.randomUUID().slice(0, 8),
     child: null, buffer: "", stderrTail: "", launchModel: "", model: null, permissionMode: null,
-    running: false, interrupting: false, blockIndex: 0,
+    running: false, interrupting: false, compacting: false, blockIndex: 0,
     incoming: new Map(), controls: new Map(), nextControlId: 1,
     nextEventSeq: 1, droppedThrough: 0, events: [], listeners: new Set(), idleTimer: null,
   };
@@ -121,11 +212,44 @@ function handleRecord(state, record) {
     return;
   }
   if (type === "system") {
-    if (record.subtype === "init") { state.model = record.model ?? state.model; if (record.permissionMode) state.permissionMode = record.permissionMode; emit(state, { type: "system", subtype: "init", model: record.model, permissionMode: record.permissionMode }); }
-    else if (record.subtype === "status" && record.permissionMode) { state.permissionMode = record.permissionMode; emit(state, { type: "system", subtype: "status", permissionMode: record.permissionMode }); }
+    if (record.subtype === "init") {
+      // A command that moved Claude to another session (as /clear does): this
+      // chat's session no longer receives the turns.
+      if (typeof record.session_id === "string" && record.session_id !== state.sessionId) {
+        const child = state.child;
+        onExit(state, child, Object.assign(new Error("Claude moved to another session. Start a new chat to continue."), { code: "session_changed" }));
+        try { child?.kill(); } catch { /* already exited */ }
+        return;
+      }
+      state.model = record.model ?? state.model;
+      if (record.permissionMode) state.permissionMode = record.permissionMode;
+      if (Array.isArray(record.terminal_slash_commands)) terminalCommands = new Set(record.terminal_slash_commands.filter((name) => typeof name === "string"));
+      emit(state, { type: "system", subtype: "init", model: record.model, permissionMode: record.permissionMode });
+    } else if (record.subtype === "status") {
+      // Other statuses ("requesting") come with every request; only compaction is shown.
+      const compacting = record.status === "compacting";
+      const mode = record.permissionMode && record.permissionMode !== state.permissionMode ? record.permissionMode : undefined;
+      if (!mode && compacting === state.compacting) return;
+      state.compacting = compacting;
+      if (mode) state.permissionMode = mode;
+      emit(state, { type: "system", subtype: "status", compacting, ...(mode ? { permissionMode: mode } : {}) });
+    } else if (record.subtype === "compact_boundary") {
+      const compact = catalog.compactRecord(record);
+      if (compact) emit(state, compact);
+    } else if (TASK_EVENTS.has(record.subtype) && typeof record.tool_use_id === "string") {
+      const usage = record.usage ?? {};
+      emit(state, {
+        type: "system", subtype: record.subtype, tool_use_id: record.tool_use_id,
+        description: typeof record.description === "string" ? record.description.slice(0, 300) : undefined,
+        last_tool_name: typeof record.last_tool_name === "string" ? record.last_tool_name : undefined,
+        status: typeof record.status === "string" ? record.status : undefined,
+        usage: { tool_uses: usage.tool_uses, duration_ms: usage.duration_ms },
+      });
+    }
     return;
   }
   if (type === "stream_event") {
+    // A sub-agent's messages are shown once finished.
     if (record.parent_tool_use_id) return;
     const event = record.event ?? {};
     if (event.type === "content_block_start") state.blockIndex = event.index ?? 0;
@@ -137,8 +261,9 @@ function handleRecord(state, record) {
     const compact = catalog.compactRecord(record);
     if (!compact) return;
     // A streamed assistant record arrives right after its content_block_start;
-    // the transcript file keeps the same index as `apiBlockIndex`.
-    if (type === "assistant") compact.piBlockIndex = state.blockIndex;
+    // the transcript file keeps the same index as `apiBlockIndex`. Synthetic
+    // messages (command output) and sub-agent messages are not streamed.
+    if (type === "assistant" && compact.piBlockIndex === undefined && !compact.parentToolUseId) compact.piBlockIndex = state.blockIndex;
     emit(state, compact);
     return;
   }
@@ -151,6 +276,7 @@ function finishTurn(state, result) {
   const interrupted = state.interrupting;
   state.running = false;
   state.interrupting = false;
+  state.compacting = false;
   const expired = [...state.incoming.keys()];
   state.incoming.clear();
   // Deltas are superseded by the finished records; replaying them is waste.
@@ -172,6 +298,7 @@ function onExit(state, child, error) {
   state.child = null;
   for (const pending of state.controls.values()) { clearTimeout(pending.timer); pending.reject(fail("runtime_unavailable", "Claude exited")); }
   state.controls.clear();
+  state.compacting = false;
   const detail = state.stderrTail.trim();
   if (detail) console.warn(`[pi-web] Claude for ${state.sessionId}: ${error.message}\n${detail}`);
   if (state.running) {
@@ -185,7 +312,7 @@ function onExit(state, child, error) {
   const forkFailed = Boolean(state.fork) && !catalog.sessionFile(state.sessionId, state.cwd);
   emit(state, forkFailed
     ? { type: "pi/closed", code: "fork_failed", error: "Claude could not fork the session (details are in the server log). Send the message again to retry." }
-    : { type: "pi/closed", error: error.message });
+    : { type: "pi/closed", error: error.message, ...(error.code === "session_changed" ? { code: error.code } : {}) });
   workspaceStatus.notify("claude_runtimes");
   scheduleIdleShutdown(state);
 }
@@ -212,6 +339,7 @@ function spawnChild(state, { model, permissionMode }) {
   const child = spawn(runtimeOptions.command, args, { cwd: state.cwd, env: runtimeOptions.env, stdio: ["pipe", "pipe", "pipe"] });
   state.child = child;
   state.buffer = "";
+  state.compacting = false;
   state.stderrTail = "";
   // `model` is what Claude reports; `launchModel` is the alias we asked for.
   state.launchModel = model || "";
@@ -236,6 +364,11 @@ function spawnChild(state, { model, permissionMode }) {
   // EPIPE after Claude exits; unhandled, it would crash the server.
   child.stdin.on("error", (error) => onExit(state, child, error));
   child.on("exit", () => onExit(state, child, new Error("Claude exited")));
+  // Sent before the first message, as the Agent SDK does. Older Claude
+  // versions without it keep the probe's list.
+  control(state, { subtype: "initialize" }).then((response) => {
+    if (state.child === child && Array.isArray(response.commands)) emit(state, { type: "pi/commands", commands: rememberCommands(state.cwd, response.commands) });
+  }, () => undefined);
   workspaceStatus.notify("claude_runtimes");
 }
 
@@ -248,6 +381,7 @@ async function send(state, { text = "", images = [], uuid, model = "", permissio
   if (typeof text !== "string" || !Array.isArray(images) || (!text.trim() && !images.length)) throw fail("invalid_request", "A message is required");
   if (!MODELS.has(model)) throw fail("invalid_request", "Unsupported model");
   if (!PERMISSION_MODES.has(permissionMode)) throw fail("invalid_request", "Unsupported permission mode");
+  if (CLEAR_COMMANDS.has(/^\/(\S+)/.exec(text.trim())?.[1])) throw fail("invalid_request", "/clear would move this chat to a new Claude session. Start a new chat instead.");
   if (isBusy(state)) throw fail("session_busy", "Claude is still working on the previous message");
   const id = typeof uuid === "string" && /^[0-9a-f-]{36}$/i.test(uuid) ? uuid : crypto.randomUUID();
   state.starting = true;
@@ -316,6 +450,7 @@ async function stopProcess(state) {
   state.controls.clear();
   state.running = false;
   state.interrupting = false;
+  state.compacting = false;
   state.incoming.clear();
   workspaceStatus.notify("claude_runtimes");
   if (child.exitCode === null && child.signalCode === null) {
@@ -364,9 +499,9 @@ function listRuntimes() {
   return [...sessions.values()].filter((state) => state.child).map((state) => ({ sessionId: state.sessionId, cwd: state.cwd, title: state.title || null, ...runtimeForSession(state.sessionId) }));
 }
 function describe(state) {
-  return { runtimeId: state.runtimeId, running: state.running, model: state.model, launchModel: state.launchModel, permissionMode: state.permissionMode, process: Boolean(state.child), requests: pendingRequests(state) };
+  return { runtimeId: state.runtimeId, running: state.running, compacting: state.compacting, model: state.model, launchModel: state.launchModel, permissionMode: state.permissionMode, process: Boolean(state.child), requests: pendingRequests(state) };
 }
 
-module.exports = { configure, open, get, send, interrupt, respond, stopAndWait, shutdownRuntimes, subscribe, runtimeForSession, isBusySession, listRuntimes, describe, handleRecord };
+module.exports = { configure, commandsFor, open, get, send, interrupt, respond, stopAndWait, shutdownRuntimes, subscribe, runtimeForSession, isBusySession, listRuntimes, describe, handleRecord };
 
 workspaceStatus.registerProvider("claude_runtimes", () => ({ runtimes: listRuntimes() }));

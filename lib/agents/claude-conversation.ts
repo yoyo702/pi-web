@@ -14,12 +14,16 @@ import { todoStatus, type CodexConversationItem, type TodoStep } from "./codex-c
  *   versions): one `claude:tasks` item, moved to the latest change. A task
  *   gets its id from the `TaskCreate` result; updates to tasks created before
  *   the loaded history are ignored.
+ * Sub-agent records (`parentToolUseId`) are left out; the Agent tool call
+ * shows them (ClaudeAgentSteps). A compaction shows as a notice.
  */
 export type ClaudeBlock = { type?: string; text?: string; thinking?: string; id?: string; name?: string; input?: unknown; tool_use_id?: string; content?: unknown; is_error?: boolean };
 export type ClaudeRecord = {
   type?: string;
   subtype?: string;
   uuid?: string;
+  /** The Agent tool call that ran this sub-agent record. */
+  parentToolUseId?: string;
   piBlockIndex?: number;
   piSeq?: number;
   pending?: boolean;
@@ -46,7 +50,8 @@ function userText(text: string): { kind: "message" | "notice"; text: string } | 
   const command = tag(text, "command-name");
   if (command) return { kind: "message", text: [command, tag(text, "command-args")].filter(Boolean).join(" ") };
   const stdout = tag(text, "local-command-stdout") ?? tag(text, "local-command-stderr");
-  if (stdout !== undefined) return stdout ? { kind: "notice", text: stdout } : null;
+  // "Compacted" follows /compact; the compact boundary already shows it.
+  if (stdout !== undefined) return stdout && !/^Compacted\b/.test(stdout) ? { kind: "notice", text: stdout } : null;
   if (INTERRUPTED.test(text.trim())) return { kind: "notice", text: "Interrupted" };
   return text.trim() ? { kind: "message", text } : null;
 }
@@ -120,6 +125,8 @@ export function claudeConversationItems(records: ClaudeRecord[]): CodexConversat
     }
   };
   for (const record of records) {
+    if (record.parentToolUseId) continue;
+    if (record.type === "system" && record.subtype === "compact_boundary") { put({ id: record.uuid ?? `compact:${record.piSeq ?? items.size}`, kind: "notice", text: "Conversation compacted" }); continue; }
     if (record.type === "stream_event") {
       const event = record.event ?? {};
       if (event.type === "message_start") { messageId = event.message?.id ?? ""; continue; }
