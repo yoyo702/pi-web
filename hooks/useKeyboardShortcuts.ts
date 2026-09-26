@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 
-import { shouldAbortOnEscape } from "@/lib/escape-abort";
+import { hasVisibleModal, shouldAbortOnEscape } from "@/lib/escape-abort";
 
 // ---------------------------------------------------------------------------
 // Module-level registry — ChatWindow registers the abort handler here so that
@@ -57,7 +57,8 @@ export function useGlobalKeyboardShortcuts(
         // Text fields handle Esc themselves (ChatInput menus / stop); an open
         // modal owns Esc to close itself — either an `aria-modal` dialog
         // (Settings, etc.) or a native `<dialog>` opened via showModal()
-        // (e.g. the Mermaid zoom viewer, which has no aria-modal attribute).
+        // (e.g. the Mermaid zoom viewer, which has no aria-modal attribute) —
+        // counting only visible ones, not dialogs in hidden workspace tabs.
         // defaultPrevented is checked too, but is only a defensive fallback:
         // this listener runs in the capture phase (see addEventListener
         // below), so it fires before any bubble-phase handler elsewhere in
@@ -66,7 +67,7 @@ export function useGlobalKeyboardShortcuts(
         if (!shouldAbortOnEscape({
           targetTag: (e.target as HTMLElement | null)?.tagName,
           defaultPrevented: e.defaultPrevented,
-          modalOpen: document.querySelector('[aria-modal="true"], dialog[open]') !== null,
+          modalOpen: hasVisibleModal(document),
         })) return;
 
         e.preventDefault();
