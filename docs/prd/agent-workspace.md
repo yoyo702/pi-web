@@ -131,7 +131,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - 标题 “Claude Chat · <会话名> · <目录>”；有更早历史时显示 “Load earlier”。
   - 发送时浏览器生成消息 uuid，先显示为待发送，收到同一 uuid 的记录后替换，不重复显示。
   - Claude 在跑时不能插话：输入框提示 “Queue a message for the next turn…”，消息排队，这一轮结束后发送。服务端对进行中的会话再次发送返回 409 `session_busy`。
-  - Esc 或停止按钮中断这一轮（`interrupt` 控制请求）；Claude 以 `result` 结束这一轮，进程保留。
+  - Esc 或停止按钮中断这一轮（`interrupt` 控制请求）；Claude 以 `result` 结束这一轮，进程保留。有对话框（如 Settings）打开时，Esc 只关闭该对话框，不中断这一轮。
   - 模型：Default / Sonnet / Opus / Haiku；权限模式：Ask before edits（`default`）/ Accept edits / Plan mode / Bypass permissions。都作用于下一条消息：与运行中进程的启动参数不同时，服务端先停止进程再用新参数启动（比较的是启动时请求的模型别名 `launchModel`，不是 Claude 回报的完整模型名，所以同一模型不会每次重启）。
   - “Allow for session” 可能让 Claude 切换权限模式（如接受编辑），`system` 记录回报新模式后，界面和标签配置随之更新。
   - 工具显示：Bash 显示为命令和输出；Edit / MultiEdit / Write 显示为差异；其他工具显示名称、输入和结果。
