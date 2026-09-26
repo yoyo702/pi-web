@@ -849,7 +849,11 @@ export function AppShell() {
   useEffect(() => {
     if (!activeCwd || centerHydratedCwd !== activeCwd || !terminalsLoaded) return;
     const available = new Set(terminalList.map((terminal) => terminal.id));
-    dispatchCenter({ type: "update", update: (tab) => tab.kind === "terminal" && tab.terminalId && !available.has(tab.terminalId) && tab.status !== "ended" ? { ...tab, status: "ended" } : tab });
+    const gone = (tab: CenterTab) => tab.kind === "terminal" && Boolean(tab.terminalId) && !available.has(tab.terminalId!) && tab.status !== "ended";
+    // Dispatch only for a change: this effect runs whenever the tabs change, and
+    // a no-op dispatch still re-renders, which (while other tab updates are
+    // pending) yields a new tabs array and runs it again, without end.
+    if (workspaceTabs.some(gone)) dispatchCenter({ type: "update", update: (tab) => gone(tab) ? { ...tab, status: "ended" } as CenterTab : tab });
     if (terminalSplit) {
       const restoreTabs = getMissingSplitTerminalTabs(workspaceTabs.filter((tab): tab is TerminalTab => tab.kind === "terminal"), terminalSplit, available);
       const restoreKey = `${activeCwd}:${terminalSplit.primaryTabId}:${terminalSplit.secondaryTerminalId}`;
