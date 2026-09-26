@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Noto_Sans_Mono } from "next/font/google";
 import "./globals.css";
 import { AgentationDevTools } from "@/components/AgentationDevTools";
+import { AuthExpiryGuard } from "@/components/AuthExpiryGuard";
 import { MobileDevToolsGuard } from "@/components/MobileDevToolsGuard";
 import { MobileFullscreenPrompt } from "@/components/MobileFullscreenPrompt";
 
@@ -61,6 +62,7 @@ export default function RootLayout({
       </head>
       <body translate="no" className="notranslate" style={{ height: "100dvh", display: "flex", flexDirection: "column" }}>
         {children}
+        <AuthExpiryGuard />
         <MobileFullscreenPrompt />
         <MobileDevToolsGuard />
         <AgentationDevTools />

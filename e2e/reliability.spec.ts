@@ -81,3 +81,32 @@ test("a failed models.json load shows the error and never saves an empty config"
   await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
   expect(puts).toEqual([]);
 });
+
+test("shows a sign-in prompt when the login expires and clears it after signing in", async ({ page }) => {
+  let authenticated = true;
+  await page.route("**/api/auth/session", (route) => route.fulfill({ json: { authenticated, passwordRequired: true } }));
+  await page.goto("/");
+  await expect(page.getByText("Get Started")).toBeVisible();
+
+  authenticated = false;
+  await page.evaluate(() => fetch("/api/sessions?probe=1"));
+  // Next serves this route; force the 401 an expired cookie would get.
+  await page.route("**/api/sessions?probe=2", (route) => route.fulfill({ status: 401, json: { error: "authentication required" } }));
+  await page.evaluate(() => fetch("/api/sessions?probe=2"));
+  const notice = page.getByRole("alertdialog", { name: "Signed out" });
+  await expect(notice).toBeVisible();
+  await expect(notice.getByRole("link", { name: "Sign in" })).toHaveAttribute("target", "_blank");
+
+  authenticated = true;
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await expect(notice).toBeHidden();
+});
+
+test("a 401 while still signed in does not show the sign-in prompt", async ({ page }) => {
+  await page.route("**/api/auth/session", (route) => route.fulfill({ json: { authenticated: true, passwordRequired: true } }));
+  await page.route("**/api/skills/updates*", (route) => route.fulfill({ status: 401, json: { error: "GitHub token rejected" } }));
+  await page.goto("/");
+  await page.evaluate(() => fetch("/api/skills/updates?x=1"));
+  await page.waitForTimeout(300);
+  await expect(page.getByRole("alertdialog", { name: "Signed out" })).toHaveCount(0);
+});
