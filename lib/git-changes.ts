@@ -3,6 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
+import { DISCARD_STASH_MESSAGE } from "./git-discard";
 import { runGit, gitCommandTimeout, gitFailureMessage } from "./git-exec";
 import { buildPartialPatch, parsePatch, selectedAddedContent } from "./git-partial-patch";
 import { conflict, badRequest } from "./http-error";
@@ -606,31 +607,46 @@ export async function unstageFiles(cwd: string, paths: string[]): Promise<GitSta
   return getGitStatus(cwd);
 }
 
+async function hasHead(repositoryRoot: string): Promise<boolean> {
+  try {
+    await git(repositoryRoot, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Discard changes by stashing them (untracked files included), so a mistaken
+ * discard can be undone from the stash list. Git cannot stash unmerged paths,
+ * so conflicted files are reset to HEAD as before.
+ */
 export async function discardChanges(cwd: string, paths: string[]): Promise<GitStatusResponse> {
   const repositoryRoot = await requireRepositoryRoot(cwd);
   const rel = safeRepoRelPaths(repositoryRoot, paths);
   if (rel.length === 0) return getGitStatus(cwd);
 
   const entries = await readStatusEntries(repositoryRoot);
-  const tracked: string[] = [];
-  const untracked: string[] = [];
+  const conflicted: string[] = [];
+  const stashed: string[] = [];
   for (const relPath of rel) {
     const entry = entries.find((candidate) => candidate.path === relPath);
-    const kind = entry ? classifyGitStatus(entry).status : "modified";
-    if (kind === "untracked") untracked.push(relPath);
-    else tracked.push(relPath);
+    if (!entry) continue; // Already clean.
+    if (classifyGitStatus(entry).status === "conflict") conflicted.push(relPath);
+    else stashed.push(relPath);
   }
 
-  if (tracked.length > 0) {
-    // Reset both the index and the working tree back to HEAD for these files.
-    await git(repositoryRoot, ["restore", "--source=HEAD", "--staged", "--worktree", "--", ...tracked]);
+  if (stashed.length > 0 && !(await hasHead(repositoryRoot))) {
+    throw new Error("Discard needs at least one commit: Git cannot save changes before the first commit. Delete new files from the Explorer instead.");
   }
-  for (const relPath of untracked) {
-    try {
-      fs.rmSync(path.resolve(repositoryRoot, relPath), { force: true });
-    } catch {
-      // Ignore files that vanished between status and discard.
-    }
+  if (conflicted.length > 0) {
+    await git(repositoryRoot, ["restore", "--source=HEAD", "--staged", "--worktree", "--", ...conflicted]);
+  }
+  if (stashed.length > 0) {
+    await git(repositoryRoot, [
+      "stash", "push", "--include-untracked", "--message", DISCARD_STASH_MESSAGE,
+      "--", ...stashed.map((relPath) => `:(literal)${relPath}`),
+    ]);
   }
   return getGitStatus(cwd);
 }
