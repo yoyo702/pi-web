@@ -73,8 +73,8 @@ app/api/
 server/
   workspace-status.cjs process-wide bus for terminal/Codex run status; coalesces notify() calls and forwards snapshots to the running-status SSE
   notifications.cjs    activity notification log (~/.pi-web/notifications.json, PI_WEB_NOTIFICATIONS_FILE); each new entry is also sent by web-push.cjs
-  web-push.cjs         Web Push to subscribed devices: VAPID key + subscriptions in ~/.pi-web/push.json (0600, PI_WEB_PUSH_FILE; VAPID sub PI_WEB_PUSH_SUBJECT), RFC 8291/8292 with node:crypto + global fetch (no redirects); endpoints limited to the browser push services (no SSRF), drops devices on 404/410
-  web-push-api.cjs     POST /api/push {endpoint?} → {publicKey, subscribed}; /api/push/subscribe {subscription}; /api/push/unsubscribe {endpoint}; JSON only, cross-origin rejected even without a password
+  web-push.cjs         Web Push to subscribed devices: VAPID key + subscriptions in ~/.pi-web/push.json (0600, PI_WEB_PUSH_FILE; VAPID sub PI_WEB_PUSH_SUBJECT), RFC 8291/8292 with node:crypto + global fetch (no redirects); endpoints limited to the browser push services (no SSRF), drops devices on 404/410; each device keeps its own `events` (approval/failed/completed, default all) and only hears those
+  web-push-api.cjs     POST /api/push {endpoint?} → {publicKey, subscribed, events}; /api/push/subscribe {subscription, events?}; /api/push/events {endpoint, events}; /api/push/unsubscribe {endpoint}; JSON only, cross-origin rejected even without a password
 
 lib/
   access-links.ts      classifies and formats LAN/Tailscale addresses
@@ -109,7 +109,7 @@ lib/
 components/
   AppShell.tsx        layout + URL state + tab management
   ActivityCenter.tsx  "Workspace activity" panel opened by the rail bell and toolbar button (bottom sheet on phones)
-  PushNotificationsToggle.tsx "Notify this device" switch: permission, pushManager.subscribe, /api/push*
+  PushNotificationsToggle.tsx "Notify this device" switch: permission, pushManager.subscribe, /api/push*; per-device event checkboxes while on
   MobileAccessDialog.tsx Settings-embedded LAN/Tailscale URL picker, copy action, and QR code
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper

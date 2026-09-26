@@ -171,11 +171,12 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - 铃铛角标为未读数；有等待审批的任务时角标为审批颜色，鼠标悬停显示未读数和等待数。工具栏按钮显示所有项目中运行中（含等待）的条目数、审批圆点和未读数。
   - “Recent” 列表：未读加粗，显示项目、类型、事件、时间，失败时附原因；点击后标为已读，并切换到所在项目打开对应的聊天、会话或终端（项目未打开时只标已读；终端记录只在内存中，服务端重启或 “Clear ended” 之后点击终端通知只切换到所在项目）。没有通知时显示 “No notifications in the last 7 days”。
 - Agents 面板的任务完成提示（右下角 toast，8 秒自动消失）由新到的通知触发：本项目的 “Task: <脚本>” 终端有新的未读通知（完成或失败）时显示，内容附终端最后几行输出；点击 toast 打开终端并把该通知标为已读。为此，项目任务终端（标题以 “Task: ” 开头，与 Agents 面板的任务分组规则相同）正常退出也记为完成（普通 shell 正常退出仍不记录）。用户点 Stop 停止的任务不记录，所以也不再提示。页面打开前已有的通知不提示。
-- 系统推送（Web Push，`server/web-push.cjs`）：每条新通知同时发到开启了 “Notify this device” 的设备，锁屏的手机也能收到。
+- 系统推送（Web Push，`server/web-push.cjs`）：每条新通知同时发到开启了 “Notify this device” 且选了该事件的设备，锁屏的手机也能收到。
+  - 按设备选择事件：开关打开后下面有 “Notify for” 三个勾选项：Needs input（`approval`）、Failed（`failed`）、Finished（`completed`），默认全选。至少保留一项（剩最后一项时它不能取消，想全部停止就关掉开关）。选择存在该设备的订阅里（`events`，按 approval、failed、completed 顺序）；浏览器重新上报同一订阅时保留原选择；关掉开关再打开会恢复全选。旧版本保存的订阅没有 `events`，按全选处理。只影响系统推送，活动中心和页面内提示仍显示所有事件。
   - 服务端自己实现加密（RFC 8291 aes128gcm）和 VAPID 签名（RFC 8292），只用 `node:crypto` 和 `fetch`，不加依赖；请求走全局 fetch，遵循 `HTTP(S)_PROXY`。推送服务（Google、Apple、Mozilla）只转发密文。
   - 存储：VAPID 密钥和设备订阅在 `~/.pi-web/push.json`（权限 0600，`PI_WEB_PUSH_FILE` 改路径；测试和 e2e 用临时文件）。第一次有设备查询或订阅时才生成密钥；没有这个文件时不发送。最多 20 台设备，超出时丢弃最早的。只接受浏览器推送服务的 https 地址（FCM `fcm.googleapis.com`、Apple `*.push.apple.com`、Mozilla `*.push.services.mozilla.com`、Windows `*.notify.windows.com`，不带端口），公钥须是 P-256 曲线上的点；发送时不跟随重定向。服务端每条通知都会请求这些地址，这样客户端无法让服务端去请求内网或其他地址。推送服务返回 404/410（设备已失效）时删除该设备；其他失败只记日志。VAPID 的 `sub` 默认是项目地址，可用 `PI_WEB_PUSH_SUBJECT` 改（如 `mailto:you@example.com`）。
   - 消息：标题如 “Terminal failed”、“Codex needs your input”，正文为条目名 · 项目（失败时附原因）；`tag` 和 `Topic` 按聊天、会话或终端区分，同一目标的新消息替换旧消息。TTL 24 小时；完成为普通优先级，失败和等待审批为高优先级。
-  - 接口（都是 POST，请求体须为 `application/json`，否则 415）：`/api/push` `{endpoint?}` → `{publicKey, subscribed}`（查询用 POST，订阅地址不进日志）；`/api/push/subscribe` `{subscription}`（`PushSubscription.toJSON()`）→ 204；`/api/push/unsubscribe` `{endpoint}` → 204。格式错误 400，其他方法 405。设置了密码时需登录；不论是否设置密码，跨站请求都返回 403（否则没有密码时，任何网站都能替用户订阅一个自己的设备，收到所有通知）。
+  - 接口（都是 POST，请求体须为 `application/json`，否则 415）：`/api/push` `{endpoint?}` → `{publicKey, subscribed, events}`（查询用 POST，订阅地址不进日志；未订阅时 `events` 为全部）；`/api/push/subscribe` `{subscription, events?}`（`PushSubscription.toJSON()`）→ 204；`/api/push/events` `{endpoint, events}` → 204，设备未订阅时 404，`events` 为空或含未知事件时 400；`/api/push/unsubscribe` `{endpoint}` → 204。格式错误 400，其他方法 405。设置了密码时需登录；不论是否设置密码，跨站请求都返回 403（否则没有密码时，任何网站都能替用户订阅一个自己的设备，收到所有通知）。
   - 点击系统通知（`public/sw.js`）：
     - 有已打开的 TianForge 窗口时，优先选当前聚焦的、其次可见的窗口，聚焦它并发消息给页面；该窗口停在其他页面（如登录页）时改为在其中加载 `/?notification=<id>`（不能加载时新开窗口）。没有窗口时新开 `/?notification=<id>`。
     - 窗口还在加载、没收到消息时：Service Worker 记住这条（30 秒内），页面加载完成后发 `pi-web:ready`，再发一次；页面收到后回 `pi-web:notification-received`。
@@ -186,7 +187,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
     - iPhone / iPad：需 iOS 16.4 以上，并把 TianForge 添加到主屏幕、从主屏幕打开。
     - 浏览器已拒绝通知权限：提示到站点设置里允许。
   - 退出登录不会取消订阅（目前没有退出登录的界面）；推送内容只含标题、项目名和失败原因。
-- 暂未实现：按设备选择推送哪些事件；正在查看的标签不会自动标为已读。
+- 暂未实现：正在查看的标签不会自动标为已读。
 
 ## 状态模型
 
@@ -228,7 +229,6 @@ Codex Chat 的审批来自 app-server 协议，Claude Chat 的审批来自 strea
 
 ## 后续计划
 
-- 系统推送按设备选择事件类型（如只推送等待审批和失败）。
 - 为 Terminal CLI 增加结构化“等待输入”状态。
 - 任务模板、批量启动和跨项目任务队列。
 - 更细粒度的资源使用和运行时间统计。

@@ -106,6 +106,48 @@ test("each new notification goes to every subscribed device, encrypted for it", 
   assert.equal(decrypt(requests[1].body, laptop).id, entry.id);
 });
 
+test("each device only hears the events it chose; a refresh keeps the choice", async (t) => {
+  const { requests, saved } = usePush(t);
+  const phone = device();
+  const laptop = device();
+  push.subscribe(phone.subscription, { events: ["failed", "approval", "approval"] });
+  push.subscribe(laptop.subscription);
+  assert.deepEqual(push.eventsFor(phone.subscription.endpoint), ["approval", "failed"]);
+  assert.deepEqual(push.eventsFor(laptop.subscription.endpoint), ["approval", "failed", "completed"]);
+  assert.equal(push.eventsFor("https://fcm.googleapis.com/fcm/send/unknown"), null);
+
+  await push.send({ id: "n1", kind: "pi", event: "completed", targetId: "s", cwd: "/a", title: "Done" });
+  assert.deepEqual(requests.map((request) => request.url), [laptop.subscription.endpoint]);
+  requests.length = 0;
+  await push.send({ id: "n2", kind: "terminal", event: "failed", targetId: "t", cwd: "/a", title: "Build" });
+  assert.deepEqual(requests.map((request) => request.url), [phone.subscription.endpoint, laptop.subscription.endpoint]);
+
+  assert.equal(push.setEvents(laptop.subscription.endpoint, ["approval"]), true);
+  assert.equal(push.setEvents("https://fcm.googleapis.com/fcm/send/unknown", ["approval"]), false);
+  for (const events of [[], ["finished"], "failed", null]) assert.throws(() => push.setEvents(phone.subscription.endpoint, events), { code: "invalid_request" });
+  assert.throws(() => push.subscribe(device().subscription, { events: [] }), { code: "invalid_request" });
+  // The browser re-sends its subscription when the switch is turned on again.
+  push.subscribe(phone.subscription);
+  push._resetForTests();
+  assert.deepEqual(push.eventsFor(phone.subscription.endpoint), ["approval", "failed"]);
+  assert.deepEqual(saved().subscriptions.map((entry) => entry.events), [["approval"], ["approval", "failed"]]);
+});
+
+test("devices saved before the event choice hear every event", async (t) => {
+  const { file, requests } = usePush(t);
+  const phone = device();
+  const tablet = device();
+  push.publicKey();
+  const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  const keys = (entry) => ({ endpoint: entry.subscription.endpoint, keys: entry.subscription.keys });
+  fs.writeFileSync(file, JSON.stringify({ ...saved, subscriptions: [keys(phone), { ...keys(tablet), events: ["nope"] }] }));
+  push._resetForTests({ fetch: async (url, init) => { requests.push({ url, ...init }); return new Response(null, { status: 201 }); } });
+  assert.deepEqual(push.eventsFor(phone.subscription.endpoint), ["approval", "failed", "completed"]);
+  assert.deepEqual(push.eventsFor(tablet.subscription.endpoint), ["approval", "failed", "completed"]);
+  await push.send({ id: "n1", kind: "pi", event: "completed", targetId: "s", cwd: "/a", title: "Done" });
+  assert.equal(requests.length, 2);
+});
+
 test("a device the push service reports gone is dropped; other failures are only logged", async (t) => {
   const { requests, service, saved } = usePush(t, { status: 410 });
   const phone = device();
@@ -167,11 +209,19 @@ test("the push API reports the key and this device's state, and subscribes and u
   assert.equal((await call("/api/push", {}, "GET")).status, 405);
   // A form post from another site cannot subscribe (cross-origin requests are also rejected by the server).
   assert.equal((await call("/api/push/subscribe", { subscription: phone.subscription }, "POST", "text/plain")).status, 415);
-  assert.deepEqual(await call("/api/push", { endpoint: phone.subscription.endpoint }), { status: 200, body: { publicKey: push.publicKey(), subscribed: false } });
+  assert.deepEqual(await call("/api/push", { endpoint: phone.subscription.endpoint }), { status: 200, body: { publicKey: push.publicKey(), subscribed: false, events: ["approval", "failed", "completed"] } });
   assert.equal((await call("/api/push/subscribe", { subscription: { endpoint: "nope" } })).status, 400);
   assert.equal((await call("/api/push/subscribe", "{")).status, 400);
+  assert.equal((await call("/api/push/subscribe", { subscription: phone.subscription, events: [] })).status, 400);
+  assert.equal((await call("/api/push/subscribe", { subscription: phone.subscription, events: ["failed"] })).status, 204);
+  assert.deepEqual(push.eventsFor(phone.subscription.endpoint), ["failed"]);
   assert.equal((await call("/api/push/subscribe", { subscription: phone.subscription })).status, 204);
   assert.equal((await call("/api/push", { endpoint: phone.subscription.endpoint })).body.subscribed, true);
+  assert.equal((await call("/api/push/events", { endpoint: phone.subscription.endpoint, events: ["completed", "failed"] })).status, 204);
+  assert.deepEqual((await call("/api/push", { endpoint: phone.subscription.endpoint })).body, { publicKey: push.publicKey(), subscribed: true, events: ["failed", "completed"] });
+  assert.equal((await call("/api/push/events", { endpoint: phone.subscription.endpoint, events: [] })).status, 400);
+  assert.equal((await call("/api/push/events", { endpoint: phone.subscription.endpoint, events: ["finished"] })).status, 400);
+  assert.equal((await call("/api/push/events", { endpoint: "https://fcm.googleapis.com/fcm/send/unknown", events: ["failed"] })).status, 404);
   assert.equal((await call("/api/push/unsubscribe", {})).status, 400);
   assert.equal((await call("/api/push/unsubscribe", { endpoint: phone.subscription.endpoint })).status, 204);
   assert.equal(push.isSubscribed(phone.subscription.endpoint), false);

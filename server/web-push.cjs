@@ -11,6 +11,9 @@
  * Mozilla) only relays ciphertext. Requests go through the global fetch, so
  * they follow HTTP(S)_PROXY like model requests do.
  *
+ * Each device picks which events it hears (`events`: approval, failed,
+ * completed; all by default), so a phone can stay quiet about finished runs.
+ *
  * The VAPID key and the subscribed devices are kept in `~/.pi-web/push.json`
  * (0600; `PI_WEB_PUSH_FILE` overrides it). A device the push service reports
  * gone (404/410) is dropped. State lives on `global` for the same reason as
@@ -27,6 +30,7 @@ const TTL_SECONDS = 24 * 60 * 60;
 const SEND_TIMEOUT_MS = 15_000;
 // Apple refuses tokens whose `sub` is not a mailto: or https: URL.
 const DEFAULT_SUBJECT = "https://github.com/agegr/pi-web";
+const EVENTS = Object.freeze(["approval", "failed", "completed"]);
 
 const state = global.__piWebPush || { data: null, fetch: null };
 global.__piWebPush = state;
@@ -41,6 +45,16 @@ const fromB64url = (value) => Buffer.from(String(value), "base64url");
 function isSubscription(value) {
   return value && typeof value === "object" && typeof value.endpoint === "string" && typeof value.keys?.p256dh === "string" && typeof value.keys?.auth === "string";
 }
+
+// A device's event choice: known events, at least one, in EVENTS order.
+function validEvents(value) {
+  return Array.isArray(value) && value.length > 0 && value.every((event) => EVENTS.includes(event));
+}
+function eventList(value) {
+  if (!validEvents(value)) throw Object.assign(new Error("events must list approval, failed or completed"), { code: "invalid_request" });
+  return EVENTS.filter((event) => value.includes(event));
+}
+const deviceEvents = (subscription) => validEvents(subscription.events) ? eventList(subscription.events) : [...EVENTS];
 
 function save() {
   const target = file();
@@ -83,6 +97,22 @@ function isSubscribed(endpoint) {
   return load().subscriptions.some((subscription) => subscription.endpoint === endpoint);
 }
 
+/** The events a subscribed device hears, or null for an unknown device. */
+function eventsFor(endpoint) {
+  const subscription = load().subscriptions.find((entry) => entry.endpoint === endpoint);
+  return subscription ? deviceEvents(subscription) : null;
+}
+
+/** Changes which events a device hears; false for an unknown device. */
+function setEvents(endpoint, events) {
+  const list = eventList(events);
+  const subscription = load().subscriptions.find((entry) => entry.endpoint === endpoint);
+  if (!subscription) return false;
+  subscription.events = list;
+  save();
+  return true;
+}
+
 // The push services browsers use (Chrome/Edge/Opera: FCM, Edge on Windows:
 // WNS, Firefox: Mozilla, Safari: Apple). The server POSTs to the endpoint on
 // every notification, so other hosts (including this network's) are refused.
@@ -101,15 +131,17 @@ function validPublicKey(p256dh) {
   try { const ecdh = crypto.createECDH("prime256v1"); ecdh.generateKeys(); ecdh.computeSecret(p256dh); return true; } catch { return false; }
 }
 
-/** Adds (or refreshes) a device; the oldest is dropped past 20. */
-function subscribe(subscription, { userAgent = "" } = {}) {
+/** Adds (or refreshes) a device; the oldest is dropped past 20. A refresh keeps the device's events unless `events` is given. */
+function subscribe(subscription, { userAgent = "", events } = {}) {
   if (!isSubscription(subscription) || !validEndpoint(subscription.endpoint)) throw Object.assign(new Error("invalid push subscription"), { code: "invalid_request" });
   const p256dh = fromB64url(subscription.keys.p256dh);
   const auth = fromB64url(subscription.keys.auth);
   if (!validPublicKey(p256dh) || auth.length !== 16) throw Object.assign(new Error("invalid push subscription keys"), { code: "invalid_request" });
   const data = load();
+  const previous = data.subscriptions.find((entry) => entry.endpoint === subscription.endpoint);
+  const chosen = events === undefined ? (previous ? deviceEvents(previous) : [...EVENTS]) : eventList(events);
   data.subscriptions = data.subscriptions.filter((entry) => entry.endpoint !== subscription.endpoint);
-  data.subscriptions.push({ endpoint: subscription.endpoint, keys: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth }, userAgent: String(userAgent).slice(0, 200), createdAt: Date.now() });
+  data.subscriptions.push({ endpoint: subscription.endpoint, keys: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth }, events: chosen, userAgent: String(userAgent).slice(0, 200), createdAt: Date.now() });
   data.subscriptions = data.subscriptions.slice(-MAX_SUBSCRIPTIONS);
   save();
 }
@@ -204,10 +236,10 @@ async function deliver(subscription, entry) {
   }
 }
 
-/** Sends a notification entry to every subscribed device; never throws. */
+/** Sends a notification entry to every device that chose its event; never throws. */
 function send(entry) {
   let subscriptions;
-  try { subscriptions = [...load({ create: false })?.subscriptions ?? []]; } catch (error) {
+  try { subscriptions = (load({ create: false })?.subscriptions ?? []).filter((subscription) => deviceEvents(subscription).includes(entry.event)); } catch (error) {
     console.warn(`[pi-web] Push unavailable: ${error.message}`);
     return Promise.resolve();
   }
@@ -221,4 +253,4 @@ function _resetForTests({ fetch: fetchImpl = null } = {}) {
   state.fetch = fetchImpl;
 }
 
-module.exports = { publicKey, isSubscribed, subscribe, unsubscribe, send, encrypt, vapidAuthorization, message, MAX_SUBSCRIPTIONS, _resetForTests };
+module.exports = { EVENTS, publicKey, isSubscribed, eventsFor, setEvents, subscribe, unsubscribe, send, encrypt, vapidAuthorization, message, MAX_SUBSCRIPTIONS, _resetForTests };

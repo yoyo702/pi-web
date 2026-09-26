@@ -1039,14 +1039,16 @@ test("turns system notifications on and off for this device", async ({ page, req
   });
   await mockActivityWorkspaces(page);
   const publicKey = Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]).toString("base64url");
-  const subscribed = new Set<string>();
+  const subscribed = new Map<string, string[]>();
   const pushRequests: Array<{ path: string; body: unknown }> = [];
   await page.route((url) => url.pathname === "/api/push" || url.pathname.startsWith("/api/push/"), async (route) => {
     const path = new URL(route.request().url()).pathname;
-    const body = route.request().postDataJSON() as { endpoint?: string; subscription?: { endpoint: string } };
+    const body = route.request().postDataJSON() as { endpoint?: string; events?: string[]; subscription?: { endpoint: string } };
     pushRequests.push({ path, body });
-    if (path === "/api/push") return route.fulfill({ json: { publicKey, subscribed: Boolean(body.endpoint && subscribed.has(body.endpoint)) } });
-    if (path === "/api/push/subscribe") subscribed.add(body.subscription!.endpoint);
+    const events = body.endpoint ? subscribed.get(body.endpoint) : undefined;
+    if (path === "/api/push") return route.fulfill({ json: { publicKey, subscribed: Boolean(events), events: events ?? ["approval", "failed", "completed"] } });
+    if (path === "/api/push/subscribe") subscribed.set(body.subscription!.endpoint, ["approval", "failed", "completed"]);
+    if (path === "/api/push/events") subscribed.set(body.endpoint!, body.events!);
     if (path === "/api/push/unsubscribe") subscribed.delete(body.endpoint!);
     return route.fulfill({ status: 204 });
   });
@@ -1065,8 +1067,30 @@ test("turns system notifications on and off for this device", async ({ page, req
     subscription: { endpoint: "https://push.example.test/device-1", expirationTime: null, keys: { p256dh: "fake-p256dh", auth: "fake-auth" } },
   });
 
+  // This device picks its events; the last one left cannot be unchecked.
+  const events = push.getByRole("group", { name: "Notify for" });
+  const [needsInput, failed, finished] = ["Needs input", "Failed", "Finished"].map((name) => events.getByRole("checkbox", { name }));
+  for (const box of [needsInput, failed, finished]) await expect(box).toBeChecked();
+  await finished.click();
+  await expect(finished).not.toBeChecked();
+  await failed.click();
+  await expect(failed).not.toBeChecked();
+  await expect(needsInput).toBeChecked();
+  await expect(needsInput).toHaveAttribute("aria-disabled", "true");
+  await expect(needsInput).toHaveAccessibleDescription("Turn the switch off to stop all notifications.");
+  // Still reachable from the keyboard; Space changes nothing.
+  await needsInput.focus();
+  await page.keyboard.press("Space");
+  await expect(needsInput).toBeChecked();
+  await expect(needsInput).toBeFocused();
+  expect(pushRequests.filter((request) => request.path === "/api/push/events").map((request) => request.body)).toEqual([
+    { endpoint: "https://push.example.test/device-1", events: ["approval", "failed"] },
+    { endpoint: "https://push.example.test/device-1", events: ["approval"] },
+  ]);
+
   await toggle.click();
   await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await expect(events).toHaveCount(0);
   expect(pushRequests.find((request) => request.path === "/api/push/unsubscribe")?.body).toEqual({ endpoint: "https://push.example.test/device-1" });
   expect(await page.evaluate(() => (window as unknown as { __pushCalls: string[] }).__pushCalls)).toEqual(["permission", "subscribe", "unsubscribe"]);
 });
