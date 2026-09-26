@@ -131,3 +131,111 @@ test("a failed steer keeps the message and shows why", async ({ page }) => {
   await expect(page.getByText("Not sent: agent is compacting")).toBeHidden();
   expect(agentPosts.filter((body) => body.type === "steer")).toHaveLength(2);
 });
+
+/** Mocks used by e2e/app-shell.spec.ts's Codex chat test to drive a running thread. */
+async function mockStatusStream(page: Page, frames: Array<Record<string, unknown>>) {
+  await page.route("**/api/agent/running/events", (route) => route.fulfill({
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" },
+    body: frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""),
+  }));
+}
+
+// Codex and Claude chat event streams are driven from the test through window.__codexStreams.
+async function fakeCodexStreams(page: Page) {
+  await page.addInitScript(() => {
+    const RealEventSource = window.EventSource;
+    class FakeEventSource extends EventTarget {
+      static CONNECTING = 0; static OPEN = 1; static CLOSED = 2;
+      readyState = 0; url: string;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      constructor(url: string) {
+        super();
+        this.url = url;
+        ((window as unknown as { __codexStreams: FakeEventSource[] }).__codexStreams ??= []).push(this);
+        setTimeout(() => { this.readyState = 1; this.onopen?.(new Event("open")); }, 0);
+      }
+      emit(data: unknown) { this.onmessage?.(new MessageEvent("message", { data: JSON.stringify(data) })); }
+      close() { this.readyState = 2; }
+      fail() { this.readyState = 2; this.onerror?.(new Event("error")); }
+    }
+    window.EventSource = function (url: string | URL, init?: EventSourceInit) {
+      return /\/api\/(codex|claude)\/chat\//.test(String(url)) ? new FakeEventSource(String(url)) : new RealEventSource(url, init);
+    } as unknown as typeof EventSource;
+    Object.assign(window.EventSource, { CONNECTING: 0, OPEN: 1, CLOSED: 2 });
+  });
+}
+async function emitCodexEvent(page: Page, event: Record<string, unknown>) {
+  await page.evaluate((data) => {
+    const streams = (window as unknown as { __codexStreams: Array<{ emit(data: unknown): void }> }).__codexStreams;
+    streams.at(-1)?.emit(data);
+  }, event);
+}
+
+test("a queued Codex chat message survives a failed send and retries", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const id = "66666666-6666-6666-6666-666666666666";
+  await fakeCodexStreams(page);
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
+    id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
+    created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
+  }], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
+  await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: { cwd: "/tmp/pi-web-e2e", terminals: [], stats: null } }));
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals: [], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
+  await page.route("**/api/project-scripts?*", async (route) => route.fulfill({ json: { scripts: [], runner: "npm" } }));
+  await page.route("**/api/codex/models?*", async (route) => route.fulfill({ json: { result: { data: [] } } }));
+  await page.route("**/api/codex/sessions?*", async (route) => route.fulfill({ json: { sessions: [{
+    id, name: "Queue test", cwd: "/tmp/pi-web-e2e", updatedAt: "2026-08-03T00:00:00.000Z", lastUserMessage: "hi", archived: false, runtime: null,
+  }], nextCursor: null } }));
+  const sent: Array<Record<string, unknown>> = [];
+  let failNextSend = false;
+  await page.route(`**/api/codex/chat/${id}*`, async (route) => {
+    if (route.request().method() !== "POST") return route.fulfill({ json: { thread: { thread: { id, turns: [] } }, history: [], events: [] } });
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    sent.push(body);
+    if (failNextSend) { failNextSend = false; return route.fulfill({ status: 500, json: { error: "internal error" } }); }
+    return route.fulfill({ status: 202, json: { turn: { turn: { id: "turn-2" } } } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.locator("button[aria-expanded]").filter({ hasText: "Codex" }).last().click();
+  const manage = page.getByRole("button", { name: "Manage Queue test" });
+  await manage.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(300);
+  await manage.click();
+  await page.getByRole("menuitem", { name: "Open in Chat…" }).click();
+  await page.getByRole("button", { name: "Resume in Chat" }).click();
+  await expect(page.getByText("Codex Chat · Queue test")).toBeVisible();
+  const chat = page.locator("section").filter({ hasText: "Codex Chat · Queue test" });
+  const composer = chat.getByPlaceholder("Message… Type / for commands", { exact: true });
+  await expect(composer).toBeVisible();
+
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __codexStreams?: unknown[] }).__codexStreams?.length ?? 0)).toBeGreaterThan(0);
+  await emitCodexEvent(page, { method: "turn/started", params: { turn: { id: "turn-1" } }, piSeq: 1, piRuntime: "run1" });
+
+  // 1. Queue a message while the turn runs.
+  const running = chat.getByPlaceholder("Add to this turn, or queue for the next…");
+  await running.fill("second task");
+  await chat.getByRole("button", { name: "Queue" }).click();
+  await expect(chat.getByText("1 queued")).toBeVisible();
+
+  // 2. The turn ends; the queued send fails.
+  failNextSend = true;
+  await emitCodexEvent(page, { method: "turn/completed", params: { turn: { id: "turn-1", status: "completed", error: null } }, piSeq: 2, piRuntime: "run1" });
+  await expect(chat.getByRole("alert").filter({ hasText: "sending failed" })).toBeVisible();
+  await expect(chat.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect.poll(() => sent.length).toBe(1);
+
+  // 3. Retry with a succeeding endpoint clears the queue.
+  await chat.getByRole("button", { name: "Retry" }).click();
+  await expect(chat.locator(".codex-aui-queue")).toHaveCount(0);
+  await expect.poll(() => sent.length).toBe(2);
+  expect(sent.map((body) => body.text)).toEqual(["second task", "second task"]);
+});
