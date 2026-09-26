@@ -65,3 +65,19 @@ test("Esc closes Settings without stopping the running agent", async ({ page }, 
   await page.waitForTimeout(300);
   expect(agentPosts.filter((body) => body.type === "abort")).toEqual([]);
 });
+
+test("a failed models.json load shows the error and never saves an empty config", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "the project rail Settings button is desktop-only");
+  const puts: string[] = [];
+  await page.route("**/api/models-config", (route) => {
+    if (route.request().method() === "PUT") { puts.push(route.request().postData() ?? ""); return route.fulfill({ json: { success: true } }); }
+    return route.fulfill({ status: 500, json: { error: "/home/u/.pi/agent/models.json is not valid JSON (Unexpected end of JSON input). Fix or remove it, then reload." } });
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "Settings" }).first().click();
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  await dialog.getByRole("button", { name: "Models" }).click();
+  await expect(dialog.getByRole("alert")).toContainText("is not valid JSON");
+  await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
+  expect(puts).toEqual([]);
+});
