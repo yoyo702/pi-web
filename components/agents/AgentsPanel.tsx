@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { TerminalPermissionMode, TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
+import type { ClaudePermissionMode, CodexPermissionMode, TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
 import { terminalIsBusy } from "@/lib/rail-activity";
 import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
 import { useWorkspaceStatus } from "@/hooks/useWorkspaceStatus";
@@ -13,6 +13,7 @@ import { markNotificationsRead } from "@/lib/activity-notifications";
 import type { ActivityNotification } from "@/lib/workspace-status-store";
 import type { ClaudeChatTarget, ClaudeForkTarget, CodexChatTarget } from "@/components/workspace/WorkspaceActions";
 import { permissionLabel, permissionOptions, TASK_TEMPLATES_CHANGED_EVENT, TaskTemplateDialog, type TaskTemplate } from "./TaskTemplateDialog";
+import { useDialogEscape } from "./use-dialog-escape";
 
 /** Structurally identical to `CodexChatTarget`; kept as a distinct export so AgentsPanel stays usable outside the workspace-actions context. */
 export type CodexSessionTarget = CodexChatTarget;
@@ -71,7 +72,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [showArchived, setShowArchived] = useState(false);
   const [claudeQuery, setClaudeQuery] = useState("");
   const [debouncedClaudeQuery, setDebouncedClaudeQuery] = useState("");
-  const [claudeLaunch, setClaudeLaunch] = useState<{ session: ClaudeSession; mode: "resume" | "fork"; permission: TerminalPermissionMode } | null>(null);
+  const [claudeLaunch, setClaudeLaunch] = useState<{ session: ClaudeSession; mode: "resume" | "fork"; permission: ClaudePermissionMode } | null>(null);
   const [claudeError, setClaudeError] = useState<string | null>(null);
   const { terminals, stats: terminalStats, update: setTerminals } = useWorkspaceTerminals(cwd, refreshKey);
   const status = useWorkspaceStatus();
@@ -88,7 +89,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [busyId, setBusyId] = useState<string | null>(null);
   const [launchTarget, setLaunchTarget] = useState<{ session: CodexSession; surface: "chat" | "terminal"; mode: "resume" | "fork" } | null>(null);
   const [launchModel, setLaunchModel] = useState("");
-  const [launchPermission, setLaunchPermission] = useState<TerminalPermissionMode>("confirm");
+  const [launchPermission, setLaunchPermission] = useState<CodexPermissionMode>("confirm");
   const [launchReasoningEffort, setLaunchReasoningEffort] = useState("");
   const [launchServiceTier, setLaunchServiceTier] = useState("");
   const [launchWebSearch, setLaunchWebSearch] = useState(false);
@@ -406,7 +407,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
           sessionId = data.result?.thread?.id ?? data.result?.threadId ?? data.result?.id ?? "";
           if (!response.ok || !sessionId) throw new Error(data.error || "Codex did not return a forked session");
         }
-        const approvalPolicy = launchPermission === "on-request" || launchPermission === "never" ? launchPermission : launchPermission === "bypass" ? "never" : "untrusted";
+        const approvalPolicy = launchPermission === "confirm" ? "untrusted" : launchPermission === "bypass" ? "never" : launchPermission;
         onOpenCodexSession?.({ sessionId, sessionName: mode === "fork" ? `${session.name} (fork)` : session.name, cwd: session.cwd || cwd, model: launchModel || undefined, reasoningEffort: launchReasoningEffort || undefined, serviceTier: launchServiceTier || undefined, approvalPolicy });
       } else {
         const response = await fetch("/api/terminals", {
@@ -845,13 +846,7 @@ function AgentActionDialog({ action, renameValue, busy, onRenameChange, onCancel
   useDialogEscape(onCancel, busy);
   const rename = action.kind === "session" && action.action === "rename";
   const destructive = action.kind === "session" && action.action === "delete" || action.kind === "claude-session" || action.kind === "terminal" || action.kind === "clear" || action.kind === "template";
-  const title = rename ? "Rename Codex session" : action.kind === "template" ? action.action === "run" ? `Run “${action.template.name}” with dangerous bypass` : "Delete template" : action.kind === "claude-session" ? "Delete Claude session" : action.kind === "session" ? `${action.action === "unarchive" ? "Restore" : action.action[0].toUpperCase() + action.action.slice(1)} Codex session` : action.kind === "terminal" ? `${action.action === "stop" ? "Stop" : "Remove"} ${action.terminal.provider} terminal` : `Clear ended ${action.provider ? `${action.provider} ` : ""}terminals`;
-  const description = action.kind === "template" ? action.action === "run" ? `${action.template.provider === "codex" ? "Codex skips all approval and sandboxing" : "Claude skips its permission confirmations"} in this terminal, so it may edit files and run commands without asking.` : `“${action.template.name}” will be deleted. Terminals it started keep running.`
-    : action.kind === "claude-session" ? `“${action.session.title}” and its sub-agent transcripts will be permanently deleted. This cannot be undone.`
-    : action.kind === "session"
-    ? action.action === "delete" ? `“${action.session.name}” will be permanently deleted. This cannot be undone.` : action.action === "archive" ? `“${action.session.name}” will move out of the active session list.` : action.action === "unarchive" ? `“${action.session.name}” will return to the active session list.` : "Choose a concise name that identifies this session."
-    : action.kind === "terminal" ? action.action === "stop" ? "The running process will be interrupted. Its session history will remain available." : "This removes the ended terminal record from the workspace."
-    : `${action.count} ended terminal record${action.count === 1 ? "" : "s"} will be removed from this workspace.`;
+  const { title, description, confirmLabel } = actionDialogText(action);
   const confirmDisabled = busy || rename && (!renameValue.trim() || renameValue.trim() === action.session.name);
   return <div role="dialog" aria-modal="true" aria-label={title} style={dialogOverlayStyle} onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
     <section style={{ ...dialogStyle, width: "min(100%, 400px)" }}>
@@ -860,17 +855,41 @@ function AgentActionDialog({ action, renameValue, busy, onRenameChange, onCancel
       {rename && <input autoFocus value={renameValue} maxLength={120} onChange={(event) => onRenameChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !confirmDisabled) onConfirm(); }} style={{ ...inputStyle, marginTop: 14 }} />}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
         <button type="button" disabled={busy} onClick={onCancel} style={dialogButtonStyle}>Cancel</button>
-        <button type="button" disabled={confirmDisabled} onClick={onConfirm} style={{ ...dialogButtonStyle, borderColor: destructive ? "rgb(239 68 68 / 45%)" : "var(--accent)", background: destructive ? "rgb(239 68 68 / 10%)" : "var(--accent)", color: destructive ? "#ef4444" : "white", opacity: confirmDisabled ? .5 : 1 }}>{busy ? "Working…" : rename ? "Rename" : action.kind === "session" && action.action === "unarchive" ? "Restore" : action.kind === "session" && action.action === "archive" ? "Archive" : action.kind === "terminal" && action.action === "stop" ? "Stop terminal" : action.kind === "template" ? action.action === "run" ? "Run anyway" : "Delete" : "Remove"}</button>
+        <button type="button" disabled={confirmDisabled} onClick={onConfirm} style={{ ...dialogButtonStyle, borderColor: destructive ? "rgb(239 68 68 / 45%)" : "var(--accent)", background: destructive ? "rgb(239 68 68 / 10%)" : "var(--accent)", color: destructive ? "#ef4444" : "white", opacity: confirmDisabled ? .5 : 1 }}>{busy ? "Working…" : confirmLabel}</button>
       </div>
     </section>
   </div>;
 }
 
+function actionDialogText(action: PendingAction): { title: string; description: string; confirmLabel: string } {
+  switch (action.kind) {
+    case "session": {
+      const name = action.session.name;
+      if (action.action === "rename") return { title: "Rename Codex session", description: "Choose a concise name that identifies this session.", confirmLabel: "Rename" };
+      if (action.action === "archive") return { title: "Archive Codex session", description: `“${name}” will move out of the active session list.`, confirmLabel: "Archive" };
+      if (action.action === "unarchive") return { title: "Restore Codex session", description: `“${name}” will return to the active session list.`, confirmLabel: "Restore" };
+      return { title: "Delete Codex session", description: `“${name}” will be permanently deleted. This cannot be undone.`, confirmLabel: "Remove" };
+    }
+    case "claude-session":
+      return { title: "Delete Claude session", description: `“${action.session.title}” and its sub-agent transcripts will be permanently deleted. This cannot be undone.`, confirmLabel: "Remove" };
+    case "terminal":
+      return action.action === "stop"
+        ? { title: `Stop ${action.terminal.provider} terminal`, description: "The running process will be interrupted. Its session history will remain available.", confirmLabel: "Stop terminal" }
+        : { title: `Remove ${action.terminal.provider} terminal`, description: "This removes the ended terminal record from the workspace.", confirmLabel: "Remove" };
+    case "template":
+      return action.action === "run"
+        ? { title: `Run “${action.template.name}” with dangerous bypass`, description: `${action.template.provider === "codex" ? "Codex skips all approval and sandboxing" : "Claude skips its permission confirmations"} in this terminal, so it may edit files and run commands without asking.`, confirmLabel: "Run anyway" }
+        : { title: "Delete template", description: `“${action.template.name}” will be deleted. Terminals it started keep running.`, confirmLabel: "Delete" };
+    case "clear":
+      return { title: `Clear ended ${action.provider ? `${action.provider} ` : ""}terminals`, description: `${action.count} ended terminal record${action.count === 1 ? "" : "s"} will be removed from this workspace.`, confirmLabel: "Remove" };
+  }
+}
+
 function ClaudeLaunchDialog({ target, busy, error, onChange, onCancel, onStart }: {
-  target: { session: ClaudeSession; mode: "resume" | "fork"; permission: TerminalPermissionMode };
+  target: { session: ClaudeSession; mode: "resume" | "fork"; permission: ClaudePermissionMode };
   busy: boolean;
   error: string | null;
-  onChange: (change: { mode?: "resume" | "fork"; permission?: TerminalPermissionMode }) => void;
+  onChange: (change: { mode?: "resume" | "fork"; permission?: ClaudePermissionMode }) => void;
   onCancel: () => void;
   onStart: () => void;
 }) {
@@ -880,11 +899,10 @@ function ClaudeLaunchDialog({ target, busy, error, onChange, onCancel, onStart }
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}><strong style={{ flex: 1, fontSize: 14 }}>{target.session.title}</strong><button type="button" onClick={onCancel} disabled={busy} style={dialogButtonStyle}>Cancel</button></div>
       <div style={dialogGridStyle}>
         <label style={fieldStyle}>Action<select value={target.mode} disabled={busy} onChange={(event) => onChange({ mode: event.target.value as "resume" | "fork" })} style={inputStyle}><option value="resume">Resume session</option><option value="fork">Fork session</option></select></label>
-        <label style={fieldStyle}>Permissions<select value={target.permission} disabled={busy} onChange={(event) => onChange({ permission: event.target.value as TerminalPermissionMode })} style={inputStyle}>{permissionOptions("claude").map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+        <label style={fieldStyle}>Permissions<select value={target.permission} disabled={busy} onChange={(event) => onChange({ permission: event.target.value as ClaudePermissionMode })} style={inputStyle}>{permissionOptions("claude").map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       </div>
       <small style={{ ...hintStyle, display: "block", marginTop: 10 }}>{target.mode === "fork" ? "Starts a new session with a copy of this history; the original is left unchanged." : "Continues this session in a Terminal. Only one Terminal can resume a session at a time."}</small>
-      {target.permission !== "confirm" && target.permission !== "bypass" && <small style={{ ...hintStyle, display: "block", marginTop: 6 }}>{permissionOptions("claude").find(([value]) => value === target.permission)?.[2]}</small>}
-      {target.permission === "bypass" && <div style={dangerStyle}>Claude will skip its permission confirmations in this Terminal.</div>}
+      {target.permission !== "confirm" && <div style={target.permission === "bypass" ? dangerStyle : { ...hintStyle, marginTop: 6 }}>{permissionOptions("claude").find(([value]) => value === target.permission)?.[2]}</div>}
       {error && <div role="alert" style={errorStyle}>{error}</div>}
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}><button type="button" disabled={busy} onClick={onStart} style={{ ...dialogButtonStyle, background: "var(--accent)", borderColor: "var(--accent)", color: "white" }}>{busy ? "Starting…" : `${target.mode === "fork" ? "Fork" : "Resume"} in Terminal`}</button></div>
     </section>
@@ -898,7 +916,7 @@ function SessionLaunchDialog({ target, modelOptions, modelsLoading, model, reaso
   model: string;
   reasoningEffort: string;
   serviceTier: string;
-  permission: TerminalPermissionMode;
+  permission: CodexPermissionMode;
   webSearch: boolean;
   prompt: string;
   busy: boolean;
@@ -908,7 +926,7 @@ function SessionLaunchDialog({ target, modelOptions, modelsLoading, model, reaso
   onModelChange: (model: string) => void;
   onReasoningEffortChange: (effort: string) => void;
   onServiceTierChange: (tier: string) => void;
-  onPermissionChange: (permission: TerminalPermissionMode) => void;
+  onPermissionChange: (permission: CodexPermissionMode) => void;
   onWebSearchChange: (enabled: boolean) => void;
   onPromptChange: (prompt: string) => void;
   onCancel: () => void;
@@ -929,7 +947,7 @@ function SessionLaunchDialog({ target, modelOptions, modelsLoading, model, reaso
         {selectedModel.reasoningEfforts.length > 0 && <label style={fieldStyle}>Reasoning<select value={reasoningEffort} disabled={busy} onChange={(event) => onReasoningEffortChange(event.target.value)} style={inputStyle}>{selectedModel.reasoningEfforts.map((option) => <option key={option.id} value={option.id}>{option.id}{option.id === selectedModel.defaultReasoningEffort ? " · Default" : ""}</option>)}</select></label>}
         {selectedModel.serviceTiers.length > 0 && <label style={fieldStyle}>Service tier<select value={serviceTier} disabled={busy} onChange={(event) => onServiceTierChange(event.target.value)} style={inputStyle}><option value="">Standard</option>{selectedModel.serviceTiers.map((option) => <option key={option.id} value={option.id}>{option.name}{option.id === selectedModel.defaultServiceTier ? " · Default" : ""}</option>)}</select></label>}
       </div> : null}
-      <label style={fieldStyle}>Permissions<select value={permission} disabled={busy} onChange={(event) => onPermissionChange(event.target.value as TerminalPermissionMode)} style={inputStyle}>
+      <label style={fieldStyle}>Permissions<select value={permission} disabled={busy} onChange={(event) => onPermissionChange(event.target.value as CodexPermissionMode)} style={inputStyle}>
         <option value="confirm">Restricted — confirm risky commands</option>
         <option value="on-request">Ask when needed</option>
         <option value="never">Never ask — workspace sandbox</option>
@@ -944,20 +962,6 @@ function SessionLaunchDialog({ target, modelOptions, modelsLoading, model, reaso
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}><button type="button" disabled={busy} onClick={onStart} style={{ ...dialogButtonStyle, background: "var(--accent)", borderColor: "var(--accent)", color: "white" }}>{busy ? "Starting…" : `${target.mode === "fork" ? "Fork" : "Resume"} in ${target.surface === "chat" ? "Chat" : "Terminal"}`}</button></div>
     </section>
   </div>;
-}
-
-function useDialogEscape(onCancel: () => void, disabled: boolean) {
-  useEffect(() => {
-    if (disabled) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      onCancel();
-    };
-    document.addEventListener("keydown", handleKeyDown, true);
-    return () => document.removeEventListener("keydown", handleKeyDown, true);
-  }, [disabled, onCancel]);
 }
 
 function ActionMenu({ label, children }: { label: string; children: ReactNode }) {

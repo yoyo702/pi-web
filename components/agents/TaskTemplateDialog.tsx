@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { createPortal } from "react-dom";
 import type { TerminalPermissionMode } from "@/lib/agents/terminal";
+import { projectLabel } from "@/lib/project-workspaces";
+import { useDialogEscape } from "./use-dialog-escape";
 
 /** A saved Claude/Codex terminal launch (server/task-templates.cjs). */
 export interface TaskTemplate {
@@ -63,17 +65,7 @@ export function TaskTemplateDialog({ cwd, template, initial, onClose, onSaved }:
   // Editing a template saved for another folder keeps that folder.
   const workspace = template?.cwd ?? cwd;
 
-  useEffect(() => {
-    if (busy) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      onClose();
-    };
-    document.addEventListener("keydown", onKeyDown, true);
-    return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [busy, onClose]);
+  useDialogEscape(onClose, busy);
 
   async function save() {
     setBusy(true); setError(null);
@@ -92,7 +84,6 @@ export function TaskTemplateDialog({ cwd, template, initial, onClose, onSaved }:
     } finally { setBusy(false); }
   }
 
-  const folderName = workspace.split(/[\\/]/).filter(Boolean).at(-1) ?? workspace;
   // Portaled so the sidebar's stacking context and resize handles stay underneath.
   return createPortal(
     <div role="dialog" aria-modal="true" aria-label={template ? "Edit template" : "New template"} style={overlayStyle} onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onClose(); }}>
@@ -126,7 +117,7 @@ export function TaskTemplateDialog({ cwd, template, initial, onClose, onSaved }:
         {provider === "codex" && <label style={{ display: "flex", gap: 8, marginTop: 12, color: "var(--text-muted)", fontSize: 12 }}><input type="checkbox" checked={webSearch} disabled={busy} onChange={(event) => setWebSearch(event.target.checked)} />Enable live web search</label>}
         <label style={labelStyle}>Available in
           <select value={scope} disabled={busy} onChange={(event) => setScope(event.target.value as "workspace" | "all")} style={inputStyle} title={workspace}>
-            <option value="workspace">This workspace ({folderName})</option><option value="all">All workspaces</option>
+            <option value="workspace">This workspace ({projectLabel(workspace)})</option><option value="all">All workspaces</option>
           </select>
         </label>
         {error && <p role="alert" style={{ color: "#f87171", fontSize: 12 }}>{error}</p>}

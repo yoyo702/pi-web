@@ -76,7 +76,7 @@ server/
   web-push.cjs         Web Push to subscribed devices: VAPID key + subscriptions in ~/.pi-web/push.json (0600, PI_WEB_PUSH_FILE; VAPID sub PI_WEB_PUSH_SUBJECT), RFC 8291/8292 with node:crypto + global fetch (no redirects); endpoints limited to the browser push services (no SSRF), drops devices on 404/410; each device keeps its own `events` (approval/failed/completed, default all) and only hears those
   terminal-hook.cjs    run by the Claude Code hooks of a Claude terminal (`working|waiting|approval|idle`); POSTs {token, activity, detail} to /api/terminal-hook (loopback-only, the terminal's own token instead of a login), always exits 0 silently
   terminal-hook-api.cjs  POST /api/terminal-hook: token check via terminal-manager reportHookActivity; this-machine peers only (403)
-  task-templates.cjs   saved Claude/Codex terminal launches (~/.pi-web/task-templates.json, 0600, PI_WEB_TASK_TEMPLATES_FILE; tests and e2e always set it); read on every call, max 100, `cwd` null = every workspace
+  task-templates.cjs   saved Claude/Codex terminal launches (~/.pi-web/task-templates.json, 0600, PI_WEB_TASK_TEMPLATES_FILE; tests and e2e always set it); read on every call, max 100, `cwd` null = every workspace; permission modes and model/prompt rules come from `agents/launch-options.cjs`, shared with terminal-manager so a saved template is valid exactly when it can run
   task-templates-api.cjs GET /api/task-templates?cwd= · POST · PUT/DELETE /:id (400/404/405/409); mutations cross-origin rejected even without a password
   web-push-api.cjs     POST /api/push {endpoint?} → {publicKey, subscribed, events}; /api/push/subscribe {subscription, events?}; /api/push/events {endpoint, events}; /api/push/unsubscribe {endpoint}; JSON only, cross-origin rejected even without a password
 
@@ -134,6 +134,7 @@ components/
   TabBar.tsx          shared tab strip for center and right-panel tabs (close/lock/context menu)
   agents/
     TaskTemplateDialog.tsx New/Edit task template dialog; shared Claude/Codex terminal permission choices (`permissionOptions`) used by NewAgentDialog and AgentsPanel
+    use-dialog-escape.ts Escape closes the top dialog (capture phase, so the dialog underneath stays open)
   workspace/
     tab-views.tsx     view renderers for each tab kind
     CenterWorkspace.tsx keeps mounted Terminal/Codex tabs alive (Pi tab rendered by AppShell)
