@@ -17,6 +17,7 @@
   - AI review：点击 “Review with AI” 后用 Pi 默认模型总结暂存的改动并列出最多 5 个可能的问题；暂存内容变化后标记 “Staged changes changed since this review.”。
 - 分支查看与切换。
 - stash 查看与管理。
+- commit、push、fetch、pull、切换分支最长等待 5 分钟（其他 Git 命令 10 秒），超时提示会说明是哪条命令、等了多久。
 - 自动发现工作区根目录和嵌套 Git 仓库，支持切换并按工作区记住选择。
 - 面板全屏、恢复以及内部区域拖动调整。
 - 项目切换时按项目保存右侧面板标签和打开状态。

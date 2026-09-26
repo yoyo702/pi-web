@@ -3,7 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
-import { runGit } from "./git-exec";
+import { runGit, gitCommandTimeout, gitFailureMessage } from "./git-exec";
 import { buildPartialPatch, parsePatch, selectedAddedContent } from "./git-partial-patch";
 import { conflict, badRequest } from "./http-error";
 import type {
@@ -25,18 +25,15 @@ import {
   type GitPorcelainEntry,
 } from "./git-status";
 
-const GIT_TIMEOUT_MS = 10_000;
 const GIT_STATUS_MAX_BUFFER = 8 * 1024 * 1024;
 const COMMIT_MESSAGE_DIFF_MAX_CHARS = 50_000;
 
 async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFER): Promise<string> {
+  const timeout = gitCommandTimeout(args);
   try {
-    return await runGit(args, { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer });
+    return await runGit(args, { cwd, timeout, maxBuffer });
   } catch (error) {
-    const detail = typeof error === "object" && error !== null && "stderr" in error
-      ? String(error.stderr).trim()
-      : "";
-    throw new Error(detail || (error instanceof Error ? error.message : String(error)));
+    throw new Error(gitFailureMessage(error, args, timeout));
   }
 }
 
