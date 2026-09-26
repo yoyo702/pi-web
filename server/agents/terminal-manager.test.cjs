@@ -186,3 +186,41 @@ test("only resume terminals write their session; other running Codex terminals i
     else global.__piWebTerminalState = previousState;
   }
 });
+
+test("Safe Codex terminals ask before untrusted commands, or on request where the CLI dropped untrusted", () => {
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const path = require("node:path");
+  const modulePath = require.resolve("./terminal-manager.cjs");
+  const previous = { state: global.__piWebTerminalState, path: process.env.PATH, load: Module._load };
+  const spawned = [];
+  const fakePty = { pid: 42, onData() {}, onExit() {}, write() {}, resize() {}, kill() {} };
+  Module._load = function (request, parent, isMain) {
+    if (request === "node-pty") return { spawn(executable, args) { spawned.push(args); return fakePty; } };
+    return previous.load.call(this, request, parent, isMain);
+  };
+  // A fake `codex` on PATH whose --help lists the approval policies of an older or newer CLI.
+  const fakeCodex = (policies) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-codex-"));
+    fs.writeFileSync(path.join(dir, "codex"), `#!/bin/sh\necho "  -a, --ask-for-approval <APPROVAL_POLICY>  ${policies}"\n`, { mode: 0o755 });
+    return dir;
+  };
+  const dirs = [fakeCodex("untrusted, on-request, never"), fakeCodex("on-request, never")];
+  try {
+    for (const dir of dirs) {
+      process.env.PATH = `${dir}${path.delimiter}/bin${path.delimiter}/usr/bin`;
+      global.__piWebTerminalState = { sessions: new Map() };
+      delete require.cache[modulePath];
+      require("./terminal-manager.cjs").createTerminal({ provider: "codex", cwd: "/tmp", cols: 80, rows: 24, permissionMode: "confirm" });
+    }
+    assert.deepEqual(spawned.map((args) => args[args.indexOf("--ask-for-approval") + 1]), ["untrusted", "on-request"]);
+    assert.ok(spawned.every((args) => args.includes("workspace-write")));
+  } finally {
+    Module._load = previous.load;
+    process.env.PATH = previous.path;
+    delete require.cache[modulePath];
+    if (previous.state === undefined) delete global.__piWebTerminalState;
+    else global.__piWebTerminalState = previous.state;
+    for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

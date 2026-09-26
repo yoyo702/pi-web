@@ -22,6 +22,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - Claude 支持 Chat 和 Terminal Session；Chat 支持模型、权限模式、权限卡片、图片和 Fork。
 - Session 支持新建、恢复、Fork、重命名、归档和删除确认。
 - Terminal 支持停止、重启、删除记录、清理已结束任务和重连缓冲区。
+- Codex Terminal 的权限：Safe 用 `--sandbox workspace-write --ask-for-approval untrusted`（执行不受信任的命令前询问）。Codex 0.155 起 CLI 不再接受 `untrusted`（参数和配置都会报错，终端无法启动），这时 Safe 改用 `on-request`，与 Balanced 相同；是否支持看 `codex --help` 是否列出 `untrusted`（结果按可执行文件缓存到它变化）。Codex Chat 走 app-server，仍可用 `untrusted`。
 - Chat 支持中断运行及处理审批卡片。
 - 模型和权限配置保存在工作区标签中，刷新后恢复。
 
