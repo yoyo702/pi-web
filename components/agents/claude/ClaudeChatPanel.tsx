@@ -6,11 +6,13 @@ import type { ChatDraftImage } from "@/lib/draft-store";
 import { streamFailure } from "@/lib/agents/stream-failure";
 import type { ClaudePermissionMode } from "@/lib/workspace/tabs";
 import type { ClaudeForkTarget } from "../../workspace/WorkspaceActions";
-import { CodexAssistantThread, type PermissionOption } from "../codex/CodexAssistantThread";
+import type { CodexConversationItem } from "@/lib/agents/codex-conversation";
+import { CodexAssistantThread, type PermissionOption, type SlashCommand } from "../codex/CodexAssistantThread";
+import { ClaudeAgentContext, ClaudeAgentSteps, isAgentTool, type ClaudeAgentProgress } from "./ClaudeAgentSteps";
 import { ClaudePermissionCard, type ClaudePermissionAnswer, type ClaudePermissionRequest } from "./ClaudePermissionCard";
 
-type ClaudeEvent = ClaudeRecord & { piRuntime?: string; runtimeId?: string; request_id?: string; request?: ClaudePermissionRequest["request"]; requestId?: string; permissionMode?: string; model?: string; interrupted?: boolean; error?: string; code?: string };
-type Runtime = { runtimeId: string; running: boolean; model: string | null; permissionMode: string | null; process: boolean; requests: ClaudePermissionRequest[] };
+type ClaudeEvent = ClaudeRecord & { piRuntime?: string; runtimeId?: string; request_id?: string; request?: ClaudePermissionRequest["request"]; requestId?: string; permissionMode?: string; model?: string; interrupted?: boolean; error?: string; code?: string; compacting?: boolean; commands?: SlashCommand[]; tool_use_id?: string; description?: string; last_tool_name?: string; status?: string; usage?: { tool_uses?: number } };
+type Runtime = { runtimeId: string; running: boolean; compacting?: boolean; model: string | null; permissionMode: string | null; process: boolean; requests: ClaudePermissionRequest[] };
 type ChatRead = { session?: { id: string; title: string | null; created?: boolean }; history?: ClaudeRecord[]; cursor?: number | null; events?: ClaudeEvent[]; runtime?: Runtime | null; terminal?: { terminalId: string } | null };
 type ApiError = { error?: string; code?: string };
 
@@ -30,6 +32,8 @@ async function failure(response: Response, fallback: string) {
  * live events arrive on the chat's SSE stream and replay from `after`.
  * Without a session, the first message creates one: empty, or a copy of
  * `forkOf` (Claude only forks while starting a turn).
+ * Slash commands come from Claude (a probe per workspace, then each spawn's
+ * `pi/commands`); an Agent tool call shows its sub-agent's steps.
  */
 export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName, model: initialModel, permissionMode: initialPermissionMode, workspaceTabId, forkOf, onCreated, onFork, onOpenFile, onStatusChange, onConfigurationChange }: { sessionId: string | null; cwd: string; sessionName?: string; model: string; permissionMode: ClaudePermissionMode; workspaceTabId: string; forkOf?: { sessionId: string; at?: string }; onCreated?: (tabId: string, cwd: string, sessionId: string, title: string) => void; onFork?: (target: ClaudeForkTarget) => void; onOpenFile?: (filePath: string) => void; onStatusChange?: (tabId: string, status: "idle" | "running" | "approval") => void; onConfigurationChange?: (tabId: string, configuration: { model?: string; permissionMode?: ClaudePermissionMode }) => void }) {
   const [sessionId, setSessionId] = useState(initialSessionId);
@@ -50,6 +54,8 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
   const [notice, setNotice] = useState("");
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
+  const [commands, setCommands] = useState<SlashCommand[]>([]);
+  const [compacting, setCompacting] = useState(false);
   // Sequence numbers restart with each chat runtime on the server.
   const runtimeIdRef = useRef("");
   const lastSeqRef = useRef(0);
@@ -74,20 +80,30 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
     });
   }, [onConfigurationChange, workspaceTabId]);
 
+  useEffect(() => {
+    const abort = new AbortController();
+    void fetch(`/api/claude/chat/commands?${new URLSearchParams({ cwd })}`, { cache: "no-store", signal: abort.signal })
+      .then(async (response) => { if (response.ok) setCommands(((await response.json()) as { commands?: SlashCommand[] }).commands ?? []); })
+      .catch(() => undefined);
+    return () => abort.abort();
+  }, [cwd]);
+
   const apply = useCallback((event: ClaudeEvent) => {
     if (event.type === "user") setRunning(true);
+    else if (event.type === "pi/commands" && event.commands) setCommands(event.commands);
     else if (event.type === "result") {
-      setRunning(false); setRequests([]);
+      setRunning(false); setRequests([]); setCompacting(false);
       if (event.interrupted) setNotice("Turn interrupted");
       if (createdRef.current) { createdRef.current = false; setReloadKey((key) => key + 1); }
     } else if (event.type === "pi/closed" || event.type === "pi/stopped") {
-      setRunning(false); setRequests([]);
-      if (event.type === "pi/closed") setError((current) => current ?? (event.code === "fork_failed" && event.error ? event.error : "Claude exited. Send a message to start it again."));
+      setRunning(false); setRequests([]); setCompacting(false);
+      if (event.type === "pi/closed") setError((current) => current ?? ((event.code === "fork_failed" || event.code === "session_changed") && event.error ? event.error : "Claude exited. Send a message to start it again."));
     } else if (event.type === "control_request" && event.request_id && event.request) {
       const request = { request_id: event.request_id, request: event.request };
       setRequests((current) => [...current.filter((item) => item.request_id !== request.request_id), request]);
     } else if (event.type === "pi/resolved") setRequests((current) => current.filter((item) => item.request_id !== event.requestId));
     else if (event.type === "system") {
+      if (event.subtype === "status" && typeof event.compacting === "boolean") setCompacting(event.compacting);
       if (event.model) setReportedModel(event.model);
       adoptPermissionMode(event.permissionMode);
     }
@@ -152,6 +168,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         runtimeIdRef.current = data.runtime?.runtimeId ?? "";
         lastSeqRef.current = Math.max(0, ...initial.map((event) => event.piSeq ?? 0));
         setRunning(Boolean(data.runtime?.running));
+        setCompacting(Boolean(data.runtime?.compacting));
         setRequests(data.runtime?.requests ?? []);
         if (data.runtime?.model) setReportedModel(data.runtime.model);
         if (data.runtime?.process) adoptPermissionMode(data.runtime.permissionMode);
@@ -166,6 +183,28 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
     const seen = new Set([...history, ...events].flatMap((record) => record.type === "user" && record.uuid ? [record.uuid] : []));
     return claudeConversationItems([...history, ...events, ...pending.filter((record) => !seen.has(record.uuid ?? ""))]);
   }, [events, history, pending]);
+
+  // Sub-agent records and progress streamed in this runtime, by Agent tool
+  // call. Streamed deltas leave both unchanged, so open steps don't re-render.
+  const agentEvents = useMemo(() => events.filter((event) => event.parentToolUseId || event.type === "system" && event.tool_use_id && event.subtype?.startsWith("task_")), [events]);
+  const agentEventsRef = useRef(agentEvents);
+  const stableAgentEvents = agentEvents.length === agentEventsRef.current.length && agentEvents.every((event, index) => event === agentEventsRef.current[index]) ? agentEventsRef.current : agentEvents;
+  useEffect(() => { agentEventsRef.current = stableAgentEvents; }, [stableAgentEvents]);
+  const agents = useMemo(() => {
+    const live = new Map<string, ClaudeRecord[]>();
+    const progress = new Map<string, ClaudeAgentProgress>();
+    for (const event of stableAgentEvents) {
+      if (event.parentToolUseId) {
+        const records = live.get(event.parentToolUseId);
+        if (records) records.push(event); else live.set(event.parentToolUseId, [event]);
+      } else if (event.tool_use_id) {
+        const previous = progress.get(event.tool_use_id);
+        progress.set(event.tool_use_id, { description: event.description ?? previous?.description, lastTool: event.last_tool_name ?? previous?.lastTool, status: event.status ?? previous?.status, toolUses: event.usage?.tool_uses ?? previous?.toolUses });
+      }
+    }
+    return { sessionId, cwd, live, progress, onOpenFile };
+  }, [cwd, onOpenFile, sessionId, stableAgentEvents]);
+  const agentSteps = useCallback((item: CodexConversationItem) => item.kind === "toolCall" && isAgentTool(item.toolName) ? <ClaudeAgentSteps toolUseId={item.id} done={item.done} /> : null, []);
 
   const loadEarlier = useCallback(async () => {
     if (!sessionId || cursor === null) return;
@@ -273,7 +312,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
     </div> : !sessionId && forkOf && !error ? <div style={{ padding: "7px 10px", color: "var(--text-muted)", fontSize: 12 }}>
       {forkOf.at ? "Your first message starts a fork with the conversation before the chosen message." : "Your first message starts a fork with a copy of the whole conversation."} The original session is left unchanged.
     </div> : error && <div role="alert" style={{ padding: "7px 10px", color: "#fca5a5", fontSize: 12 }}>{error}{connection === "failed" ? <button type="button" onClick={() => { setError(null); setReloadKey((key) => key + 1); }} style={{ ...buttonStyle, marginLeft: 8 }}>Reconnect</button> : null}</div>}
-    <div style={{ flex: 1, minHeight: 0 }}>
+    <div style={{ flex: 1, minHeight: 0 }}><ClaudeAgentContext.Provider value={agents}>
       <CodexAssistantThread
         items={items}
         // Base64 grows it to the API's 5 MB image limit.
@@ -281,7 +320,8 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         running={runState !== "idle"}
         requestCards={requests.map((request, index) => <ClaudePermissionCard key={request.request_id} request={request} position={index + 1} total={requests.length} onAnswer={(requestId, value) => void answer(requestId, value)} />)}
         canSteer={false}
-        slashCommands={[]}
+        slashCommands={commands}
+        toolDetail={agentSteps}
         permissionOptions={PERMISSION_OPTIONS}
         cwd={cwd}
         draftKey={`claude:${sessionId ?? workspaceTabId}`}
@@ -294,7 +334,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         approvalPolicy={permissionMode}
         approvalLabel={PERMISSION_OPTIONS.find((option) => option.value === permissionMode)?.label ?? permissionMode}
         statusLabel={connection !== "connected" ? connection === "reconnecting" ? "Reconnecting" : connection === "loading" ? "Loading" : "Offline" : runState === "approval" ? "Approval" : runState === "running" ? "Working" : "Ready"}
-        activityLabel={runState === "running" ? "Claude is working…" : undefined}
+        activityLabel={compacting ? "Compacting the conversation…" : runState === "running" ? "Claude is working…" : undefined}
         noticeLabel={notice || undefined}
         forkDisabled={!sessionId || runState !== "idle" || connection !== "connected"}
         forkPoints={forkPoints}
@@ -310,7 +350,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         onStop={stop}
         onOpenFile={onOpenFile}
       />
-    </div>
+    </ClaudeAgentContext.Provider></div>
   </section>;
 }
 const buttonStyle: React.CSSProperties = { border: "1px solid var(--border)", background: "var(--bg-hover)", borderRadius: 6, color: "var(--text)", padding: "5px 10px", cursor: "pointer" };

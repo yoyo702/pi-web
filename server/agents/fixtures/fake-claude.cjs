@@ -7,9 +7,11 @@
 // interrupts and a `result` per turn. Transcripts go to
 // $CLAUDE_CONFIG_DIR/projects/<encoded cwd>/<session>.jsonl.
 // The prompt picks the scenario: "write" asks for permission, "long" runs
-// until interrupted, "crash" exits mid-turn; anything else answers at once,
-// counting the prompt's images. `--fork-session` copies the `--resume`
+// until interrupted, "crash" exits mid-turn, "switch" moves to a new session, "delegate" runs a sub-agent,
+// "/context" and "/compact" run those commands; anything else answers at
+// once, counting the prompt's images. `--fork-session` copies the `--resume`
 // transcript (through `--resume-session-at`) to the `--session-id` one.
+// `initialize` lists a few slash commands.
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -66,11 +68,76 @@ function finish(extra = {}) {
   running = null;
   out({ type: "result", subtype: "success", is_error: false, stop_reason: "end_turn", result: "done", total_cost_usd: 0.01, usage: { input_tokens: 10, output_tokens: 5 }, ...extra });
 }
+const COMMANDS = [
+  { name: "superpowers:brainstorming", description: "(superpowers) Explore an idea first", argumentHint: "", aliases: ["brainstorming"] },
+  { name: "__internal", description: "hidden", argumentHint: "" },
+  { name: "clear", description: "Clear conversation history", argumentHint: "", aliases: ["reset", "new"] },
+  { name: "compact", description: "Clear conversation history but keep a summary", argumentHint: "<optional custom summarization instructions>" },
+  { name: "context", description: "Show current context usage", argumentHint: "" },
+  { name: "doctor", description: "Diagnose the installation", argumentHint: "" },
+  { name: "context", description: "A project command of the same name", argumentHint: "" },
+];
+// A sub-agent: Claude's output tags its messages with the Agent tool call;
+// its transcript goes to <session>/subagents/agent-<id>.jsonl.
+function delegate() {
+  const toolUseId = `toolu_${crypto.randomUUID().slice(0, 8)}`;
+  assistantBlock(message(), 0, { type: "tool_use", id: toolUseId, name: "Agent", input: { description: "List files", subagent_type: "general-purpose", prompt: "List the files" } });
+  const agentId = `a${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const directory = path.join(path.dirname(transcript), sessionId, "subagents");
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, `agent-${agentId}.meta.json`), JSON.stringify({ agentType: "general-purpose", description: "List files", toolUseId }));
+  let parentUuid = null;
+  const sub = (entry, saved = entry) => {
+    out({ ...entry, parent_tool_use_id: toolUseId });
+    fs.appendFileSync(path.join(directory, `agent-${agentId}.jsonl`), `${JSON.stringify({ parentUuid, isSidechain: true, agentId, ...saved, sessionId })}\n`);
+    parentUuid = entry.uuid;
+  };
+  out({ type: "system", subtype: "task_started", task_id: agentId, tool_use_id: toolUseId, description: "List files", subagent_type: "general-purpose" });
+  const prompt = { type: "user", uuid: crypto.randomUUID() };
+  sub({ ...prompt, message: { role: "user", content: [{ type: "text", text: "List the files" }] } }, { ...prompt, message: { role: "user", content: "List the files" } });
+  const bash = `toolu_${crypto.randomUUID().slice(0, 8)}`;
+  out({ type: "stream_event", parent_tool_use_id: toolUseId, event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } });
+  sub({ type: "assistant", uuid: crypto.randomUUID(), message: { id: "msg_sub", role: "assistant", model, content: [{ type: "tool_use", id: bash, name: "Bash", input: { command: "ls" } }] } });
+  out({ type: "system", subtype: "task_progress", task_id: agentId, tool_use_id: toolUseId, description: "Running ls", last_tool_name: "Bash", usage: { total_tokens: 100, tool_uses: 1, duration_ms: 5 } });
+  sub({ type: "user", uuid: crypto.randomUUID(), message: { role: "user", content: [{ type: "tool_result", tool_use_id: bash, content: "a.txt", is_error: false }] } });
+  sub({ type: "assistant", uuid: crypto.randomUUID(), message: { id: "msg_sub2", role: "assistant", model, content: [{ type: "text", text: "Found a.txt" }] } });
+  out({ type: "system", subtype: "task_notification", task_id: agentId, tool_use_id: toolUseId, status: "completed", summary: "Found a.txt", usage: { total_tokens: 120, tool_uses: 1, duration_ms: 9 } });
+  toolResult(toolUseId, [{ type: "text", text: "Found a.txt" }]);
+  assistantBlock(message(), 0, { type: "text", text: "The agent found a.txt." });
+  finish();
+}
+// Local commands: Claude sends their output as a synthetic assistant message
+// and saves it as a `system` record with the same uuid.
+function localCommand(text) {
+  if (text.startsWith("/context")) {
+    const uuid = crypto.randomUUID();
+    out({ type: "assistant", uuid, parent_tool_use_id: null, message: { id: crypto.randomUUID(), role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "## Context Usage" }] } });
+    persist({ type: "system", subtype: "local_command", uuid, content: "<local-command-stdout>## Context Usage</local-command-stdout>" });
+    finish({ result: "## Context Usage" });
+    return;
+  }
+  out({ type: "system", subtype: "status", status: "compacting" });
+  const boundary = crypto.randomUUID();
+  out({ type: "system", subtype: "compact_boundary", uuid: boundary, compact_metadata: { trigger: "manual" } });
+  persist({ type: "system", subtype: "compact_boundary", uuid: boundary, content: "Conversation compacted" });
+  const summary = { type: "user", uuid: crypto.randomUUID(), message: { role: "user", content: "This session is being continued…" } };
+  out({ ...summary, parent_tool_use_id: null, isSynthetic: true });
+  persist({ ...summary, isCompactSummary: true });
+  const done = { type: "user", uuid: crypto.randomUUID(), message: { role: "user", content: "<local-command-stdout>Compacted </local-command-stdout>" } };
+  out({ ...done, parent_tool_use_id: null, isReplay: true });
+  persist(done);
+  out({ type: "system", subtype: "status", status: null, compact_result: "success" });
+  finish({ result: "" });
+}
 function message() { const id = `msg_${crypto.randomUUID().slice(0, 8)}`; out({ type: "stream_event", event: { type: "message_start", message: { id } } }); return id; }
 
 function turn(text) {
   running = { text };
-  out({ type: "system", subtype: "init", model, permissionMode, cwd: process.cwd() });
+  // As `/clear` does: Claude carries on in a new session.
+  if (text.includes("switch")) { process.stdout.write(`${JSON.stringify({ type: "system", subtype: "init", model, permissionMode, cwd: process.cwd(), session_id: crypto.randomUUID() })}\n`); return; }
+  out({ type: "system", subtype: "init", model, permissionMode, cwd: process.cwd(), terminal_slash_commands: ["doctor"] });
+  if (/^\/(context|compact)\b/.test(text)) { localCommand(text); return; }
+  if (text.includes("delegate")) { delegate(); return; }
   if (text.includes("crash")) { process.stderr.write(`boom in ${process.cwd()}\n`); process.exit(1); }
   if (text.includes("long")) { message(); return; }
   if (text.includes("write")) {
@@ -114,7 +181,8 @@ process.stdin.on("data", (chunk) => {
           persist(entry);
           finish({ stop_reason: null });
         }
-      } else if (subtype === "set_model") { model = input.request.model; out({ type: "control_response", response: { subtype: "success", request_id: input.request_id } }); }
+      } else if (subtype === "initialize") out({ type: "control_response", response: { subtype: "success", request_id: input.request_id, response: { commands: COMMANDS, models: [], agents: [] } } });
+      else if (subtype === "set_model") { model = input.request.model; out({ type: "control_response", response: { subtype: "success", request_id: input.request_id } }); }
       else out({ type: "control_response", response: { subtype: "error", request_id: input.request_id, error: `unsupported ${subtype}` } });
     } else if (input.type === "control_response" && pendingPermission && input.response?.request_id === pendingPermission.requestId) {
       const { toolUseId } = pendingPermission;

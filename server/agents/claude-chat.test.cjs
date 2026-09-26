@@ -97,7 +97,7 @@ test("a new chat starts Claude with its own session id and keeps the process for
   assert.equal(launches().length, 1);
   assert.ok(launches()[0].includes("--session-id") && launches()[0].includes(ID));
   assert.deepEqual(launches()[0].slice(launches()[0].indexOf("--permission-prompt-tool"), launches()[0].indexOf("--permission-prompt-tool") + 2), ["--permission-prompt-tool", "stdio"]);
-  assert.equal(stdin()[0].uuid, uuid);
+  assert.equal(stdin().find((entry) => entry.type === "user").uuid, uuid);
   assert.deepEqual(notifications.list().map((entry) => [entry.kind, entry.event, entry.title]), [["claude", "completed", "hello"], ["claude", "completed", "hello"]]);
 });
 
@@ -137,7 +137,7 @@ test("a restart counts as busy and gives up if the server shuts the chat down me
 test("a client resuming from events that left the buffer is told to reload", (t) => {
   const { cwd } = useFakeClaude(t);
   const state = chat.open(ID, cwd);
-  for (let index = 0; index < 2_010; index += 1) chat.handleRecord(state, { type: "system", subtype: "status", permissionMode: "plan" });
+  for (let index = 0; index < 2_010; index += 1) chat.handleRecord(state, { type: "system", subtype: "status", permissionMode: index % 2 ? "plan" : "acceptEdits" });
   assert.equal(state.events.length, 2_000);
   const stale = [];
   chat.subscribe(state, (event) => stale.push(event), 5)();
@@ -276,7 +276,7 @@ test("images go to Claude as base64 blocks before the text; clients only see pla
   assert.equal(created.status, 201);
   const state = chat.get(created.body.sessionId);
   await waitFor(() => state.events.some((event) => event.type === "result"));
-  assert.deepEqual(stdin()[0].message.content, [{ type: "image", source: { type: "base64", media_type: "image/png", data: png } }, { type: "text", text: "what is this" }]);
+  assert.deepEqual(stdin().find((entry) => entry.type === "user").message.content, [{ type: "image", source: { type: "base64", media_type: "image/png", data: png } }, { type: "text", text: "what is this" }]);
   assert.deepEqual(state.events[0].message.content, [{ type: "image" }, { type: "text", text: "what is this" }]);
   assert.equal(state.events.find((event) => event.type === "assistant").message.content[0].text, "Echo: what is this [1 image]");
 
@@ -473,4 +473,106 @@ test("history pages back through the transcript and trims what the browser does 
   assert.deepEqual(seen[3].message.content, [{ type: "image" }]);
   assert.equal(seen[1].piBlockIndex, 1);
   assert.throws(() => catalog.readHistory("22222222-2222-4222-8222-222222222222", cwd), { code: "not_found" });
+});
+
+test("slash commands come from Claude's initialize answer, without the ones a chat cannot run", async (t) => {
+  const { cwd, launches } = useFakeClaude(t);
+  const listed = await request("GET", `/api/claude/chat/commands?cwd=${encodeURIComponent(cwd)}`);
+  assert.equal(listed.status, 200);
+  // Claude lists a project command after the built-in of the same name; the first wins.
+  assert.deepEqual(listed.body.commands.map((command) => command.name), ["superpowers:brainstorming", "compact", "context"]);
+  assert.equal(listed.body.commands[2].description, "Show current context usage");
+  assert.deepEqual(listed.body.commands[0].aliases, ["brainstorming"]);
+  assert.equal(listed.body.commands[1].argumentHint, "<optional custom summarization instructions>");
+  // The probe starts no session, and the answer is cached per workspace.
+  assert.equal(launches()[0].includes("--session-id") || launches()[0].includes("--resume"), false);
+  await request("GET", `/api/claude/chat/commands?cwd=${encodeURIComponent(cwd)}`);
+  assert.equal(launches().length, 1);
+  assert.equal((await request("GET", "/api/claude/chat/commands?cwd=/nope")).status, 403);
+
+  const state = chat.open(ID, cwd);
+  const { events, off } = collect(state);
+  t.after(off);
+  await chat.send(state, { text: "hello" });
+  await waitFor(() => events.some((event) => event.type === "pi/commands"));
+  assert.deepEqual(events.find((event) => event.type === "pi/commands").commands, listed.body.commands);
+  for (const text of ["/clear", "/reset now", "/new"]) await assert.rejects(chat.send(state, { text }), { code: "invalid_request" });
+});
+
+test("a failed command probe lists nothing and is not retried at once", async (t) => {
+  const { cwd } = useFakeClaude(t);
+  chat.configure({ command: path.join(cwd, "missing-claude"), args: [], env: process.env, idleMs: IDLE_MS });
+  const warn = t.mock.method(console, "warn", () => undefined);
+  const first = await request("GET", `/api/claude/chat/commands?cwd=${encodeURIComponent(cwd)}`);
+  assert.deepEqual([first.status, first.body.commands], [200, []]);
+  await request("GET", `/api/claude/chat/commands?cwd=${encodeURIComponent(cwd)}`);
+  assert.equal(warn.mock.callCount(), 1);
+});
+
+test("the process stops when Claude moves to another session", async (t) => {
+  const { cwd } = useFakeClaude(t);
+  const state = chat.open(ID, cwd);
+  const { events, off } = collect(state);
+  t.after(off);
+  await chat.send(state, { text: "switch" });
+  await waitFor(() => events.some((event) => event.type === "pi/closed"));
+  const closed = events.find((event) => event.type === "pi/closed");
+  assert.equal(closed.code, "session_changed");
+  assert.match(closed.error, /another session/);
+  assert.equal(events.some((event) => event.type === "system" && event.subtype === "init"), false);
+});
+
+test("/context and /compact show their output live and after a reload", async (t) => {
+  const { cwd } = useFakeClaude(t);
+  const state = chat.open(ID, cwd);
+  const { events, off } = collect(state);
+  t.after(off);
+  await chat.send(state, { text: "/context" });
+  await waitFor(() => events.some((event) => event.type === "result"));
+  const live = events.find((event) => event.type === "assistant");
+  assert.equal(live.message.content[0].text, "## Context Usage");
+  assert.equal(live.message.id, live.uuid);
+  const saved = catalog.readHistory(ID, cwd).records.find((record) => record.type === "assistant");
+  assert.equal(saved.uuid, live.uuid);
+  assert.deepEqual(saved.message, { id: live.uuid, role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "## Context Usage" }] });
+
+  await chat.send(state, { text: "/compact" });
+  await waitFor(() => events.filter((event) => event.type === "result").length === 2);
+  const statuses = events.filter((event) => event.type === "system" && event.subtype === "status").map((event) => event.compacting);
+  assert.deepEqual(statuses, [true, false]);
+  const boundary = events.find((event) => event.subtype === "compact_boundary");
+  assert.ok(boundary.uuid);
+  // The summary Claude writes for itself stays hidden; its "Compacted" note shows.
+  assert.equal(events.some((event) => event.type === "user" && JSON.stringify(event.message).includes("being continued")), false);
+  const history = catalog.readHistory(ID, cwd).records;
+  assert.ok(history.some((record) => record.subtype === "compact_boundary" && record.uuid === boundary.uuid));
+  assert.equal(history.some((record) => JSON.stringify(record.message ?? "").includes("being continued")), false);
+});
+
+test("a sub-agent's steps stream live under its tool call and load from its own transcript", async (t) => {
+  const { cwd } = useFakeClaude(t);
+  const state = chat.open(ID, cwd);
+  const { events, off } = collect(state);
+  t.after(off);
+  await chat.send(state, { text: "delegate" });
+  await waitFor(() => events.some((event) => event.type === "result"));
+  const call = events.find((event) => event.type === "assistant" && event.message.content[0].name === "Agent").message.content[0];
+  const sub = events.filter((event) => event.parentToolUseId === call.id);
+  assert.deepEqual(sub.map((event) => event.type), ["user", "assistant", "user", "assistant"]);
+  assert.equal(sub.some((event) => "piBlockIndex" in event), false);
+  assert.equal(events.some((event) => event.type === "stream_event" && event.parent_tool_use_id), false);
+  const tasks = events.filter((event) => event.type === "system" && event.subtype?.startsWith("task_"));
+  assert.deepEqual(tasks.map((event) => [event.subtype, event.tool_use_id]), [["task_started", call.id], ["task_progress", call.id], ["task_notification", call.id]]);
+  assert.equal(tasks[1].last_tool_name, "Bash");
+  assert.equal(tasks[2].status, "completed");
+
+  const steps = await request("GET", `/api/claude/chat/${ID}/agents/${call.id}?cwd=${encodeURIComponent(cwd)}`);
+  assert.equal(steps.status, 200);
+  assert.deepEqual(steps.body.records.map((record) => record.uuid), sub.map((event) => event.uuid));
+  assert.ok(steps.body.records.every((record) => record.parentToolUseId === call.id));
+  assert.equal(steps.body.records[1].piBlockIndex, undefined);
+  // The main history leaves the sub-agent out.
+  assert.equal(catalog.readHistory(ID, cwd).records.some((record) => record.parentToolUseId), false);
+  assert.equal((await request("GET", `/api/claude/chat/${ID}/agents/bogus?cwd=${encodeURIComponent(cwd)}`)).status, 400);
+  assert.equal((await request("GET", `/api/claude/chat/${ID}/agents/toolu_missing?cwd=${encodeURIComponent(cwd)}`)).status, 404);
 });
