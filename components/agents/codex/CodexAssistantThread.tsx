@@ -4,7 +4,7 @@
 import { AssistantRuntimeProvider, MessagePrimitive, ThreadPrimitive, useAuiState, useExternalStoreRuntime, useMessagePartText, type AppendMessage, type ThreadMessage } from "@assistant-ui/react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { CodexConversationItem } from "@/lib/agents/codex-conversation";
-import { claimChatQueueSend, EMPTY_CHAT_QUEUE, getChatQueue, releaseChatQueueSend, subscribeChatQueues, updateChatQueue } from "@/lib/chat-queue-store";
+import { claimChatQueueSend, EMPTY_CHAT_QUEUE, finishChatQueueSend, getChatQueue, moveChatQueue, pauseStaleChatQueue, subscribeChatQueues, updateChatQueue } from "@/lib/chat-queue-store";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
 import type { AgentMessage, AssistantMessage, BashExecutionMessage, ToolResultMessage, UserMessage } from "@/lib/types";
 import { MarkdownBody } from "../../MarkdownBody";
@@ -233,15 +233,30 @@ export function CodexAssistantThread({ items, maxImageBytes = 5 * 1024 * 1024, r
   const [showJump, setShowJump] = useState(false);
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => { const viewport = viewportRef.current; if (!viewport) return; viewport.scrollTo({ top: viewport.scrollHeight, behavior }); followRef.current = true; setShowJump(false); }, []);
   useEffect(() => { if (!followRef.current) { setShowJump(true); return; } const frame = requestAnimationFrame(() => scrollToBottom(items.length ? "smooth" : "auto")); return () => cancelAnimationFrame(frame); }, [approvals, items, requestCards, running, scrollToBottom]);
+  // A new chat's key changes when it gets its thread/session id; bring along
+  // what was queued while the first message was in flight.
+  const previousKeyRef = useRef(draftKey);
   useEffect(() => {
-    if (running || !queue.items.length || queue.failed || !claimChatQueueSend(draftKey)) return;
-    const next = queue.items[0];
-    void onSend(next.text, next.images).then((sent) => {
-      updateChatQueue(draftKey, (current) => {
-        if (current.items[0] !== next) return current; // Cleared or changed meanwhile.
-        return sent ? { items: current.items.slice(1), failed: false } : { ...current, failed: true };
-      });
-    }).finally(() => releaseChatQueueSend(draftKey));
+    const previous = previousKeyRef.current;
+    previousKeyRef.current = draftKey;
+    if (previous !== draftKey) moveChatQueue(previous, draftKey);
+  }, [draftKey]);
+  // A queue already there when the chat opens with no turn running waits for
+  // Retry instead of sending stale messages. Mount only; declared before the
+  // send effect so that effect sees the pause in the same commit.
+  const mountRef = useRef({ draftKey, running });
+  useEffect(() => { if (!mountRef.current.running) pauseStaleChatQueue(mountRef.current.draftKey); }, []);
+  useEffect(() => {
+    // Read the store, not the render snapshot: the effects above may have just changed it.
+    const current = getChatQueue(draftKey);
+    if (running || !current.items.length || current.failed || current.paused || !claimChatQueueSend(draftKey)) return;
+    const next = current.items[0];
+    // finishChatQueueSend releases the lock before updating, so the re-render can send the next item.
+    const settle = (sent: boolean) => finishChatQueueSend(draftKey, (latest) => {
+      if (latest.items[0] !== next) return latest; // Cleared or changed meanwhile.
+      return sent ? { items: latest.items.slice(1), failed: false } : { ...latest, failed: true };
+    });
+    onSend(next.text, next.images).then(settle, () => settle(false));
   }, [draftKey, onSend, queue, running]);
   // The first user message of each turn after the first maps to the turn before it.
   const forkTargets = useMemo(() => {
@@ -269,5 +284,5 @@ export function CodexAssistantThread({ items, maxImageBytes = 5 * 1024 * 1024, r
   }, []);
   const actions = useMemo(() => ({ cwd, expandDetails, detailOverrides, onToggleDetail: (id: string, current: boolean) => setDetailOverrides((overrides) => ({ ...overrides, [id]: !current })), onRetry: (text: string) => { if (running) updateChatQueue(draftKey, (current) => ({ ...current, items: [...current.items, { text, images: [] }] })); else void onSend(text); }, onQuote: (text: string) => window.dispatchEvent(new CustomEvent("codex-draft-insert", { detail: { key: draftKey, text } })), onEdit: (text: string) => window.dispatchEvent(new CustomEvent("codex-draft-insert", { detail: { key: draftKey, text, replace: true } })), onOpenFile, forkTargets, onForkFrom: onForkItem, toolDetail }), [cwd, detailOverrides, draftKey, expandDetails, forkTargets, onForkItem, onOpenFile, onSend, running, toolDetail]);
   const sentHistory = useMemo(() => items.flatMap((item) => item.kind === "message" && item.role === "user" && !item.pending ? [item.text] : []), [items]);
-  return <ChatActionsContext.Provider value={actions}><AssistantRuntimeProvider runtime={runtime}><ThreadPrimitive.Root className="codex-aui-thread"><ThreadPrimitive.Viewport ref={viewportRef} className="codex-aui-viewport" onScroll={() => { const viewport = viewportRef.current; if (!viewport) return; const nearBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 96; followRef.current = nearBottom; setShowJump(!nearBottom); }}>{items.length > visibleCount && <button type="button" className="codex-aui-earlier" onClick={() => setVisibleCount((count) => count + 300)}>Show {Math.min(300, items.length - visibleCount)} earlier items</button>}<ThreadPrimitive.Messages>{() => <StyledMessage />}</ThreadPrimitive.Messages>{approvals?.map((approval, index) => <CodexRequestCard key={approval.id} request={approval} position={index + 1} total={approvals.length} onAnswer={onApproval} />)}{requestCards}</ThreadPrimitive.Viewport>{showJump && <button type="button" className="codex-aui-jump" onClick={() => scrollToBottom()}>↓ Latest</button>}{queue.items.length > 0 && <div className="codex-aui-queue" role={queue.failed ? "alert" : undefined}>{queue.items.length} queued{queue.failed && " · sending failed"}{queue.failed && <button type="button" onClick={() => updateChatQueue(draftKey, (current) => ({ ...current, failed: false }))}>Retry</button>}<button type="button" onClick={() => updateChatQueue(draftKey, () => EMPTY_CHAT_QUEUE)}>Clear</button></div>}<DraftComposer draftKey={draftKey} maxImageBytes={maxImageBytes} running={running} canSteer={canSteer} slashCommands={slashCommands} permissionOptions={permissionOptions} sentHistory={sentHistory} modelLabel={modelLabel} modelValue={modelValue} modelOptions={modelOptions} modelMenuRequest={modelMenuRequest} reasoningEffort={reasoningEffort} serviceTier={serviceTier} approvalPolicy={approvalPolicy} approvalLabel={approvalLabel} statusLabel={statusLabel} activityLabel={activityLabel} noticeLabel={noticeLabel} contextLabel={contextLabel} expandDetails={expandDetails} forkDisabled={forkDisabled} onModelToggle={onModelToggle} onModelChange={onModelChange} onReasoningEffortChange={onReasoningEffortChange} onServiceTierChange={onServiceTierChange} onApprovalPolicyChange={onApprovalPolicyChange} onExpandDetails={() => { setDetailOverrides({}); setExpandDetails((value) => { const next = !value; localStorage.setItem("pi-codex-expand-details", next ? "1" : "0"); return next; }); }} onFork={onFork} onSend={onSend} onSteer={onSteer} onQueue={(message) => updateChatQueue(draftKey, (current) => ({ ...current, items: [...current.items, message] }))} onStop={onStop} /></ThreadPrimitive.Root></AssistantRuntimeProvider></ChatActionsContext.Provider>;
+  return <ChatActionsContext.Provider value={actions}><AssistantRuntimeProvider runtime={runtime}><ThreadPrimitive.Root className="codex-aui-thread"><ThreadPrimitive.Viewport ref={viewportRef} className="codex-aui-viewport" onScroll={() => { const viewport = viewportRef.current; if (!viewport) return; const nearBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 96; followRef.current = nearBottom; setShowJump(!nearBottom); }}>{items.length > visibleCount && <button type="button" className="codex-aui-earlier" onClick={() => setVisibleCount((count) => count + 300)}>Show {Math.min(300, items.length - visibleCount)} earlier items</button>}<ThreadPrimitive.Messages>{() => <StyledMessage />}</ThreadPrimitive.Messages>{approvals?.map((approval, index) => <CodexRequestCard key={approval.id} request={approval} position={index + 1} total={approvals.length} onAnswer={onApproval} />)}{requestCards}</ThreadPrimitive.Viewport>{showJump && <button type="button" className="codex-aui-jump" onClick={() => scrollToBottom()}>↓ Latest</button>}{queue.items.length > 0 && <div className="codex-aui-queue" role={queue.failed ? "alert" : undefined}>{queue.items.length} queued{queue.failed ? " · sending failed" : queue.paused ? " · paused" : ""}{(queue.failed || queue.paused) && <button type="button" onClick={() => updateChatQueue(draftKey, (current) => ({ ...current, failed: false, paused: false }))}>Retry</button>}<button type="button" onClick={() => updateChatQueue(draftKey, () => EMPTY_CHAT_QUEUE)}>Clear</button></div>}<DraftComposer draftKey={draftKey} maxImageBytes={maxImageBytes} running={running} canSteer={canSteer} slashCommands={slashCommands} permissionOptions={permissionOptions} sentHistory={sentHistory} modelLabel={modelLabel} modelValue={modelValue} modelOptions={modelOptions} modelMenuRequest={modelMenuRequest} reasoningEffort={reasoningEffort} serviceTier={serviceTier} approvalPolicy={approvalPolicy} approvalLabel={approvalLabel} statusLabel={statusLabel} activityLabel={activityLabel} noticeLabel={noticeLabel} contextLabel={contextLabel} expandDetails={expandDetails} forkDisabled={forkDisabled} onModelToggle={onModelToggle} onModelChange={onModelChange} onReasoningEffortChange={onReasoningEffortChange} onServiceTierChange={onServiceTierChange} onApprovalPolicyChange={onApprovalPolicyChange} onExpandDetails={() => { setDetailOverrides({}); setExpandDetails((value) => { const next = !value; localStorage.setItem("pi-codex-expand-details", next ? "1" : "0"); return next; }); }} onFork={onFork} onSend={onSend} onSteer={onSteer} onQueue={(message) => updateChatQueue(draftKey, (current) => ({ ...current, items: [...current.items, message] }))} onStop={onStop} /></ThreadPrimitive.Root></AssistantRuntimeProvider></ChatActionsContext.Provider>;
 }
