@@ -245,6 +245,20 @@ test("Claude terminals resume or fork a session and own it while resumed", (t) =
   assert.throws(() => manager.createTerminal({ provider: "claude", cwd: "/tmp", permissionMode: "never" }), { code: "invalid_permission_mode" });
 });
 
+test("Claude terminals start in plan or accept-edits mode, with a model and a first message", (t) => {
+  const { manager, spawns } = fakeClaudeManager(t);
+  const planned = manager.createTerminal({ provider: "claude", cwd: "/tmp", permissionMode: "plan", model: "opus", initialPrompt: "  Review the diff  ", title: "Review changes" });
+  manager.createTerminal({ provider: "claude", cwd: "/tmp", launchMode: "fork", sourceSessionId: IDS[1], permissionMode: "accept-edits", initialPrompt: "-v means verbose" });
+  assert.deepEqual(spawns, [
+    ["--permission-mode", "plan", "--model", "opus", "Review the diff"],
+    ["--resume", IDS[1], "--fork-session", "--permission-mode", "acceptEdits", "--", "-v means verbose"],
+  ]);
+  assert.equal(planned.title, "Review changes");
+  assert.equal(planned.permissionMode, "plan");
+  assert.throws(() => manager.createTerminal({ provider: "claude", cwd: "/tmp", model: "opus; rm" }), { code: "invalid_model" });
+  assert.throws(() => manager.createTerminal({ provider: "codex", cwd: "/tmp", permissionMode: "plan" }), { code: "invalid_permission_mode" });
+});
+
 test("the terminal API resumes only a session of the folder, once at a time", async (t) => {
   const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-claude-cwd-")));
   t.after(() => fs.rmSync(base, { recursive: true, force: true }));

@@ -269,13 +269,16 @@ function buildLaunchArgs(provider, executable, permissionMode, launchMode, noAlt
   }
   if (provider === "claude") {
     if (launchMode === "resume-last") throw new TerminalError("unsupported_launch_mode", "Claude terminals resume a chosen session");
-    if (permissionMode !== "confirm" && permissionMode !== "bypass") throw new TerminalError("invalid_permission_mode", "Claude supports confirm or bypass permission mode");
+    if (!["confirm", "plan", "accept-edits", "bypass"].includes(permissionMode)) throw new TerminalError("invalid_permission_mode", "Claude supports confirm, plan, accept-edits or bypass permission mode");
     if (launchMode !== "new" && (typeof sourceSessionId !== "string" || !CLAUDE_SESSION_ID.test(sourceSessionId))) {
       throw new TerminalError("invalid_session", "A Claude session id is required for this launch mode");
     }
     // `--fork-session` copies the history into a new session id.
     const args = launchMode === "resume" ? ["--resume", sourceSessionId] : launchMode === "fork" ? ["--resume", sourceSessionId, "--fork-session"] : [];
     if (permissionMode === "bypass") args.push(assertSkipPermissionsSupported(provider, executable));
+    else if (permissionMode !== "confirm") args.push("--permission-mode", permissionMode === "plan" ? "plan" : "acceptEdits");
+    pushModel(args, model);
+    pushPrompt(args, initialPrompt);
     return args;
   }
 
@@ -289,10 +292,7 @@ function buildLaunchArgs(provider, executable, permissionMode, launchMode, noAlt
     : launchMode === "resume" ? ["resume", sourceSessionId]
     : launchMode === "fork" ? ["fork", sourceSessionId]
     : [];
-  if (typeof model === "string" && model.trim()) {
-    if (model.length > 120 || !/^[A-Za-z0-9._:/-]+$/.test(model)) throw new TerminalError("invalid_model", "Codex model contains unsupported characters");
-    args.push("--model", model.trim());
-  }
+  pushModel(args, model);
   if (webSearch === true) args.push("--search");
   if (noAltScreen) args.push("--no-alt-screen");
   if (permissionMode === "bypass") {
@@ -301,14 +301,26 @@ function buildLaunchArgs(provider, executable, permissionMode, launchMode, noAlt
     const approval = permissionMode === "confirm" ? codexConfirmPolicy(cliHelpText(provider, executable)) : permissionMode;
     args.push("--sandbox", "workspace-write", "--ask-for-approval", approval);
   }
+  pushPrompt(args, initialPrompt);
+  return args;
+}
+
+// `--model` and a first message (always the last argument), the same for
+// Codex and Claude.
+function pushModel(args, model) {
+  if (typeof model === "string" && model.trim()) {
+    if (model.length > 120 || !/^[A-Za-z0-9._:/-]+$/.test(model)) throw new TerminalError("invalid_model", "Model name contains unsupported characters");
+    args.push("--model", model.trim());
+  }
+}
+function pushPrompt(args, initialPrompt) {
   if (typeof initialPrompt === "string" && initialPrompt.trim()) {
     if (initialPrompt.length > 8_000) throw new TerminalError("invalid_prompt", "Initial prompt must be at most 8000 characters");
-    // A prompt starting with "-" would otherwise be parsed as a Codex option
-    // (e.g. `-c key=value` config overrides).
+    // A prompt starting with "-" would otherwise be parsed as a CLI option
+    // (e.g. Codex `-c key=value` config overrides).
     if (initialPrompt.trim().startsWith("-")) args.push("--");
     args.push(initialPrompt.trim());
   }
-  return args;
 }
 
 function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissionMode = "confirm", launchMode = "new", noAltScreen = provider === "codex", sourceSessionId, model, webSearch = false, initialPrompt, chatMode = false }) {
@@ -342,8 +354,8 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
     id: crypto.randomUUID(), provider, title: typeof title === "string" && title.trim() ? title.trim().slice(0, 80) : defaultTitle, cwd, pid: terminal.pid, permissionMode, launchMode, noAltScreen, sourceSessionId, model, webSearch, initialPrompt, chatMode, cols, rows,
     state: "running", createdAt: new Date().toISOString(), endedAt: null, exitCode: null, signal: null,
     terminal, chunks: [], bufferBytes: 0, truncated: false, subscribers: new Set(), history: [], pendingInput: "",
-    // A new Claude waits for its first message; Codex reports through its title.
-    activity: hookToken ? "waiting" : null, hookToken, titleTail: "",
+    // A new Claude waits for its first message unless it was given one; Codex reports through its title.
+    activity: hookToken ? (typeof initialPrompt === "string" && initialPrompt.trim() ? "working" : "waiting") : null, hookToken, titleTail: "",
   };
   state.sessions.set(session.id, session);
   workspaceStatus.notify("terminals");

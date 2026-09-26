@@ -23,10 +23,10 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { provider?: unknown; cwd?: unknown; cols?: unknown; rows?: unknown; permissionMode?: unknown; launchMode?: unknown; noAltScreen?: unknown; sourceSessionId?: unknown; model?: unknown; webSearch?: unknown; initialPrompt?: unknown; chatMode?: unknown };
+    const body = await request.json() as { provider?: unknown; cwd?: unknown; cols?: unknown; rows?: unknown; permissionMode?: unknown; launchMode?: unknown; noAltScreen?: unknown; sourceSessionId?: unknown; model?: unknown; webSearch?: unknown; initialPrompt?: unknown; chatMode?: unknown; title?: unknown };
     if (body.provider !== "shell" && body.provider !== "codex" && body.provider !== "claude") throw new TerminalRequestError("invalid_provider", "provider must be shell, codex, or claude");
     if (typeof body.cwd !== "string" || !body.cwd) throw new TerminalRequestError("invalid_cwd", "cwd is required");
-    if (body.permissionMode !== undefined && !["confirm", "on-request", "never", "bypass"].includes(body.permissionMode as string)) {
+    if (body.permissionMode !== undefined && !["confirm", "on-request", "never", "bypass", "plan", "accept-edits"].includes(body.permissionMode as string)) {
       throw new TerminalRequestError("invalid_permission_mode", "permissionMode is invalid");
     }
     if (body.launchMode !== undefined && !["new", "resume-last", "resume", "fork"].includes(body.launchMode as string)) {
@@ -39,6 +39,7 @@ export async function POST(request: Request) {
     if (body.webSearch !== undefined && typeof body.webSearch !== "boolean") throw new TerminalRequestError("invalid_web_search", "webSearch must be a boolean");
     if (body.initialPrompt !== undefined && typeof body.initialPrompt !== "string") throw new TerminalRequestError("invalid_prompt", "initialPrompt must be a string");
     if (body.chatMode !== undefined && typeof body.chatMode !== "boolean") throw new TerminalRequestError("invalid_chat_mode", "chatMode must be a boolean");
+    if (body.title !== undefined && typeof body.title !== "string") throw new TerminalRequestError("invalid_title", "title must be a string");
     const terminal = await createTerminal({
       provider: body.provider as TerminalProvider,
       cwd: body.cwd,
@@ -52,6 +53,7 @@ export async function POST(request: Request) {
       webSearch: body.webSearch as boolean | undefined,
       initialPrompt: body.initialPrompt as string | undefined,
       chatMode: body.chatMode as boolean | undefined,
+      title: body.title as string | undefined,
     });
     return NextResponse.json({ terminal }, { status: 201, headers: { "Cache-Control": "no-store" } });
   } catch (error) { return failure(error); }
