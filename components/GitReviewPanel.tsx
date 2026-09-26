@@ -11,12 +11,14 @@ import type {
   GitFileDiffResponse,
   GitFileStatus,
   GitFileStatusKind,
+  GitLineAction,
   GitLogResponse,
   GitStatusResponse,
   GitStashEntry,
 } from "@/lib/git-types";
 import { getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { DiffView } from "./FileViewer";
+import { GitLineDiffView } from "./GitLineDiffView";
 
 type PanelTab = "changes" | "branch" | "history";
 
@@ -24,7 +26,7 @@ type ChangeGroup = "staged" | "unstaged" | "untracked";
 
 type SelectedChange = {
   file: GitFileStatus;
-  scope: GitDiffScope;
+  scope: ChangeGroup;
 };
 
 interface GitRepositoryEntry {
@@ -44,7 +46,7 @@ const TABS: Array<{ key: PanelTab; label: string }> = [
   { key: "history", label: "History" },
 ];
 
-const GROUPS: Array<{ key: ChangeGroup; label: string; scope: GitDiffScope }> = [
+const GROUPS: Array<{ key: ChangeGroup; label: string; scope: ChangeGroup }> = [
   { key: "staged", label: "Staged", scope: "staged" },
   { key: "unstaged", label: "Changes", scope: "unstaged" },
   { key: "untracked", label: "Untracked", scope: "untracked" },
@@ -72,6 +74,12 @@ function belongsToGroup(file: GitFileStatus, group: ChangeGroup): boolean {
   if (group === "untracked") return file.indexStatus === "?" && file.worktreeStatus === "?";
   if (group === "staged") return file.indexStatus !== " " && file.indexStatus !== "?";
   return file.worktreeStatus !== " " && file.worktreeStatus !== "?";
+}
+
+/** The selection, while its file still has changes in the selected group. */
+function keepSelection(current: SelectedChange | null, next: GitStatusResponse): SelectedChange | null {
+  const file = current && next.files.find((candidate) => candidate.filePath === current.file.filePath);
+  return current && file && belongsToGroup(file, current.scope) ? current : null;
 }
 
 function statusLetter(file: GitFileStatus, scope: GitDiffScope): string {
@@ -153,6 +161,9 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
   const [status, setStatus] = useState<GitStatusResponse | null>(null);
   const [selected, setSelected] = useState<SelectedChange | null>(null);
   const [diff, setDiff] = useState<GitFileDiffResponse | null>(null);
+  // Bumped to load the selected diff again after the repository changed.
+  const [diffNonce, setDiffNonce] = useState(0);
+  const loadedDiffKey = useRef<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingDiff, setLoadingDiff] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -214,9 +225,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
       const next = await res.json() as GitStatusResponse & { error?: string };
       if (!res.ok) throw new Error(next.error ?? `Failed to load Git status (${res.status})`);
       setStatus(next);
-      setSelected((current) => current && next.files.some((file) => file.filePath === current.file.filePath)
-        ? current
-        : null);
+      setSelected((current) => keepSelection(current, next));
     } catch (cause) {
       setStatus(null);
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -229,12 +238,18 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
 
   useEffect(() => {
     if (!repositoryCwd || !selected) {
+      loadedDiffKey.current = null;
       setDiff(null);
       return;
     }
     const controller = new AbortController();
-    setLoadingDiff(true);
-    setDiff(null);
+    // Reloading the file already shown keeps its diff on screen until the new one arrives.
+    const key = `${repositoryCwd}\0${selected.file.filePath}\0${selected.scope}`;
+    if (loadedDiffKey.current !== key) {
+      loadedDiffKey.current = key;
+      setLoadingDiff(true);
+      setDiff(null);
+    }
     const params = new URLSearchParams({ cwd: repositoryCwd, path: selected.file.filePath, scope: selected.scope });
     void fetch(`/api/git/diff?${params}`, { signal: controller.signal })
       .then(async (res) => {
@@ -248,7 +263,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
       })
       .finally(() => { if (!controller.signal.aborted) setLoadingDiff(false); });
     return () => controller.abort();
-  }, [repositoryCwd, selected]);
+  }, [repositoryCwd, selected, refreshKey, nonce, diffNonce]);
 
   const grouped = useMemo(() => new Map(GROUPS.map((group) => [
     group.key,
@@ -270,9 +285,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
       const next = await res.json() as GitStatusResponse & { error?: string };
       if (!res.ok) throw new Error(next.error ?? `Action failed (${res.status})`);
       setStatus(next);
-      setSelected((current) => current && next.files.some((file) => file.filePath === current.file.filePath)
-        ? current
-        : null);
+      setSelected((current) => keepSelection(current, next));
       onRepoChanged?.();
       return true;
     } catch (cause) {
@@ -280,11 +293,16 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
       return false;
     } finally {
       setBusy(false);
+      setDiffNonce((value) => value + 1);
     }
   }, [repositoryCwd, onRepoChanged]);
 
   const stage = useCallback((paths: string[]) => { if (paths.length) void runWrite("/api/git/stage", { paths }); }, [runWrite]);
   const unstage = useCallback((paths: string[]) => { if (paths.length) void runWrite("/api/git/unstage", { paths }); }, [runWrite]);
+  const applyLines = useCallback((action: GitLineAction, lineIds: number[]) => {
+    if (!selected || !diff?.fingerprint) return;
+    void runWrite("/api/git/lines", { path: selected.file.filePath, scope: selected.scope, action, fingerprint: diff.fingerprint, lineIds });
+  }, [diff, runWrite, selected]);
   const discard = useCallback((paths: string[]) => {
     if (!paths.length) return;
     const label = paths.length === 1 ? "this file" : `${paths.length} files`;
@@ -507,7 +525,11 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
                   <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)" }}>
                     {getFileName(selected.file.filePath)}
                   </div>
-                  <DiffView patch={diff.patch} />
+                  {diff.fingerprint ? (
+                    <GitLineDiffView key={diff.fingerprint} patch={diff.patch} scope={selected.scope} fileLabel={getFileName(selected.file.filePath)} busy={busy} onApply={applyLines} />
+                  ) : (
+                    <DiffView patch={diff.patch} />
+                  )}
                 </div>
               ) : (
                 <EmptyState title="Diff unavailable" detail="This file may be binary, too large, or unchanged in this review group." />
