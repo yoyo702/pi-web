@@ -214,7 +214,8 @@ function fakeClaudeManager(t) {
   global.__piWebTerminalState = { sessions: new Map() };
   const spawns = [];
   Module._load = function (request, parent, isMain) {
-    if (request === "node-pty") return { spawn(executable, args) { spawns.push(args); return { pid: -1, onData() {}, onExit() {}, write() {}, resize() {}, kill() {} }; } };
+    // The --settings hooks are covered by terminal-activity.test.cjs.
+    if (request === "node-pty") return { spawn(executable, args) { spawns.push(args[0] === "--settings" ? args.slice(2) : args); return { pid: -1, onData() {}, onExit() {}, write() {}, resize() {}, kill() {} }; } };
     return previous.load.call(this, request, parent, isMain);
   };
   const modulePath = require.resolve("./terminal-manager.cjs");

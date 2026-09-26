@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useWorkspaceStatusSelector } from "@/hooks/useWorkspaceStatus";
-import { computeRailActivity, groupRailActivity, type RailActivityItem, type RailCompletedEntry, type WorkspaceActivity } from "@/lib/rail-activity";
+import { computeRailActivity, groupRailActivity, terminalIsBusy, type RailActivityItem, type RailCompletedEntry, type WorkspaceActivity } from "@/lib/rail-activity";
 import type { ProjectWorkspace } from "@/lib/project-workspaces";
 import type { SessionInfo } from "@/lib/types";
 
@@ -66,7 +66,7 @@ export function useWorkspaceActivity(workspaces: ProjectWorkspace[]): WorkspaceA
           if (cancelled) { setTick((current) => current + 1); return; }
         }
         const counts: Record<string, number> = {};
-        for (const terminal of terminals) if (terminal.state === "running") counts[terminal.cwd] = (counts[terminal.cwd] ?? 0) + 1;
+        for (const terminal of terminals) if (terminalIsBusy(terminal)) counts[terminal.cwd] = (counts[terminal.cwd] ?? 0) + 1;
         const now = Date.now();
         // Running items, terminals ended within 5 minutes, and items that
         // finished within the last 30 s; see lib/rail-activity.ts.

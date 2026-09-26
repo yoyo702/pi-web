@@ -104,6 +104,11 @@ test("each new notification goes to every subscribed device, encrypted for it", 
   assert.match(first.headers.Authorization, /^vapid t=.+, k=.+$/);
   assert.deepEqual(decrypt(first.body, phone), { id: entry.id, title: "Codex needs your input", body: "Fix the build · pi-web", tag: "codex:thread-1" });
   assert.equal(decrypt(requests[1].body, laptop).id, entry.id);
+
+  // The detail (what it asks, why it failed, its last reply) follows the title.
+  notifications.add({ kind: "terminal", event: "approval", targetId: "term-1", cwd: "/work/pi-web", title: "Claude terminal", detail: "Claude needs your permission to use Bash" });
+  await waitFor(() => requests.length === 4);
+  assert.deepEqual(decrypt(requests[2].body, phone).body, "Claude terminal · pi-web · Claude needs your permission to use Bash");
 });
 
 test("each device only hears the events it chose; a refresh keeps the choice", async (t) => {

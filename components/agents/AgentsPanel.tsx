@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { TerminalPermissionMode, TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
+import { terminalIsBusy } from "@/lib/rail-activity";
 import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
 import { useWorkspaceStatus } from "@/hooks/useWorkspaceStatus";
 import { useClaudeSessions, type ClaudeSession } from "@/hooks/useClaudeSessions";
@@ -617,7 +618,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
         {manualShellTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "shell", count: shellTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
         {manualShellTerminals.length === 0 && projectScripts.length === 0 ? <InlineMessage>No workspace terminals</InlineMessage> : manualShellTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
       </div>}
-      <ProviderRow provider="codex" label="Codex" badge="C" badgeColor="var(--accent)" open={codexOpen} count={codexTerminals.length + codexHistory.length} running={codexTerminals.filter((terminal) => terminal.state === "running").length + sessions.filter((session) => session.runtime?.state === "running" || session.runtime?.state === "approval").length} onToggle={() => setCodexOpen((value) => !value)} onNewAgent={onNewAgent} onNewChat={onNewCodexChat ? () => onNewCodexChat(cwd) : undefined} />
+      <ProviderRow provider="codex" label="Codex" badge="C" badgeColor="var(--accent)" open={codexOpen} count={codexTerminals.length + codexHistory.length} running={codexTerminals.filter(terminalIsBusy).length + sessions.filter((session) => session.runtime?.state === "running" || session.runtime?.state === "approval").length} onToggle={() => setCodexOpen((value) => !value)} onNewAgent={onNewAgent} onNewChat={onNewCodexChat ? () => onNewCodexChat(cwd) : undefined} />
       {codexOpen && <div style={sessionListStyle}>
         <div style={sessionToolsStyle}>
           <label style={searchStyle}>
@@ -665,7 +666,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
               </div>)}
         {!loading && !error && nextCursor && <button type="button" disabled={loadingMore} onClick={() => void loadMoreSessions()} style={retryStyle}>{loadingMore ? "Loading…" : "Load more sessions"}</button>}
       </div>}
-      <ProviderRow provider="claude" label="Claude" badge="A" badgeColor="#d97706" open={claudeOpen} count={claudeTerminals.length + claudeHistory.length} running={claudeTerminals.filter((terminal) => terminal.state === "running").length + claudeHistory.filter((session) => session.runtime?.owner === "chat" && session.runtime.state !== "idle").length} onToggle={() => setClaudeOpen((value) => !value)} onNewAgent={onNewAgent} onNewChat={onNewClaudeChat ? () => onNewClaudeChat(cwd) : undefined} />
+      <ProviderRow provider="claude" label="Claude" badge="A" badgeColor="#d97706" open={claudeOpen} count={claudeTerminals.length + claudeHistory.length} running={claudeTerminals.filter(terminalIsBusy).length + claudeHistory.filter((session) => session.runtime?.owner === "chat" && session.runtime.state !== "idle").length} onToggle={() => setClaudeOpen((value) => !value)} onNewAgent={onNewAgent} onNewChat={onNewClaudeChat ? () => onNewClaudeChat(cwd) : undefined} />
       {claudeOpen && <div style={sessionListStyle}>
         <div style={sessionToolsStyle}>
           <label style={searchStyle}>
@@ -929,14 +930,15 @@ function MenuButton({ children, danger, onClick }: { children: ReactNode; danger
 }
 
 function TerminalRow({ terminal, preferredLabel, onOpen, onStop, onRemove }: { terminal: TerminalSession; preferredLabel?: string; onOpen?: (terminal: TerminalSession, label?: string) => void; onStop: (terminal: TerminalSession) => void; onRemove: (terminal: TerminalSession) => void }) {
-  const state = terminal.state === "running" ? "running" : "idle";
+  const state = terminal.state !== "running" || terminal.activity === "waiting" ? "idle" : terminal.activity === "approval" ? "approval" : "running";
+  const status = terminal.state !== "running" ? terminal.state : terminal.activity === "approval" ? "needs approval" : terminal.activity === "waiting" ? "waiting for input" : terminal.activity === "working" ? "working" : "running";
   const label = preferredLabel || terminal.title || (terminal.sourceSessionId ? `${terminal.provider} · ${terminal.sourceSessionId.slice(0, 8)}` : `${terminal.provider} terminal`);
   return <div style={sessionContainerStyle}>
     <button type="button" style={sessionMainStyle} title={`${label}\n${terminal.cwd}`} onClick={() => onOpen?.(terminal, label)}>
       <StatusDot state={state} />
       <span style={{ minWidth: 0, flex: 1 }}>
         <span style={sessionNameStyle}>{label}</span>
-        <span style={sessionMetaStyle}>Terminal · {terminal.state}</span>
+        <span style={sessionMetaStyle}>Terminal · {status}</span>
       </span>
       <span style={{ ...timeStyle, textTransform: "uppercase" }}>{terminal.state === "running" ? "live" : "ended"}</span>
     </button>

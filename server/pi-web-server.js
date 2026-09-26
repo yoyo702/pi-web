@@ -197,6 +197,20 @@ async function handleAuthRequest(req, res, url) {
   }
   writeJson(res, 405, { error: "method not allowed" });
 }
+// Claude Code hooks inside a TianForge terminal report its state here
+// (server/terminal-hook.cjs). They have no login: the terminal's own token
+// authorizes them, and they only come from this machine.
+async function handleTerminalHook(req, res) {
+  if (req.method !== "POST") return writeJson(res, 405, { error: "method not allowed" });
+  const remote = String(req.socket.remoteAddress || "").toLowerCase().replace(/^::ffff:/, "");
+  if (!getLocalHostNames().has(remote.includes(":") ? `[${remote}]` : remote)) return writeJson(res, 403, { error: "terminal hooks are accepted from this machine only" });
+  let body;
+  try { body = await readJson(req); } catch (error) { return writeJson(res, 400, { error: error.message }); }
+  if (!require("./agents/terminal-manager.cjs").reportHookActivity(body)) return writeJson(res, 404, { error: "unknown terminal" });
+  res.writeHead(204, { "Cache-Control": "no-store" });
+  res.end();
+}
+
 const server = (tls ? https : http).createServer(tls || undefined, (req, res) => {
   // Route handlers return their promises so both synchronous throws and
   // rejected async work (e.g. auth handlers after an await) land here.
@@ -234,6 +248,7 @@ function handleRequest(req, res) {
   if (isPiWebAuthRoute) {
     return handleAuthRequest(req, res, url);
   }
+  if (url.pathname === "/api/terminal-hook") return handleTerminalHook(req, res);
   const terminalApi = require("./agents/terminal-api.cjs");
   if (terminalApi.isTerminalPath(url.pathname)) {
     const internal = auth.safeEqual(req.headers["x-pi-web-internal"], global.__piWebInternalTerminalToken);

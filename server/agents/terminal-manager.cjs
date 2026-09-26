@@ -15,6 +15,8 @@ const MAX_TERMINAL_RECORDS = 100;
 const MAX_COMMAND_HISTORY = 50;
 const MAX_COMMAND_CHARS = 8_000;
 const PROVIDERS = new Set(["shell", "codex", "claude"]);
+const ACTIVITIES = new Set(["working", "waiting", "approval"]);
+const HOOK_SCRIPT = path.join(__dirname, "..", "terminal-hook.cjs");
 const state = global.__piWebTerminalState || { sessions: new Map() };
 global.__piWebTerminalState = state;
 
@@ -99,8 +101,95 @@ function assertSkipPermissionsSupported(provider, executable) {
   return flag;
 }
 
+/**
+ * What a Claude or Codex terminal is doing: "working" on a turn, "waiting" for
+ * the next message, or waiting for an "approval". Null when unknown (shells,
+ * or a CLI that has not reported yet). Entering "approval", and finishing a
+ * turn, add a notification; `quiet` skips it (the user interrupted the turn).
+ */
+function setActivity(session, next, { detail, quiet = false } = {}) {
+  if (session.state !== "running" || !ACTIVITIES.has(next) || session.activity === next) return;
+  const previous = session.activity;
+  session.activity = next;
+  workspaceStatus.notify("terminals");
+  if (quiet) return;
+  const base = { kind: "terminal", targetId: session.id, cwd: session.cwd, title: session.title };
+  if (next === "approval") notifications.add({ ...base, event: "approval", detail: detail || "Waiting for your approval" });
+  else if (next === "waiting" && (previous === "working" || previous === "approval")) notifications.add({ ...base, event: "completed", detail: detail || "Waiting for your next message" });
+}
+
+// Codex has no hook we can add without replacing the user's own `notify`
+// setting, but it keeps the terminal title (OSC 0/2) current: a braille
+// spinner prefix while working, "Action Required" while an approval waits.
+const TITLE_SEQUENCE = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+function codexActivity(title) {
+  if (/Action Required/i.test(title)) return "approval";
+  return /^[\u2800-\u28ff]/.test(title.trim()) ? "working" : "waiting";
+}
+function trackCodexTitle(session, chunk) {
+  // A title can be split across PTY chunks: keep an unfinished sequence.
+  const text = (session.titleTail || "") + chunk.toString("utf8");
+  let title = null;
+  let end = 0;
+  TITLE_SEQUENCE.lastIndex = 0;
+  for (let match; (match = TITLE_SEQUENCE.exec(text));) { title = match[1]; end = TITLE_SEQUENCE.lastIndex; }
+  const rest = text.slice(end);
+  const open = rest.lastIndexOf("\x1b]");
+  session.titleTail = open >= 0 && rest.length - open <= 1024 ? rest.slice(open) : rest.endsWith("\x1b") ? "\x1b" : "";
+  if (title !== null) setActivity(session, codexActivity(title));
+}
+
+// Claude has no such title, but reports its turns through hooks added at
+// launch (claudeHookSettings); they run server/terminal-hook.cjs, which posts
+// here with the terminal's own token.
+function reportHookActivity({ token, activity, detail } = {}) {
+  if (typeof token !== "string" || !token || !(ACTIVITIES.has(activity) || activity === "idle")) return false;
+  const given = Buffer.from(token);
+  const session = [...state.sessions.values()].find((candidate) => {
+    if (!candidate.hookToken) return false;
+    const expected = Buffer.from(candidate.hookToken);
+    return expected.length === given.length && crypto.timingSafeEqual(expected, given);
+  });
+  if (!session) return false;
+  // "idle": Claude has sat at its prompt for a while, e.g. after a rejected
+  // approval or a local command that never reaches Stop. Settle quietly.
+  if (activity === "idle") setActivity(session, "waiting", { quiet: true });
+  else setActivity(session, activity, { detail: typeof detail === "string" ? detail : undefined });
+  return true;
+}
+
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function claudeHookSettings() {
+  const hook = (activity, matcher) => [{ ...(matcher ? { matcher } : {}), hooks: [{ type: "command", command: `${shellQuote(process.execPath)} ${shellQuote(HOOK_SCRIPT)} ${activity}`, timeout: 10 }] }];
+  return JSON.stringify({ hooks: { UserPromptSubmit: hook("working"), Stop: hook("waiting"), Notification: [...hook("approval", "permission_prompt|elicitation_dialog"), ...hook("idle", "idle_prompt")] } });
+}
+
+// The address the hooks post to: this server, reached over loopback when it
+// listens on every interface.
+function hookUrl() {
+  const host = process.env.PI_WEB_RUNTIME_HOST || "127.0.0.1";
+  const port = process.env.PI_WEB_RUNTIME_PORT || process.env.PI_WEB_INTERNAL_PORT || "30141";
+  const address = ["0.0.0.0", ""].includes(host) ? "127.0.0.1" : ["::", "[::]"].includes(host) ? "[::1]" : host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+  return `${process.env.PI_WEB_RUNTIME_PROTOCOL === "https" ? "https" : "http"}://${address}:${port}/api/terminal-hook`;
+}
+
+// Escape or Ctrl-C interrupts a Claude or Codex turn (or rejects its
+// approval): settle to "waiting" without a notification. For Claude, Enter or
+// a numbered choice answers an approval prompt. Codex titles then catch up.
+function trackAgentInput(session, value) {
+  if (value === "\x1b" || value === "\x03") {
+    if (session.activity === "working" || session.activity === "approval") setActivity(session, "waiting", { quiet: true });
+  } else if (session.provider === "claude" && session.activity === "approval" && (value.includes("\r") || /^[0-9]$/.test(value))) {
+    setActivity(session, "working");
+  }
+}
+
 function appendOutput(session, data) {
   const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+  if (session.provider === "codex") trackCodexTitle(session, chunk);
   session.chunks.push(chunk);
   session.bufferBytes += chunk.length;
   while (session.bufferBytes > MAX_BUFFER_BYTES && session.chunks.length > 1) {
@@ -160,6 +249,7 @@ function publicSession(session) {
     bufferBytes: session.bufferBytes,
     bufferTruncated: session.truncated,
     history: [...(session.history || [])],
+    activity: session.activity ?? null,
   };
 }
 
@@ -223,6 +313,13 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
   const args = buildLaunchArgs(provider, executable, permissionMode, launchMode, noAltScreen, sourceSessionId, model, webSearch, initialPrompt);
   const pty = getPty();
   const env = terminalEnvironment();
+  // Hook commands are run by a POSIX shell; on Windows the state stays unknown.
+  const hookToken = provider === "claude" && process.platform !== "win32" ? crypto.randomBytes(24).toString("base64url") : null;
+  if (hookToken) {
+    args.unshift("--settings", claudeHookSettings());
+    env.PI_WEB_TERMINAL_HOOK_URL = hookUrl();
+    env.PI_WEB_TERMINAL_HOOK_TOKEN = hookToken;
+  }
 
   let terminal;
   try {
@@ -238,6 +335,8 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
     id: crypto.randomUUID(), provider, title: typeof title === "string" && title.trim() ? title.trim().slice(0, 80) : defaultTitle, cwd, pid: terminal.pid, permissionMode, launchMode, noAltScreen, sourceSessionId, model, webSearch, initialPrompt, chatMode, cols, rows,
     state: "running", createdAt: new Date().toISOString(), endedAt: null, exitCode: null, signal: null,
     terminal, chunks: [], bufferBytes: 0, truncated: false, subscribers: new Set(), history: [], pendingInput: "",
+    // A new Claude waits for its first message; Codex reports through its title.
+    activity: hookToken ? "waiting" : null, hookToken, titleTail: "",
   };
   state.sessions.set(session.id, session);
   workspaceStatus.notify("terminals");
@@ -248,6 +347,8 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
     session.signal = signal;
     session.endedAt = new Date().toISOString();
     session.terminal = null;
+    session.activity = null;
+    session.hookToken = null;
     for (const subscriber of session.subscribers) {
       try { subscriber(null); } catch { /* ignore */ }
     }
@@ -317,6 +418,7 @@ function inputTerminal(id, data) {
   const value = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
   if (Buffer.byteLength(value) > 64 * 1024) throw new TerminalError("input_too_large", "terminal input is limited to 64 KiB");
   recordTerminalInput(session, value);
+  if (session.provider === "claude" || session.provider === "codex") trackAgentInput(session, value);
   session.terminal.write(value);
 }
 
@@ -419,6 +521,6 @@ function shutdownTerminals() {
   }
 }
 
-module.exports = { TerminalError, terminalEnvironment, createTerminal, listTerminals, terminalStats, getTerminal, renameTerminal, getBuffer, runtimeForSession, inputTerminal, resizeTerminal, stopTerminal, removeTerminal, clearEndedTerminals, stopTerminalsForSession, interruptAndStopTerminalsForSession, unknownCodexTerminals, subscribeTerminal, snapshotAndSubscribeTerminal, shutdownTerminals };
+module.exports = { TerminalError, terminalEnvironment, createTerminal, listTerminals, terminalStats, getTerminal, renameTerminal, getBuffer, runtimeForSession, inputTerminal, resizeTerminal, stopTerminal, removeTerminal, clearEndedTerminals, stopTerminalsForSession, interruptAndStopTerminalsForSession, unknownCodexTerminals, reportHookActivity, subscribeTerminal, snapshotAndSubscribeTerminal, shutdownTerminals };
 
 workspaceStatus.registerProvider("terminals", () => ({ terminals: listTerminals(), limits: terminalStats().limits }));

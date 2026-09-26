@@ -7,6 +7,8 @@ export type TerminalProvider = "shell" | "codex" | "claude";
 export type TerminalPermissionMode = "confirm" | "on-request" | "never" | "bypass";
 export type TerminalLaunchMode = "new" | "resume-last" | "resume" | "fork";
 export type TerminalState = "running" | "ended" | "stopped";
+/** What a running Claude or Codex terminal is doing; null for shells or when unknown. */
+export type TerminalActivity = "working" | "waiting" | "approval";
 
 export interface TerminalLaunchDescriptor {
   provider: TerminalProvider;
@@ -51,6 +53,7 @@ export interface TerminalSession {
   bufferBytes: number;
   bufferTruncated: boolean;
   history: string[];
+  activity?: TerminalActivity | null;
 }
 
 export class TerminalRequestError extends Error {

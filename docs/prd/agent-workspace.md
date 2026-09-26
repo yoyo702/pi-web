@@ -161,7 +161,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - 记录的事件：
   - Codex 聊天：一轮完成（Completed）、失败（Failed，带 `turn.error` 原因）、等待审批或提问（Needs your input）；这一轮中途运行时意外退出算失败（用户停止或服务端正常关闭时先停止运行时，不记录）。被中断（interrupted）的一轮不记录；pi-web 不支持而直接拒绝的请求不记录。标题为会话名，无名字时用第一条消息。
   - Pi 会话：等整次运行结束（`agent_settled`）后，按最后一次 `agent_end` 的最后一条助手消息判断：`stopReason: "error"` 记为失败（带错误信息），用户中止（aborted）不记录，其余记为完成。Pi 自动重试成功、或上下文溢出后压缩并继续成功的，只记一条完成。标题为会话名，否则第一条用户消息。worktree 里的会话同时记录项目根目录，用来找到对应项目。
-  - 终端：退出码非 0 或被信号结束记为失败（“Exited with code N” / “Killed by signal …”）；Codex/Claude 终端和项目任务终端（“Task: <脚本>”）正常退出记为完成；普通 shell 正常退出、用户点 Stop 停止的终端不记录。
+  - 终端：退出码非 0 或被信号结束记为失败（“Exited with code N” / “Killed by signal …”）；Codex/Claude 终端和项目任务终端（“Task: <脚本>”）正常退出记为完成；普通 shell 正常退出、用户点 Stop 停止的终端不记录。Claude/Codex 终端运行中还会记录：等待审批（Needs your input，附审批内容）和一轮完成、等待下一条消息（Finished，Claude 附最后一条回复，见“Terminal 活动状态”）。
 - 已读：同一个聊天、会话或终端有新通知时，它之前未读的通知自动标为已读（只需关注最新状态；同一聊天连续两个审批时，只有后一个显示为未读，两个审批卡片仍都在聊天里）。点击通知标为已读，“Mark all read” 全部标为已读；已读状态保存在服务端，所有设备同步。接口 `POST /api/notifications/read`，请求体 `{"ids": [...]}`（最多 500 个）或 `{"all": true}`，返回 `{changed}`；格式错误 400，非 POST 405。
 - 推送：通知列表作为 `notifications` 快照（`{notifications, unread}`，新的在前）通过状态 SSE（`/api/agent/running/events`）推送，连接时先发一次完整快照。
 - 活动中心（`components/ActivityCenter.tsx`）：项目栏铃铛和中间工具栏的 “Workspace activity” 按钮（手机上也有）打开同一个面板（对话框 “Workspace activity”）。活动数据由 `hooks/useWorkspaceActivity.ts` 在 AppShell 里算一次，项目栏角标、弹出菜单和活动中心共用（规则见 `lib/rail-activity.ts`）。
@@ -175,7 +175,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - 按设备选择事件：开关打开后下面有 “Notify for” 三个勾选项：Needs input（`approval`）、Failed（`failed`）、Finished（`completed`），默认全选。至少保留一项（剩最后一项时它不能取消，想全部停止就关掉开关）。选择存在该设备的订阅里（`events`，按 approval、failed、completed 顺序）；浏览器重新上报同一订阅时保留原选择；关掉开关再打开会恢复全选。旧版本保存的订阅没有 `events`，按全选处理。只影响系统推送，活动中心和页面内提示仍显示所有事件。
   - 服务端自己实现加密（RFC 8291 aes128gcm）和 VAPID 签名（RFC 8292），只用 `node:crypto` 和 `fetch`，不加依赖；请求走全局 fetch，遵循 `HTTP(S)_PROXY`。推送服务（Google、Apple、Mozilla）只转发密文。
   - 存储：VAPID 密钥和设备订阅在 `~/.pi-web/push.json`（权限 0600，`PI_WEB_PUSH_FILE` 改路径；测试和 e2e 用临时文件）。第一次有设备查询或订阅时才生成密钥；没有这个文件时不发送。最多 20 台设备，超出时丢弃最早的。只接受浏览器推送服务的 https 地址（FCM `fcm.googleapis.com`、Apple `*.push.apple.com`、Mozilla `*.push.services.mozilla.com`、Windows `*.notify.windows.com`，不带端口），公钥须是 P-256 曲线上的点；发送时不跟随重定向。服务端每条通知都会请求这些地址，这样客户端无法让服务端去请求内网或其他地址。推送服务返回 404/410（设备已失效）时删除该设备；其他失败只记日志。VAPID 的 `sub` 默认是项目地址，可用 `PI_WEB_PUSH_SUBJECT` 改（如 `mailto:you@example.com`）。
-  - 消息：标题如 “Terminal failed”、“Codex needs your input”，正文为条目名 · 项目（失败时附原因）；`tag` 和 `Topic` 按聊天、会话或终端区分，同一目标的新消息替换旧消息。TTL 24 小时；完成为普通优先级，失败和等待审批为高优先级。
+  - 消息：标题如 “Terminal failed”、“Codex needs your input”，正文为条目名 · 项目 · 详情（失败原因、审批内容或 Claude 终端的最后回复，有才附）；`tag` 和 `Topic` 按聊天、会话或终端区分，同一目标的新消息替换旧消息。TTL 24 小时；完成为普通优先级，失败和等待审批为高优先级。
   - 接口（都是 POST，请求体须为 `application/json`，否则 415）：`/api/push` `{endpoint?}` → `{publicKey, subscribed, events}`（查询用 POST，订阅地址不进日志；未订阅时 `events` 为全部）；`/api/push/subscribe` `{subscription, events?}`（`PushSubscription.toJSON()`）→ 204；`/api/push/events` `{endpoint, events}` → 204，设备未订阅时 404，`events` 为空或含未知事件时 400；`/api/push/unsubscribe` `{endpoint}` → 204。格式错误 400，其他方法 405。设置了密码时需登录；不论是否设置密码，跨站请求都返回 403（否则没有密码时，任何网站都能替用户订阅一个自己的设备，收到所有通知）。
   - 点击系统通知（`public/sw.js`）：
     - 有已打开的 TianForge 窗口时，优先选当前聚焦的、其次可见的窗口，聚焦它并发消息给页面；该窗口停在其他页面（如登录页）时改为在其中加载 `/?notification=<id>`（不能加载时新开窗口）。没有窗口时新开 `/?notification=<id>`。
@@ -186,7 +186,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
     - 非安全来源（HTTP 局域网地址）：浏览器只允许在可信 HTTPS 下推送，需通过 `*.ts.net` 地址（Tailscale Serve，见 README）或 localhost 打开。
     - iPhone / iPad：需 iOS 16.4 以上，并把 TianForge 添加到主屏幕、从主屏幕打开。
     - 浏览器已拒绝通知权限：提示到站点设置里允许。
-  - 退出登录不会取消订阅（目前没有退出登录的界面）；推送内容只含标题、项目名和失败原因。
+  - 退出登录不会取消订阅（目前没有退出登录的界面）；推送内容只含标题、项目名和详情（失败原因、审批内容、Claude 终端最后回复的前 300 字）。
 - 暂未实现：正在查看的标签不会自动标为已读。
 
 ## 状态模型
@@ -198,7 +198,21 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - `stopped`：用户主动停止。
 - `failed/offline`：进程异常或连接不可用。
 
-Codex Chat 的审批来自 app-server 协议，Claude Chat 的审批来自 stream-json 的 `can_use_tool` 控制请求；普通 Terminal 不通过输出文本推断审批。
+Codex Chat 的审批来自 app-server 协议，Claude Chat 的审批来自 stream-json 的 `can_use_tool` 控制请求；Claude/Codex 终端的审批来自下面的活动状态，普通 shell 终端不推断审批。
+
+### Terminal 活动状态
+
+Claude/Codex 终端运行时带 `activity`：`working`（正在跑一轮）、`waiting`（等待下一条消息）、`approval`（等待审批或回答问题）；普通 shell、Windows 上的 Claude、还没报告过的 Codex 为 `null`（按运行中处理，与以前相同）。终端结束后为 `null`。
+
+- Claude：启动时用 `--settings` 加四个 hook（不改用户的 `~/.claude` 设置，用户自己的 hook 照常运行）：`UserPromptSubmit` → working，`Stop` → waiting（附 `last_assistant_message`），`Notification`（`permission_prompt|elicitation_dialog`）→ approval（附提示文字），`Notification`（`idle_prompt`，Claude 停在输入框约 60 秒后发出）→ waiting，不记通知（拒绝审批、本地命令等没有 `Stop` 的情况靠它纠正）。hook 运行 `server/terminal-hook.cjs`，把状态 POST 到 `/api/terminal-hook`：
+  - 地址来自环境变量 `PI_WEB_TERMINAL_HOOK_URL`（本机地址；服务监听 0.0.0.0 时用 127.0.0.1，监听 :: 时用 [::1]，其他地址原样使用；HTTPS 时不校验证书），凭据是每个终端随机生成的 `PI_WEB_TERMINAL_HOOK_TOKEN`；这两个变量只加给 Claude 终端。
+  - 接口不需要登录，靠 token 认证：token 不对返回 404，状态非法 404，非 POST 405。另外只接受来自本机地址的请求（403），这只是额外防护：经本机反向代理（如 Tailscale Serve）来的请求也显示为本机地址。
+  - token 在 Claude 运行的所有命令的环境里都可见，所以 Claude 自己跑的命令能伪造本终端的状态和通知文字（最多 300 字）；只影响这一个终端。
+  - 脚本 1 秒内读完 stdin、3 秒超时，总是静默退出 0，服务不在时不影响 Claude。
+  - 新 Claude 终端一开始是 waiting。审批时 Claude 不再发 hook，所以在终端里按 Enter 或数字键选择后改回 working；按 Esc 或 Ctrl+C（中断这一轮或拒绝审批）改为 waiting，不记完成通知（Esc/Ctrl+C 没真的中断时，下一个 hook 会纠正）。只移动方向键不改变状态。
+- Codex：没有可用的 hook（`notify` 设置会覆盖用户自己的 `notify`；hooks 需要逐个信任），改为读终端标题（OSC 0/2）：盲文 spinner 开头（如 “⠦ Reply OK | work”）→ working，含 “Action Required”（“[ ! ] / [ . ] Action Required | …” 闪烁）→ approval，其他 → waiting。标题跨输出块时拼接后再解析。在 working/approval 时按 Esc 或 Ctrl+C 立即改为 waiting 且不记通知（和 Claude 相同；没有真的中断时 spinner 标题会改回 working），其他输入不改变 Codex 的状态。
+- 通知：进入 approval 记一条 “needs your input”；从 working 或 approval 变为 waiting 记一条完成（“Waiting for your next message” 或 Claude 的最后回复）；启动时的 waiting、Esc/Ctrl+C 中断和 Claude 的 idle 纠正不记录（活动中心仍会把它列为 “completed” 30 秒，因为界面只看状态变化）。同一终端的新通知把旧的未读通知标为已读。
+- 界面：活动中心和项目栏里，approval 显示为等待审批，working 和 `null` 显示为运行中，waiting 不算运行中（刚从 working 变为 waiting 时列为 “completed” 30 秒）；项目栏的运行数、Agents 面板 Codex/Claude 分组的运行数同样不算 waiting 的终端（`terminalIsBusy`）。Agents 面板的终端行显示 “needs approval / waiting for input / working”，圆点分别为审批色、灰色、运行色。
 
 ## 所有权规则
 
@@ -229,7 +243,6 @@ Codex Chat 的审批来自 app-server 协议，Claude Chat 的审批来自 strea
 
 ## 后续计划
 
-- 为 Terminal CLI 增加结构化“等待输入”状态。
 - 任务模板、批量启动和跨项目任务队列。
 - 更细粒度的资源使用和运行时间统计。
 

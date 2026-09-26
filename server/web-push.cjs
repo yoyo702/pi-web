@@ -201,7 +201,7 @@ function message(entry) {
     id: entry.id,
     title: `${KIND_LABEL[entry.kind] ?? entry.kind} ${EVENT_LABEL[entry.event] ?? entry.event}`,
     // Cut by code point so an emoji is never split.
-    body: Array.from([entry.title, project, entry.event === "failed" ? entry.detail : ""].filter(Boolean).join(" · ")).slice(0, 400).join(""),
+    body: Array.from([entry.title, project, entry.detail].filter(Boolean).join(" · ")).slice(0, 400).join(""),
     // A newer message about the same chat, session or terminal replaces this one.
     tag: `${entry.kind}:${entry.targetId}`,
   };
