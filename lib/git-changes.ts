@@ -579,7 +579,7 @@ function safeRepoRelPaths(repositoryRoot: string, paths: string[]): string[] {
   return [...seen];
 }
 
-async function requireRepositoryRoot(cwd: string): Promise<string> {
+export async function requireRepositoryRoot(cwd: string): Promise<string> {
   const repositoryRoot = await findRepositoryRoot(cwd);
   if (!repositoryRoot) throw new Error("Not a Git repository");
   return repositoryRoot;
