@@ -31,7 +31,9 @@ export function LoginForm() {
       if (!verification.ok || !session.authenticated) {
         throw new Error("Password accepted, but this browser did not save the login cookie. Allow cookies for this site, then try again.");
       }
-      window.location.replace("/");
+      // A clicked system notification that needed a login opens now (see pi-web-server.js).
+      const notification = new URLSearchParams(window.location.search).get("notification");
+      window.location.replace(notification ? `/?notification=${encodeURIComponent(notification)}` : "/");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Login failed");
     } finally {

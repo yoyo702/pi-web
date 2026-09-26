@@ -918,6 +918,201 @@ test("lists recent notifications, marks them read on the server, and opens their
   await expect(page.locator('.center-workspace [role="tab"][data-tab-id="terminal:notify-terminal"]')).toHaveAttribute("aria-selected", "true");
 });
 
+// Workspaces act-a (active), act-b and act-c, with the routes a workspace
+// switch needs; `terminals` are listed per cwd and pushed on the status stream.
+async function mockActivityWorkspaces(page: Page, terminals: Array<Record<string, unknown>> = [], notifications: Array<Record<string, unknown>> = []) {
+  await page.addInitScript((snapshot) => {
+    if (!localStorage.getItem("pi-web:project-workspaces:v1")) localStorage.setItem("pi-web:project-workspaces:v1", JSON.stringify(snapshot));
+  }, {
+    activeId: "/tmp/pi-web-act-a",
+    workspaces: ["a", "b", "c"].map((name, index) => ({ id: `/tmp/pi-web-act-${name}`, projectRoot: `/tmp/pi-web-act-${name}`, cwd: `/tmp/pi-web-act-${name}`, label: `act-${name}`, sessionId: null, lastActive: 3 - index })),
+  });
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => {
+    const body = route.request().postDataJSON() as { cwd?: string };
+    return body.cwd ? route.fulfill({ json: { success: true, cwd: body.cwd } }) : route.fulfill({ status: 400, json: { error: "cwd required" } });
+  });
+  await page.route("**/api/git/status?*", async (route) => route.fulfill({ json: { isGitRepository: false, files: [] } }));
+  await page.route("**/api/worktrees?*", async (route) => route.fulfill({ json: { projectRoot: new URL(route.request().url()).searchParams.get("cwd"), isGit: false, isTopLevel: true, worktrees: [] } }));
+  await page.route("**/api/terminals**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname !== "/api/terminals") return route.fulfill({ status: 404, json: { error: "not found" } });
+    const cwd = url.searchParams.get("cwd") ?? "";
+    const own = terminals.filter((item) => item.cwd === cwd);
+    return route.fulfill({ json: {
+      cwd,
+      terminals: own,
+      stats: { workspace: { running: own.length, records: own.length, bufferBytes: 0 }, global: { running: terminals.length, records: terminals.length, bufferBytes: 0 }, limits: { running: 20, records: 100 } },
+    } });
+  });
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals, limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+    { type: "notifications", notifications, unread: notifications.filter((notification) => !notification.read).length },
+  ]);
+}
+
+test("opens one activity center from the rail bell and the toolbar, current workspace first", async ({ page }, testInfo) => {
+  const mobile = testInfo.project.name.startsWith("mobile");
+  await mockActivityWorkspaces(page, [{
+    id: "act-terminal-b", title: "Watcher", provider: "shell", state: "running", exitCode: null, cwd: "/tmp/pi-web-act-b",
+    pid: 222, permissionMode: "confirm", launchMode: "new", noAltScreen: true, cols: 80, rows: 24,
+    createdAt: "2026-08-03T00:00:00.000Z", endedAt: null, signal: null, bufferBytes: 0, bufferTruncated: false, history: [],
+  }]);
+  await page.goto("/");
+  const toolbarButton = page.locator(".center-workspace").getByRole("button", { name: "Workspace activity" });
+  await expect(toolbarButton).toContainText("1");
+
+  await toolbarButton.click();
+  const center = page.getByRole("dialog", { name: "Workspace activity" });
+  await expect(toolbarButton).toHaveAttribute("aria-expanded", "true");
+  const sections = center.locator(".activity-center-workspace");
+  // The idle current workspace comes first; idle act-c is not listed.
+  await expect(sections).toHaveCount(2);
+  await expect(sections.first()).toHaveAttribute("data-current", "true");
+  await expect(sections.first()).toContainText("act-a");
+  await expect(sections.first()).toContainText("Nothing running");
+  const others = center.getByRole("group", { name: "Other workspaces" });
+  await expect(others).toContainText("act-b");
+  await expect(others).toContainText("1 working");
+  await expect(others.getByRole("button", { name: /^Watcher · Terminal/ })).toBeVisible();
+  await expect(center).not.toContainText("act-c");
+  await expect(center.getByRole("region", { name: "System notifications" })).toBeVisible();
+
+  if (mobile) {
+    // A bottom sheet: full width, flush with the bottom of the viewport.
+    const viewport = page.viewportSize()!;
+    const box = (await center.locator(".activity-center").boundingBox())!;
+    expect(Math.round(box.width)).toBe(viewport.width);
+    expect(Math.round(box.y + box.height)).toBe(viewport.height);
+  }
+  await page.keyboard.press("Escape");
+  await expect(center).toBeHidden();
+  if (mobile) return;
+
+  // The rail bell opens the same panel.
+  await page.getByRole("navigation", { name: "Project workspaces" }).getByRole("button", { name: "Workspace activity" }).click();
+  await expect(center.locator(".activity-center-workspace").first()).toHaveAttribute("data-current", "true");
+  await expect(center.getByRole("group", { name: "Other workspaces" })).toContainText("act-b");
+  // Choosing another workspace switches to it and closes the panel.
+  await center.getByRole("group", { name: "Other workspaces" }).getByRole("button", { name: /act-b/ }).first().click();
+  await expect(center).toBeHidden();
+  await expect(page.getByRole("navigation", { name: "Project workspaces" }).getByTitle("/tmp/pi-web-act-b")).toHaveAttribute("aria-current", "page");
+});
+
+test("turns system notifications on and off for this device", async ({ page, request }) => {
+  // Another site cannot subscribe a device, even without a password.
+  const crossSite = await request.post("/api/push/subscribe", { headers: { Origin: "https://evil.example" }, data: { subscription: { endpoint: "https://fcm.googleapis.com/fcm/send/x" } } });
+  expect(crossSite.status()).toBe(403);
+
+  // A fake service worker registration, PushManager and permission prompt; the
+  // /api/push routes are mocked too, so nothing reaches a real push service.
+  await page.addInitScript(() => {
+    const calls: string[] = [];
+    let permission: NotificationPermission = "default";
+    type FakeSubscription = { endpoint: string; options: { applicationServerKey: ArrayBuffer }; toJSON: () => unknown; unsubscribe: () => Promise<boolean> };
+    let subscription: FakeSubscription | null = null;
+    const pushManager = {
+      getSubscription: async () => subscription,
+      subscribe: async (options: { applicationServerKey: Uint8Array }) => {
+        calls.push("subscribe");
+        const endpoint = "https://push.example.test/device-1";
+        subscription = {
+          endpoint,
+          options: { applicationServerKey: options.applicationServerKey.slice().buffer },
+          toJSON: () => ({ endpoint, expirationTime: null, keys: { p256dh: "fake-p256dh", auth: "fake-auth" } }),
+          unsubscribe: async () => { calls.push("unsubscribe"); subscription = null; return true; },
+        };
+        return subscription;
+      },
+    };
+    const registration = { pushManager };
+    const serviceWorker = { ready: Promise.resolve(registration), controller: null, register: async () => registration, getRegistration: async () => registration, addEventListener() {}, removeEventListener() {} };
+    Object.defineProperty(Navigator.prototype, "serviceWorker", { configurable: true, get: () => serviceWorker });
+    (window as unknown as { PushManager: unknown }).PushManager = function PushManager() {};
+    (window as unknown as { Notification: unknown }).Notification = class {
+      static get permission() { return permission; }
+      static async requestPermission() { calls.push("permission"); permission = "granted"; return permission; }
+    };
+    (window as unknown as { __pushCalls: string[] }).__pushCalls = calls;
+  });
+  await mockActivityWorkspaces(page);
+  const publicKey = Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]).toString("base64url");
+  const subscribed = new Set<string>();
+  const pushRequests: Array<{ path: string; body: unknown }> = [];
+  await page.route((url) => url.pathname === "/api/push" || url.pathname.startsWith("/api/push/"), async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const body = route.request().postDataJSON() as { endpoint?: string; subscription?: { endpoint: string } };
+    pushRequests.push({ path, body });
+    if (path === "/api/push") return route.fulfill({ json: { publicKey, subscribed: Boolean(body.endpoint && subscribed.has(body.endpoint)) } });
+    if (path === "/api/push/subscribe") subscribed.add(body.subscription!.endpoint);
+    if (path === "/api/push/unsubscribe") subscribed.delete(body.endpoint!);
+    return route.fulfill({ status: 204 });
+  });
+
+  await page.goto("/");
+  await page.locator(".center-workspace").getByRole("button", { name: "Workspace activity" }).click();
+  const push = page.getByRole("dialog", { name: "Workspace activity" }).getByRole("region", { name: "System notifications" });
+  const toggle = push.getByRole("switch", { name: "Notify this device" });
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  await expect(push).toContainText("Get a system notification on this device");
+
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "true");
+  await expect(push).toContainText("This device gets a system notification");
+  expect(pushRequests.find((request) => request.path === "/api/push/subscribe")?.body).toEqual({
+    subscription: { endpoint: "https://push.example.test/device-1", expirationTime: null, keys: { p256dh: "fake-p256dh", auth: "fake-auth" } },
+  });
+
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-checked", "false");
+  expect(pushRequests.find((request) => request.path === "/api/push/unsubscribe")?.body).toEqual({ endpoint: "https://push.example.test/device-1" });
+  expect(await page.evaluate(() => (window as unknown as { __pushCalls: string[] }).__pushCalls)).toEqual(["permission", "subscribe", "unsubscribe"]);
+});
+
+test("opens the target of a clicked system notification", async ({ page }) => {
+  const endedTerminal = (id: string, title: string, cwd: string) => ({
+    id, title, provider: "shell", state: "exited", exitCode: 1, cwd,
+    pid: 333, permissionMode: "confirm", launchMode: "new", noAltScreen: true, cols: 80, rows: 24,
+    createdAt: "2026-08-03T00:00:00.000Z", endedAt: "2026-08-03T00:05:00.000Z", signal: null, bufferBytes: 0, bufferTruncated: false, history: [],
+  });
+  const terminal = endedTerminal("act-terminal-c", "Deploy", "/tmp/pi-web-act-c");
+  const other = endedTerminal("act-terminal-b", "Lint", "/tmp/pi-web-act-b");
+  await mockActivityWorkspaces(page, [terminal, other], [
+    { id: "push-2", kind: "terminal", event: "failed", targetId: other.id, cwd: other.cwd, title: "Lint", detail: "Exited with code 1", createdAt: Date.now() - 30_000, read: false },
+    { id: "push-1", kind: "terminal", event: "failed", targetId: terminal.id, cwd: terminal.cwd, title: "Deploy", detail: "Exited with code 1", createdAt: Date.now() - 60_000, read: false },
+  ]);
+  const readRequests: unknown[] = [];
+  await page.route("**/api/notifications/read", async (route) => {
+    readRequests.push(route.request().postDataJSON());
+    return route.fulfill({ json: { changed: 1 } });
+  });
+  // The service worker opens a new window at /?notification=<id> when none is open.
+  await page.goto("/?notification=push-1");
+  await expect(page.locator('.center-workspace [role="tab"][data-tab-id="terminal:act-terminal-c"]')).toHaveAttribute("aria-selected", "true");
+  await expect.poll(() => readRequests).toEqual([{ ids: ["push-1"] }]);
+  await expect(page).toHaveURL(/\/$/);
+
+  // In an open window the service worker sends a message instead; it also
+  // closes the activity center if that is open.
+  await page.locator(".center-workspace").getByRole("button", { name: "Workspace activity" }).click();
+  await page.evaluate(() => navigator.serviceWorker.dispatchEvent(new MessageEvent("message", { data: { type: "pi-web:open-notification", id: "push-2" } })));
+  await expect(page.getByRole("dialog", { name: "Workspace activity" })).toBeHidden();
+  await expect(page.locator('.center-workspace [role="tab"][data-tab-id="terminal:act-terminal-b"]')).toHaveAttribute("aria-selected", "true");
+  await expect.poll(() => readRequests.at(-1)).toEqual({ ids: ["push-2"] });
+});
+
+test("explains that system notifications need trusted HTTPS", async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(window, "isSecureContext", { configurable: true, get: () => false }));
+  await mockActivityWorkspaces(page);
+  await page.goto("/");
+  await page.locator(".center-workspace").getByRole("button", { name: "Workspace activity" }).click();
+  const push = page.getByRole("dialog", { name: "Workspace activity" }).getByRole("region", { name: "System notifications" });
+  await expect(push.getByRole("switch", { name: "Notify this device" })).toBeDisabled();
+  await expect(push).toContainText("System notifications need trusted HTTPS: open TianForge through its *.ts.net address (or localhost).");
+});
+
 test("opens the Pi session behind a rail activity item with a fresh session lookup", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.startsWith("mobile"), "desktop project rail test");
   const cwd = "/tmp/pi-web-rail-pi";

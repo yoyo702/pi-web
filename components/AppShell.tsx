@@ -23,7 +23,8 @@ import { WorkspaceActionsProvider, type ClaudeChatTarget, type ClaudeForkTarget,
 // ssr: false) so they stay out of the initial chat bundle.
 const SettingsPanel = dynamic(() => import("./SettingsPanel").then((m) => m.SettingsPanel), { ssr: false });
 import { ProductStatusDot } from "./ProductStatus";
-import { RecentNotifications, UnreadNotificationBadge } from "./RecentNotifications";
+import { UnreadNotificationBadge } from "./RecentNotifications";
+import { ActivityCenter } from "./ActivityCenter";
 import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { getFileName } from "@/lib/file-paths";
@@ -40,6 +41,10 @@ import { usePanelResize } from "@/hooks/usePanelResize";
 import { useSessionMeta } from "@/hooks/useSessionMeta";
 import { useMobileOverlayHistory } from "@/hooks/useMobileOverlayHistory";
 import { useProjectWorkspaces } from "@/hooks/useProjectWorkspaces";
+import { useWorkspaceActivity } from "@/hooks/useWorkspaceActivity";
+import { useWorkspaceStatusSelector } from "@/hooks/useWorkspaceStatus";
+import { activityTotals } from "@/lib/activity-center";
+import { markNotificationsRead, notificationTarget, notificationWorkspace } from "@/lib/activity-notifications";
 import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PanelsTopLeft, Plus, TerminalSquare } from "lucide-react";
 import { projectLabel, upsertProjectWorkspace, type ProjectWorkspace } from "@/lib/project-workspaces";
 import { getProductStatus } from "@/lib/product-status";
@@ -159,8 +164,7 @@ export function AppShell() {
 
   // Single active panel — only one dropdown open at a time
   const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "session" | null>(null);
-  const [activityPanelOpen, setActivityPanelOpen] = useState(false);
-  const activityPanelRef = useRef<HTMLDivElement>(null);
+  const [activityCenterOpen, setActivityCenterOpen] = useState(false);
 
   const toggleTopPanel = useCallback((panel: "branches" | "system" | "session") => {
     if (isMobile) setSidebarOpen(false);
@@ -180,15 +184,6 @@ export function AppShell() {
     if (isMobile) setActiveTopPanel(null);
     setSidebarOpen((open) => !open);
   }, [isMobile]);
-
-  useEffect(() => {
-    if (!activityPanelOpen) return;
-    const close = (event: PointerEvent) => { if (!activityPanelRef.current?.contains(event.target as Node)) setActivityPanelOpen(false); };
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setActivityPanelOpen(false); };
-    document.addEventListener("pointerdown", close);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", closeOnEscape); };
-  }, [activityPanelOpen]);
 
   // Center workspace (per cwd) and right panel (per project) state. See
   // lib/workspace/panel-state.ts for the transitions.
@@ -965,6 +960,51 @@ export function AppShell() {
     }
   }, [activateWorkspaceTab, activeCwd, activityOpenIntent, centerHydratedCwd, closeMobileOverlays, handleOpenClaudeSessionChat, handleOpenCodexSessionChat, handleSelectSession, isMobile, openTerminalTab, terminals, terminalsLoaded, workspaceTabs]);
 
+  const workspaceActivity = useWorkspaceActivity(projectWorkspaces);
+  const { refreshSessionLabels } = workspaceActivity;
+  const openActivityCenter = useCallback(() => {
+    refreshSessionLabels();
+    setActivityCenterOpen(true);
+  }, [refreshSessionLabels]);
+  const closeActivityCenter = useCallback(() => setActivityCenterOpen(false), []);
+
+  // A clicked system notification (public/sw.js) opens its entry: in this
+  // window through a service worker message, or in a new one through
+  // `/?notification=<id>`. It waits for the notification log and the initial
+  // project, so the startup restore cannot replace what it opens.
+  const [pendingNotificationId, setPendingNotificationId] = useState<string | null>(null);
+  const notificationLog = useWorkspaceStatusSelector((snapshot) => snapshot.notifications);
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get("notification");
+    if (requested) {
+      setPendingNotificationId(requested);
+      router.replace("/", { scroll: false });
+    }
+    if (!("serviceWorker" in navigator)) return;
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: unknown; id?: unknown } | null;
+      if (data?.type !== "pi-web:open-notification" || typeof data.id !== "string") return;
+      setPendingNotificationId(data.id);
+      (event.source as ServiceWorker | null)?.postMessage({ type: "pi-web:notification-received", id: data.id });
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    // A click that reached this window before it was listening is sent again now.
+    navigator.serviceWorker.controller?.postMessage({ type: "pi-web:ready" });
+    return () => navigator.serviceWorker.removeEventListener("message", onMessage);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- read once on mount
+  }, []);
+  useEffect(() => {
+    if (!pendingNotificationId || !notificationLog || !projectWorkspacesHydrated || (activeProjectId && !activeCwd)) return;
+    setPendingNotificationId(null);
+    closeActivityCenter();
+    const notification = notificationLog.find((entry) => entry.id === pendingNotificationId);
+    const workspace = notification ? notificationWorkspace(notification, projectWorkspaces) : null;
+    if (notification && !notification.read) void markNotificationsRead({ ids: [notification.id] });
+    // Pruned, or its project is not open here: the activity center lists it (or what is left).
+    if (!notification || !workspace) { openActivityCenter(); return; }
+    handleOpenActivityItem(workspace, notificationTarget(notification));
+  }, [activeCwd, activeProjectId, closeActivityCenter, handleOpenActivityItem, notificationLog, openActivityCenter, pendingNotificationId, projectWorkspaces, projectWorkspacesHydrated]);
+
   // The context value is ref-backed so its identity never changes. Consumers
   // derive callbacks from it (e.g. ChatWindow's onOpenFile) and MessageView's
   // memo comparator relies on stable callback identity; recreating the value on
@@ -1012,26 +1052,12 @@ export function AppShell() {
   const showPlaceholder = initialSessionRestored && !showChat;
 
   const activeFileTab = fileTabs.find((t) => t.id === activeFileTabId) ?? null;
-  const runningTerminals = Object.values(terminals).filter((terminal) => terminal.state === "running");
-  const runningTasks = runningTerminals.filter((terminal) => terminal.provider === "shell" && terminal.title?.startsWith("Task: "));
-  const runningAgents = runningTerminals.filter((terminal) => terminal.provider !== "shell");
-  const runningShells = runningTerminals.filter((terminal) => terminal.provider === "shell" && !terminal.title?.startsWith("Task: "));
-  const activeCodexChats = workspaceTabs.filter((tab) => (tab.kind === "codex-chat" || tab.kind === "claude-chat") && (tab.status === "running" || tab.status === "approval"));
-  const approvalCount = activeCodexChats.filter((tab) => tab.status === "approval").length;
-  const activityCount = runningTerminals.length + activeCodexChats.length;
+  // Counts across every workspace, like the activity center it opens.
+  const { active: activityCount, approval: approvalCount } = activityTotals(workspaceActivity.activityById);
   const showWorkspaceTabBar = workspaceTabs.length > 1;
-  const activityControl = <div ref={activityPanelRef} style={{ position: "relative", alignSelf: "stretch", flexShrink: 0 }}>
-    <button type="button" aria-label="Workspace activity" title="Workspace activity" aria-expanded={activityPanelOpen} onClick={() => setActivityPanelOpen((open) => !open)} style={{ display: "flex", alignItems: "center", gap: 5, height: "100%", padding: "0 10px", border: 0, borderLeft: "1px solid var(--border)", background: activityPanelOpen ? "var(--bg-selected)" : "transparent", color: approvalCount > 0 ? getProductStatus("approval").color : activityCount > 0 ? "var(--accent)" : "var(--text-dim)", cursor: "pointer", font: "10.5px/1 inherit" }}>
-      <Activity size={15} /><span>{activityCount}</span>{approvalCount > 0 && <ProductStatusDot status="approval" size={6} title={`${approvalCount} approval pending`} />}<UnreadNotificationBadge />
-    </button>
-    {activityPanelOpen && <div role="dialog" aria-label="Workspace activity" style={{ position: "absolute", zIndex: 500, top: 40, right: 4, width: "min(330px, calc(100vw - 16px))", maxHeight: "min(480px, calc(100dvh - 100px))", overflowY: "auto", padding: 7, border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", boxShadow: "0 16px 44px rgb(0 0 0 / 38%)" }}>
-      <div style={{ padding: "5px 7px 7px", color: "var(--text-dim)", fontSize: 10 }}>Workspace activity · {activityCount} active</div>
-      {activityCount === 0 && <div style={{ padding: "14px 10px", color: "var(--text-dim)", fontSize: 11, textAlign: "center" }}>No tasks or agents are running</div>}
-      {[...runningTasks, ...runningAgents, ...runningShells].map((terminal) => <button key={terminal.id} type="button" onClick={() => { handleTerminalCreated(terminal, terminal.title); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><ProductStatusDot status="running" size={7} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{terminal.title || `${terminal.provider} terminal`}</span><small style={{ color: "var(--text-dim)" }}>{terminal.provider}</small></button>)}
-      {activeCodexChats.map((tab) => <button key={tab.id} type="button" onClick={() => { activateWorkspaceTab(tab.id); setActivityPanelOpen(false); }} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 38, padding: "6px 8px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}><ProductStatusDot status={tab.status === "approval" ? "approval" : "running"} size={7} /><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tab.label}</span><small style={{ color: tab.status === "approval" ? getProductStatus("approval").color : "var(--text-dim)" }}>{tab.status}</small></button>)}
-      <div style={{ marginTop: 4, borderTop: "1px solid var(--border)" }}><RecentNotifications workspaces={projectWorkspaces} onOpen={(workspace, target) => { setActivityPanelOpen(false); handleOpenActivityItem(workspace, target); }} /></div>
-    </div>}
-  </div>;
+  const activityControl = <button type="button" aria-label="Workspace activity" title="Workspace activity" aria-haspopup="dialog" aria-expanded={activityCenterOpen} onClick={openActivityCenter} style={{ display: "flex", alignItems: "center", gap: 5, alignSelf: "stretch", flexShrink: 0, padding: "0 10px", border: 0, borderLeft: "1px solid var(--border)", background: activityCenterOpen ? "var(--bg-selected)" : "transparent", color: approvalCount > 0 ? getProductStatus("approval").color : activityCount > 0 ? "var(--accent)" : "var(--text-dim)", cursor: "pointer", font: "10.5px/1 inherit" }}>
+    <Activity size={15} /><span>{activityCount}</span>{approvalCount > 0 && <ProductStatusDot status="approval" size={6} title={`${approvalCount} approval pending`} />}<UnreadNotificationBadge />
+  </button>;
   const topRightControls = <div style={{ display: "flex", alignSelf: "stretch", flexShrink: 0, marginLeft: "auto", marginRight: rightPanelOpen ? 0 : 36 }}>
     {activityControl}
   </div>;
@@ -1191,12 +1217,24 @@ export function AppShell() {
         onRename={handleRenameProjectWorkspace}
         onTogglePinned={handleTogglePinnedProjectWorkspace}
         onOpenSettings={() => setSettingsOpen(true)}
+        activityById={workspaceActivity.activityById}
+        runningByCwd={workspaceActivity.runningByCwd}
+        onActivityListOpen={refreshSessionLabels}
+        onOpenActivityCenter={openActivityCenter}
         onOpenActivityItem={handleOpenActivityItem}
         onOpenTerminal={(workspace) => {
           void activateProjectWorkspace(workspace);
           setNewTerminalProvider("shell");
         }}
       />
+      {activityCenterOpen && <ActivityCenter
+        workspaces={projectWorkspaces}
+        activeId={activeProjectId}
+        activityById={workspaceActivity.activityById}
+        onClose={closeActivityCenter}
+        onSelectWorkspace={(workspace) => void activateProjectWorkspace(workspace)}
+        onOpen={handleOpenActivityItem}
+      />}
 
       {/* Left sidebar */}
       <div

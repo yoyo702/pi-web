@@ -257,11 +257,12 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
   return publicSession(session);
 }
 
-// A terminal the user stopped, or a shell they exited normally, needs no notice.
+// A terminal the user stopped, or a shell they exited normally, needs no
+// notice; a project task ("Task: <script>") that finished does.
 function recordExit(session) {
   if (session.state === "stopped") return;
   const failed = (session.exitCode ?? 0) !== 0 || Boolean(session.signal);
-  if (!failed && session.provider === "shell") return;
+  if (!failed && session.provider === "shell" && !session.title?.startsWith("Task: ")) return;
   notifications.add({
     kind: "terminal",
     event: failed ? "failed" : "completed",

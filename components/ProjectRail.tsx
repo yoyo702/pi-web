@@ -2,28 +2,21 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { Activity, Bell, Bot, ChevronDown, Clipboard, FolderOpen, FolderPlus, GitBranch, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, TerminalSquare, X } from "lucide-react";
+import { Activity, Bell, ChevronDown, Clipboard, FolderOpen, FolderPlus, GitBranch, PanelLeftClose, PanelLeftOpen, Pencil, Pin, PinOff, Search, Settings, TerminalSquare, X } from "lucide-react";
 import { ProductStatusDot } from "./ProductStatus";
 import { DirectoryPicker } from "./DirectoryPicker";
+import { ActivityItemButton, activityDefinition } from "./ActivityCenter";
 import type { ProjectWorkspace } from "@/lib/project-workspaces";
 import type { GitStatusResponse } from "@/lib/git-types";
-import type { SessionInfo } from "@/lib/types";
-import { getProductStatus, type ProductStatusId } from "@/lib/product-status";
-import { activityTarget, computeRailActivity, groupRailActivity, type ActivityTarget, type RailActivityItem, type RailCompletedEntry, type WorkspaceActivity, type WorkspaceActivityState } from "@/lib/rail-activity";
-import { useWorkspaceStatus } from "@/hooks/useWorkspaceStatus";
-import { RecentNotifications } from "./RecentNotifications";
+import { getProductStatus } from "@/lib/product-status";
+import { activityTarget, type ActivityTarget, type RailActivityItem, type WorkspaceActivity } from "@/lib/rail-activity";
+import { activitySummary, activityTotals } from "@/lib/activity-center";
+import { useWorkspaceStatusSelector } from "@/hooks/useWorkspaceStatus";
 
 interface ProjectStatus {
   branch: string | null;
   changedFiles: number;
 }
-
-type ActivityState = WorkspaceActivityState;
-
-const activityStatus: Record<ActivityState, ProductStatusId> = { approval: "approval", failed: "failed", working: "running", completed: "completed", idle: "idle" };
-const activityDefinition = (state: ActivityState) => getProductStatus(activityStatus[state]);
-const activityColor = Object.fromEntries((Object.keys(activityStatus) as ActivityState[]).map((state) => [state, activityDefinition(state).color])) as Record<ActivityState, string>;
-const activityLabel = Object.fromEntries((Object.keys(activityStatus) as ActivityState[]).map((state) => [state, activityDefinition(state).label])) as Record<ActivityState, string>;
 
 interface Props {
   workspaces: ProjectWorkspace[];
@@ -37,7 +30,14 @@ interface Props {
   onRename: (workspace: ProjectWorkspace, label: string) => void;
   onTogglePinned: (workspace: ProjectWorkspace) => void;
   onOpenSettings: () => void;
-  /** Opens one activity item or notification (session, terminal, Codex chat), switching workspace first when needed. */
+  /** From useWorkspaceActivity (shared with the activity center). */
+  activityById: Record<string, WorkspaceActivity>;
+  runningByCwd: Record<string, number>;
+  /** Called when a workspace's activity popover opens (refreshes Pi item labels). */
+  onActivityListOpen: () => void;
+  /** Opens the activity center (the bell). */
+  onOpenActivityCenter: () => void;
+  /** Opens one activity item (session, terminal, Codex or Claude chat), switching workspace first when needed. */
   onOpenActivityItem: (workspace: ProjectWorkspace, target: ActivityTarget) => void;
 }
 
@@ -47,28 +47,14 @@ function initials(label: string): string {
 }
 
 const contextMenuButtonStyle: CSSProperties = { minHeight: 32, display: "flex", alignItems: "center", gap: 9, padding: "0 9px", border: 0, borderRadius: 5, background: "transparent", color: "var(--text)", cursor: "pointer", font: "12px/1.2 inherit", textAlign: "left" };
-const activityItemButtonStyle: CSSProperties = { width: "100%", minHeight: 30, display: "flex", alignItems: "center", gap: 8, padding: "0 7px", border: 0, borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", font: "11px/1.3 inherit", textAlign: "left" };
-const activityKindLabel: Record<RailActivityItem["kind"], string> = { pi: "Pi session", terminal: "Terminal", codex: "Codex chat", claude: "Claude chat" };
 
-function ActivityItemButton({ item, onOpen }: { item: RailActivityItem; onOpen: () => void }) {
-  const Icon = item.kind === "terminal" ? TerminalSquare : Bot;
-  return <button type="button" aria-label={`${item.label} · ${activityKindLabel[item.kind]} · ${activityLabel[item.state]}`} title={`${activityKindLabel[item.kind]} · ${item.label}\n${item.cwd}`} onClick={onOpen} style={activityItemButtonStyle}>
-    <span aria-hidden="true" style={{ width: 8, height: 8, flexShrink: 0, borderRadius: "50%", background: activityColor[item.state] }} />
-    <Icon size={12} aria-hidden="true" style={{ flexShrink: 0, color: "var(--text-dim)" }} />
-    <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label}</span>
-    <small style={{ flexShrink: 0, color: activityColor[item.state], fontSize: 10 }}>{activityLabel[item.state]}</small>
-  </button>;
-}
-
-export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, onRestore, onReorder, onOpenTerminal, onRename, onTogglePinned, onOpenSettings, onOpenActivityItem }: Props) {
-  const workspaceStatus = useWorkspaceStatus();
+export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, onRestore, onReorder, onOpenTerminal, onRename, onTogglePinned, onOpenSettings, activityById, runningByCwd, onActivityListOpen, onOpenActivityCenter, onOpenActivityItem }: Props) {
+  const unreadCount = useWorkspaceStatusSelector((snapshot) => snapshot.unreadNotifications);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerBusy, setPickerBusy] = useState(false);
   const [pickerError, setPickerError] = useState<string | null>(null);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [draggedId, setDraggedId] = useState<string | null>(null);
-  const [runningByCwd, setRunningByCwd] = useState<Record<string, number>>({});
-  const [activityById, setActivityById] = useState<Record<string, WorkspaceActivity>>({});
   const [statusById, setStatusById] = useState<Record<string, ProjectStatus>>({});
   const [contextMenu, setContextMenu] = useState<{ workspace: ProjectWorkspace; x: number; y: number } | null>(null);
   const [renameTarget, setRenameTarget] = useState<ProjectWorkspace | null>(null);
@@ -78,14 +64,8 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
   const [projectSearchIndex, setProjectSearchIndex] = useState(0);
   const [recentlyClosed, setRecentlyClosed] = useState<ProjectWorkspace | null>(null);
   const [activityMenu, setActivityMenu] = useState<{ workspace: ProjectWorkspace; x: number; y: number } | null>(null);
-  const [activityCenterOpen, setActivityCenterOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const [tick, setTick] = useState(0);
   const mobileRef = useRef<HTMLDivElement>(null);
-  const previousRunningRef = useRef<Map<string, RailActivityItem> | null>(null);
-  const completedRef = useRef<Map<string, RailCompletedEntry>>(new Map());
-  const sessionsByIdRef = useRef<Map<string, SessionInfo>>(new Map());
-  const sessionRootsFetchedAtRef = useRef(0);
   useEffect(() => {
     setCollapsed(localStorage.getItem("pi-web:project-rail-collapsed") === "true");
     const onKeyDown = (event: KeyboardEvent) => {
@@ -137,74 +117,8 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
     document.addEventListener("keydown", closeOnEscape);
     return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", closeOnEscape); };
   }, [mobileOpen]);
-  useEffect(() => {
-    let cancelled = false;
-    let expiryTimer: ReturnType<typeof setTimeout> | null = null;
-    const compute = async () => {
-      try {
-        const terminals = workspaceStatus.terminals ?? [];
-        const runningSessionIds = workspaceStatus.runningSessionIds ?? [];
-        const codexRuntimes = workspaceStatus.codexRuntimes ?? [];
-        const claudeRuntimes = workspaceStatus.claudeRuntimes ?? [];
-        // The full session list requires a server-side scan of every session
-        // file, so only fetch it when a running session's project is unknown.
-        // Throttled because a brand-new session may not be listed yet.
-        if (runningSessionIds.some((id) => !sessionsByIdRef.current.has(id)) && Date.now() - sessionRootsFetchedAtRef.current >= 30_000) {
-          sessionRootsFetchedAtRef.current = Date.now();
-          try {
-            const response = await fetch("/api/sessions", { cache: "no-store" });
-            const sessionData = response.ok ? await response.json() as { sessions?: SessionInfo[] } : null;
-            // Kept whole: activity items open the session through this record.
-            if (sessionData?.sessions) sessionsByIdRef.current = new Map(sessionData.sessions.map((session) => [session.id, session]));
-          } catch { /* status badges are best effort */ }
-          // Status frames arrive back to back on connect, so a newer compute has
-          // usually replaced this one by now (and was throttled out of its own
-          // lookup); recompute so the sessions just fetched are used.
-          if (cancelled) { setTick((current) => current + 1); return; }
-        }
-        const counts: Record<string, number> = {};
-        for (const terminal of terminals) if (terminal.state === "running") counts[terminal.cwd] = (counts[terminal.cwd] ?? 0) + 1;
-        const now = Date.now();
-        // Running items, terminals ended within 5 minutes, and items that
-        // finished within the last 30 s; see lib/rail-activity.ts.
-        const result = computeRailActivity({ terminals, runningSessionIds, codexRuntimes, claudeRuntimes, sessionsById: sessionsByIdRef.current, previousRunning: previousRunningRef.current, completed: completedRef.current, now });
-        previousRunningRef.current = result.running;
-        completedRef.current = result.completed;
-        const activities = groupRailActivity(result.items, workspaces);
-        let nextExpiry = result.nextExpiry;
-        // A running session whose project is still unknown (brand-new, or its
-        // lookup was throttled) gets another lookup once the throttle lapses.
-        if (runningSessionIds.some((id) => !sessionsByIdRef.current.has(id))) nextExpiry = Math.min(nextExpiry, sessionRootsFetchedAtRef.current + 30_000);
-        if (cancelled) return;
-        setRunningByCwd(counts);
-        setActivityById(activities);
-        if (Number.isFinite(nextExpiry)) expiryTimer = setTimeout(() => { if (!cancelled) setTick((current) => current + 1); }, Math.max(0, nextExpiry - now));
-      } catch { /* status badges are best effort */ }
-    };
-    void compute();
-    return () => { cancelled = true; if (expiryTimer) clearTimeout(expiryTimer); };
-  }, [workspaceStatus.terminals, workspaceStatus.runningSessionIds, workspaceStatus.codexRuntimes, workspaceStatus.claudeRuntimes, workspaces, tick]);
-  // Pi item labels come from the session list fetched when a session first
-  // runs, so a later rename would never show. Refresh it (same 30 s throttle)
-  // when the user opens an activity list that has Pi items — not on a poll.
-  const activityListOpen = activityCenterOpen || activityMenu !== null;
-  useEffect(() => {
-    if (!activityListOpen || Date.now() - sessionRootsFetchedAtRef.current < 30_000) return;
-    const hasPiItems = [...(previousRunningRef.current?.values() ?? [])].some((item) => item.kind === "pi")
-      || [...completedRef.current.values()].some((entry) => entry.item.kind === "pi");
-    if (!hasPiItems) return;
-    sessionRootsFetchedAtRef.current = Date.now();
-    // Not cancelled when the list closes: opening an item closes it, and the
-    // result still applies.
-    void fetch("/api/sessions", { cache: "no-store" })
-      .then((response) => response.ok ? response.json() as Promise<{ sessions?: SessionInfo[] }> : null)
-      .then((sessionData) => {
-        if (!sessionData?.sessions) return;
-        sessionsByIdRef.current = new Map(sessionData.sessions.map((session) => [session.id, session]));
-        setTick((current) => current + 1);
-      })
-      .catch(() => { /* keep the cached labels */ });
-  }, [activityListOpen]);
+  const activityMenuOpen = activityMenu !== null;
+  useEffect(() => { if (activityMenuOpen) onActivityListOpen(); }, [activityMenuOpen, onActivityListOpen]);
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
@@ -288,25 +202,18 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
     setProjectSearchOpen(false);
     onSelect(workspace);
   };
-  const activeActivities = workspaces.flatMap((workspace) => {
-    const activity = activityById[workspace.id];
-    return activity && activity.state !== "idle" ? [{ workspace, activity }] : [];
-  });
-  const openActivityTarget = (workspace: ProjectWorkspace, target: ActivityTarget) => {
+  const openActivityItem = (workspace: ProjectWorkspace, item: RailActivityItem) => {
     setActivityMenu(null);
-    setActivityCenterOpen(false);
-    onOpenActivityItem(workspace, target);
+    onOpenActivityItem(workspace, activityTarget(item));
   };
-  const openActivityItem = (workspace: ProjectWorkspace, item: RailActivityItem) => openActivityTarget(workspace, activityTarget(item));
   // The badge counts unread notifications; approvals waiting right now keep the approval color.
-  const unreadCount = workspaceStatus.unreadNotifications;
-  const approvalCount = activeActivities.reduce((total, item) => total + item.activity.approval, 0);
+  const approvalCount = activityTotals(activityById).approval;
   const bellLabel = `Workspace activity${unreadCount ? ` · ${unreadCount} unread` : ""}${approvalCount ? ` · ${approvalCount} waiting` : ""}`;
 
   return <>
     <nav className={`project-rail${collapsed ? " is-collapsed" : ""}`} aria-label="Project workspaces">
       <div style={{ display: "flex", alignItems: "center", justifyContent: collapsed ? "center" : "space-between", flexShrink: 0 }}>
-        {!collapsed && <span style={{ display: "flex", alignItems: "center", gap: 2 }}><button type="button" className="project-rail-collapse" aria-label="Search projects" title="Search projects (⌘⇧P)" onClick={() => { setProjectQuery(""); setProjectSearchIndex(0); setProjectSearchOpen(true); }}><Search size={14} /></button><button type="button" className="project-rail-collapse" aria-label="Workspace activity" title={bellLabel} onClick={() => setActivityCenterOpen(true)} style={{ position: "relative" }}><Bell size={14} />{(unreadCount > 0 || approvalCount > 0) && <span data-testid="activity-unread-badge" style={{ position: "absolute", top: 1, right: 1, minWidth: 12, height: 12, display: "grid", placeItems: "center", padding: "0 2px", borderRadius: 999, background: approvalCount > 0 ? getProductStatus("approval").color : "var(--accent)", color: "white", fontSize: 7, fontWeight: 800 }}>{unreadCount > 0 ? Math.min(99, unreadCount) : ""}</span>}</button><button type="button" className="project-rail-collapse" aria-label="Settings" title="Settings" onClick={onOpenSettings}><Settings size={14} /></button></span>}
+        {!collapsed && <span style={{ display: "flex", alignItems: "center", gap: 2 }}><button type="button" className="project-rail-collapse" aria-label="Search projects" title="Search projects (⌘⇧P)" onClick={() => { setProjectQuery(""); setProjectSearchIndex(0); setProjectSearchOpen(true); }}><Search size={14} /></button><button type="button" className="project-rail-collapse" aria-label="Workspace activity" title={bellLabel} onClick={onOpenActivityCenter} style={{ position: "relative" }}><Bell size={14} />{(unreadCount > 0 || approvalCount > 0) && <span data-testid="activity-unread-badge" style={{ position: "absolute", top: 1, right: 1, minWidth: 12, height: 12, display: "grid", placeItems: "center", padding: "0 2px", borderRadius: 999, background: approvalCount > 0 ? getProductStatus("approval").color : "var(--accent)", color: "white", fontSize: 7, fontWeight: 800 }}>{unreadCount > 0 ? Math.min(99, unreadCount) : ""}</span>}</button><button type="button" className="project-rail-collapse" aria-label="Settings" title="Settings" onClick={onOpenSettings}><Settings size={14} /></button></span>}
         <button type="button" className="project-rail-collapse" aria-label={collapsed ? "Expand project bar" : "Collapse project bar"} title={collapsed ? "Expand project bar" : "Collapse project bar"} onClick={toggleCollapsed}>{collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}</button>
       </div>
       <div className="project-rail-list">
@@ -315,13 +222,13 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
           const projectStatus = statusById[workspace.id];
           const activity = activityById[workspace.id];
           const activityTotal = activity ? activity.working + activity.approval + activity.failed + activity.completed : 0;
-          const activitySummary = activity ? [activity.approval && `${activity.approval} waiting`, activity.failed && `${activity.failed} failed`, activity.working && `${activity.working} working`, activity.completed && `${activity.completed} completed`].filter(Boolean).join(" · ") : "";
+          const summary = activity ? activitySummary(activity) : "";
           return <div key={workspace.id} className={`project-rail-tab${active ? " is-active" : ""}`} draggable onContextMenu={(event) => { event.preventDefault(); setContextMenu({ workspace, x: event.clientX, y: event.clientY }); }} onDragStart={() => setDraggedId(workspace.id)} onDragEnd={() => setDraggedId(null)} onDragOver={(event) => event.preventDefault()} onDrop={() => { if (draggedId && draggedId !== workspace.id) onReorder(draggedId, workspace.id); setDraggedId(null); }}>
             <button type="button" className="project-rail-select" aria-current={active ? "page" : undefined} title={`${workspace.projectRoot}${projectStatus?.changedFiles ? `\n${projectStatus.changedFiles} files with uncommitted Git changes` : ""}`} onClick={() => onSelect(workspace)}>
               <span className="project-rail-icon" aria-hidden="true">{initials(workspace.label)}</span>
               <span className="project-rail-copy"><strong style={{ display: "flex", alignItems: "center", gap: 4 }}>{workspace.pinned && <Pin size={9} aria-label="Pinned" />}{workspace.label}</strong><small><span className="project-rail-branch">{projectStatus?.branch || workspace.cwd}</span>{projectStatus?.changedFiles ? <span className="project-rail-git-status">{projectStatus.changedFiles} Git changes</span> : null}</small></span>
               {collapsed && projectStatus?.changedFiles ? <ProductStatusDot status="git-changes" size={6} title={`${projectStatus.changedFiles} files with uncommitted Git changes`} style={{ position: "absolute", right: 3, bottom: 4, boxShadow: "0 0 0 2px var(--bg-selected)" }} /> : null}
-              {activity && activity.state !== "idle" && <span role="button" tabIndex={0} title={`${activityDefinition(activity.state).label}${activitySummary ? ` · ${activitySummary}` : ""}`} aria-label={`${activityDefinition(activity.state).label}${activitySummary ? `: ${activitySummary}` : ""}`} onClick={(event) => { event.stopPropagation(); setActivityMenu({ workspace, x: event.clientX, y: event.clientY }); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); setActivityMenu({ workspace, x: rect.right, y: rect.bottom }); } }} style={{ position: "absolute", right: collapsed ? 3 : 29, top: collapsed ? 3 : "50%", minWidth: activityTotal > 1 ? 16 : 9, height: activityTotal > 1 ? 16 : 9, display: "grid", placeItems: "center", padding: activityTotal > 1 ? "0 4px" : 0, transform: collapsed ? "none" : "translateY(-50%)", border: "2px solid var(--bg-selected)", borderRadius: 999, boxSizing: "border-box", background: activityDefinition(activity.state).color, color: "white", fontSize: 8, fontWeight: 750, cursor: "pointer" }}>{activityTotal > 1 ? activityTotal : ""}</span>}
+              {activity && activity.state !== "idle" && <span role="button" tabIndex={0} title={`${activityDefinition(activity.state).label}${summary ? ` · ${summary}` : ""}`} aria-label={`${activityDefinition(activity.state).label}${summary ? `: ${summary}` : ""}`} onClick={(event) => { event.stopPropagation(); setActivityMenu({ workspace, x: event.clientX, y: event.clientY }); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); event.stopPropagation(); const rect = event.currentTarget.getBoundingClientRect(); setActivityMenu({ workspace, x: rect.right, y: rect.bottom }); } }} style={{ position: "absolute", right: collapsed ? 3 : 29, top: collapsed ? 3 : "50%", minWidth: activityTotal > 1 ? 16 : 9, height: activityTotal > 1 ? 16 : 9, display: "grid", placeItems: "center", padding: activityTotal > 1 ? "0 4px" : 0, transform: collapsed ? "none" : "translateY(-50%)", border: "2px solid var(--bg-selected)", borderRadius: 999, boxSizing: "border-box", background: activityDefinition(activity.state).color, color: "white", fontSize: 8, fontWeight: 750, cursor: "pointer" }}>{activityTotal > 1 ? activityTotal : ""}</span>}
             </button>
             <button type="button" className="project-rail-close" aria-label={`Close ${workspace.label}`} title="Close project workspace" onClick={() => closeWorkspace(workspace)}><X size={13} /></button>
           </div>;
@@ -372,7 +279,6 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
         <button type="button" onClick={() => { const workspace = activityMenu.workspace; setActivityMenu(null); onSelect(workspace); }} style={{ width: "100%", minHeight: 32, border: 0, borderRadius: 6, background: "var(--bg-selected)", color: "var(--accent)", cursor: "pointer", font: "600 11px/1 inherit" }}>Open workspace</button>
       </section>;
     })()}
-    {activityCenterOpen && <div role="dialog" aria-modal="true" aria-label="Workspace activity" onMouseDown={(event) => { if (event.target === event.currentTarget) setActivityCenterOpen(false); }} onKeyDown={(event) => { if (event.key === "Escape") setActivityCenterOpen(false); }} style={{ position: "fixed", inset: 0, zIndex: 1300, display: "grid", alignItems: "start", justifyItems: "center", padding: "min(14vh,140px) 16px 16px", background: "rgba(0,0,0,.32)" }}><section style={{ width: "min(520px,100%)", maxHeight: "min(620px,72vh)", display: "flex", flexDirection: "column", overflow: "hidden", border: "1px solid var(--border)", borderRadius: 11, background: "var(--bg-panel)", boxShadow: "0 22px 64px rgba(0,0,0,.42)" }}><header style={{ display: "flex", alignItems: "center", gap: 9, padding: "12px 14px", borderBottom: "1px solid var(--border)" }}><Bell size={15} color="var(--text-muted)" /><strong style={{ flex: 1, color: "var(--text)", fontSize: 13 }}>Workspace activity</strong><span style={{ color: "var(--text-dim)", fontSize: 10 }}>{activeActivities.length} active</span><button type="button" aria-label="Close workspace activity" onClick={() => setActivityCenterOpen(false)} style={{ width: 26, height: 26, display: "grid", placeItems: "center", border: 0, borderRadius: 5, background: "transparent", color: "var(--text-dim)", cursor: "pointer" }}><X size={13} /></button></header><div style={{ minHeight: 0, overflowY: "auto", padding: 6 }}>{activeActivities.map(({ workspace, activity }) => { const summary = [activity.approval && `${activity.approval} waiting`, activity.failed && `${activity.failed} failed`, activity.working && `${activity.working} working`, activity.completed && `${activity.completed} completed`].filter(Boolean).join(" · "); return <div key={workspace.id} style={{ display: "grid", gap: 1, paddingBottom: 4 }}><button type="button" onClick={() => { setActivityCenterOpen(false); onSelect(workspace); }} style={{ width: "100%", minHeight: 50, display: "flex", alignItems: "center", gap: 10, padding: "7px 9px", border: 0, borderRadius: 7, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left" }}><span style={{ width: 10, height: 10, borderRadius: "50%", background: activityColor[activity.state], boxShadow: `0 0 0 3px color-mix(in srgb,${activityColor[activity.state]} 18%,transparent)` }} /><span style={{ minWidth: 0, flex: 1, display: "grid", gap: 4 }}><strong style={{ fontSize: 12 }}>{workspace.label}</strong><small style={{ color: "var(--text-dim)", fontSize: 10 }}>{summary}</small></span><span style={{ color: activityColor[activity.state], fontSize: 10 }}>{activityLabel[activity.state]}</span></button>{activity.items.length > 0 && <div role="group" aria-label={`${workspace.label} activity items`} style={{ display: "grid", gap: 1, paddingLeft: 22 }}>{activity.items.map((item) => <ActivityItemButton key={item.key} item={item} onOpen={() => openActivityItem(workspace, item)} />)}</div>}</div>; })}{activeActivities.length === 0 && <div style={{ padding: 30, textAlign: "center", color: "var(--text-dim)", fontSize: 12 }}>No active, failed, or recently completed tasks</div>}<div style={{ marginTop: 4, borderTop: "1px solid var(--border)" }}><RecentNotifications workspaces={workspaces} onOpen={openActivityTarget} /></div></div></section></div>}
     {recentlyClosed && <div role="status" aria-live="polite" style={{ position: "fixed", left: 14, bottom: 14, zIndex: 1400, maxWidth: "min(390px,calc(100vw - 28px))", minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: "8px 9px 8px 13px", border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 16px 44px rgba(0,0,0,.36)", fontSize: 12 }}><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Closed <strong>{recentlyClosed.label}</strong></span><kbd style={{ color: "var(--text-dim)", font: "9px/1 var(--font-mono)" }}>⌘⇧T</kbd><button type="button" onClick={() => { const workspace = recentlyClosed; setRecentlyClosed(null); onRestore(workspace); }} style={{ minHeight: 28, padding: "0 9px", border: 0, borderRadius: 5, background: "var(--bg-selected)", color: "var(--accent)", cursor: "pointer", font: "600 11px/1 inherit" }}>Undo</button><button type="button" aria-label="Dismiss closed project notice" onClick={() => setRecentlyClosed(null)} style={{ width: 28, height: 28, display: "grid", placeItems: "center", padding: 0, border: 0, borderRadius: 5, background: "transparent", color: "var(--text-dim)", cursor: "pointer" }}><X size={13} /></button></div>}
     <div className="project-mobile-switcher" ref={mobileRef}>
       <button type="button" className="project-mobile-trigger" aria-label="Switch project" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><span>{activeWorkspace?.label ?? "Projects"}</span><ChevronDown size={13} /></button>

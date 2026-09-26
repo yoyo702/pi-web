@@ -7,13 +7,15 @@
  * state are kept in `~/.pi-web/notifications.json` so a phone and a PC see the
  * same list, and the list survives restarts. Next route handlers and the
  * custom server can load separate copies of this module, so state lives on
- * `global`. Changes are pushed as `notifications` snapshots on the status SSE.
+ * `global`. Changes are pushed as `notifications` snapshots on the status SSE;
+ * new entries also go to subscribed devices as system notifications (web-push.cjs).
  */
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const workspaceStatus = require("./workspace-status.cjs");
+const push = require("./web-push.cjs");
 
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ENTRIES = 200;
@@ -97,6 +99,7 @@ function add({ kind, event, targetId, cwd, projectRoot, title, detail, path: tar
   prune();
   save();
   workspaceStatus.notify("notifications");
+  void push.send(entry);
   return entry;
 }
 
