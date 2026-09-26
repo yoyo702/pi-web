@@ -239,3 +239,30 @@ test("a queued Codex chat message survives a failed send and retries", async ({ 
   await expect.poll(() => sent.length).toBe(2);
   expect(sent.map((body) => body.text)).toEqual(["second task", "second task"]);
 });
+
+test("a failed session delete keeps the session and says why", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "row actions appear on hover");
+  const idle = { ...session, id: "idle-session", firstMessage: "Refactor the parser" };
+  await page.route("**/api/sessions", (route) => route.fulfill({ json: { sessions: [idle], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", (route) => route.fulfill({ json: { success: true, cwd: idle.cwd } }));
+  await page.route(`**/api/sessions/${idle.id}`, (route) => {
+    if (route.request().method() === "DELETE") return route.fulfill({ status: 409, json: { error: "session is running in another window" } });
+    if (route.request().method() === "PATCH") return route.fulfill({ status: 500, json: { error: "disk full" } });
+    return route.fallback();
+  });
+  await page.goto(`/?session=${idle.id}`);
+  const row = page.getByText("Refactor the parser").first();
+  await expect(row).toBeVisible();
+
+  await row.hover();
+  await page.getByTitle("Delete").first().click();
+  await page.getByRole("button", { name: "Delete", exact: true }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "Delete failed: session is running in another window" })).toBeVisible();
+  await expect(page.getByText("Refactor the parser").first()).toBeVisible();
+
+  await row.hover();
+  await page.getByTitle("Rename").first().click();
+  await page.keyboard.type("New name");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("alert").filter({ hasText: "Rename failed: disk full" })).toBeVisible();
+});
