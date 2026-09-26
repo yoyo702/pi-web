@@ -92,6 +92,13 @@ function cliHelpText(provider, executable) {
   return help;
 }
 
+// "Safe" (confirm) asks before untrusted commands. Codex 0.155 dropped the
+// `untrusted` policy (the flag and the config value are both refused), so
+// newer CLIs get `on-request`, the most cautious policy they still accept.
+function codexConfirmPolicy(help) {
+  return /\buntrusted\b/.test(help) ? "untrusted" : "on-request";
+}
+
 function assertSkipPermissionsSupported(provider, executable) {
   const flag = provider === "claude" ? "--dangerously-skip-permissions" : "--dangerously-bypass-approvals-and-sandbox";
   const help = cliHelpText(provider, executable);
@@ -291,7 +298,7 @@ function buildLaunchArgs(provider, executable, permissionMode, launchMode, noAlt
   if (permissionMode === "bypass") {
     args.push(assertSkipPermissionsSupported(provider, executable));
   } else {
-    const approval = permissionMode === "confirm" ? "untrusted" : permissionMode;
+    const approval = permissionMode === "confirm" ? codexConfirmPolicy(cliHelpText(provider, executable)) : permissionMode;
     args.push("--sandbox", "workspace-write", "--ask-for-approval", approval);
   }
   if (typeof initialPrompt === "string" && initialPrompt.trim()) {

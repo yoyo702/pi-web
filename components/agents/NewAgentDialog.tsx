@@ -68,7 +68,7 @@ export function NewAgentDialog({ cwd, provider: initialProvider, onClose, onCrea
         {provider !== "shell" && <fieldset style={{ border: "1px solid var(--border)", borderRadius: 7, margin: "16px 0", padding: 10 }}>
           <legend style={{ color: "var(--text-muted)", fontSize: 12 }}>{provider === "codex" ? "Codex permissions" : "CLI permissions"}</legend>
           {(provider === "codex" ? [
-            ["confirm", "Safe", "Ask before untrusted commands; workspace-write sandbox."],
+            ["confirm", "Safe", "Ask before untrusted commands (on request with Codex 0.155+); workspace-write sandbox."],
             ["on-request", "Balanced", "Codex decides when to ask; workspace-write sandbox."],
             ["never", "No approval", "Never asks, but keeps workspace-write sandbox."],
             ["bypass", "Dangerous bypass", "Skips all approval and sandboxing."],
