@@ -636,8 +636,20 @@ export async function discardChanges(cwd: string, paths: string[]): Promise<GitS
     else stashed.push(relPath);
   }
 
-  if (stashed.length > 0 && !(await hasHead(repositoryRoot))) {
-    throw new Error("Discard needs at least one commit: Git cannot save changes before the first commit. Delete new files from the Explorer instead.");
+  if (stashed.length > 0) {
+    if (!(await hasHead(repositoryRoot))) {
+      throw new Error("Discard needs at least one commit: Git cannot save changes before the first commit. Delete new files from the Explorer instead.");
+    }
+    // `git stash push` snapshots the whole index, which fails while any path
+    // in the repo is still unmerged. Conflicted paths passed to this same
+    // call are fine: they're restored below before the stash runs.
+    const conflictedHere = new Set(conflicted);
+    const hasOtherConflict = entries.some(
+      (entry) => classifyGitStatus(entry).status === "conflict" && !conflictedHere.has(entry.path),
+    );
+    if (hasOtherConflict) {
+      throw new Error("Resolve or discard the conflicted files first: Git can't save other changes as a stash while a merge conflict is open.");
+    }
   }
   if (conflicted.length > 0) {
     await git(repositoryRoot, ["restore", "--source=HEAD", "--staged", "--worktree", "--", ...conflicted]);
