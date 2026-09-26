@@ -12,6 +12,7 @@ import { newNotifications } from "@/lib/activity-center";
 import { markNotificationsRead } from "@/lib/activity-notifications";
 import type { ActivityNotification } from "@/lib/workspace-status-store";
 import type { ClaudeChatTarget, ClaudeForkTarget, CodexChatTarget } from "@/components/workspace/WorkspaceActions";
+import { permissionLabel, permissionOptions, TASK_TEMPLATES_CHANGED_EVENT, TaskTemplateDialog, type TaskTemplate } from "./TaskTemplateDialog";
 
 /** Structurally identical to `CodexChatTarget`; kept as a distinct export so AgentsPanel stays usable outside the workspace-actions context. */
 export type CodexSessionTarget = CodexChatTarget;
@@ -34,7 +35,8 @@ type PendingAction =
   | { kind: "session"; action: "rename" | "archive" | "unarchive" | "delete"; session: CodexSession }
   | { kind: "claude-session"; session: ClaudeSession }
   | { kind: "terminal"; action: "stop" | "remove"; terminal: TerminalSession }
-  | { kind: "clear"; provider?: TerminalProvider; count: number };
+  | { kind: "clear"; provider?: TerminalProvider; count: number }
+  | { kind: "template"; action: "run" | "delete"; template: TaskTemplate };
 
 interface Props {
   cwd: string;
@@ -69,7 +71,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [showArchived, setShowArchived] = useState(false);
   const [claudeQuery, setClaudeQuery] = useState("");
   const [debouncedClaudeQuery, setDebouncedClaudeQuery] = useState("");
-  const [claudeLaunch, setClaudeLaunch] = useState<{ session: ClaudeSession; mode: "resume" | "fork"; permission: "confirm" | "bypass" } | null>(null);
+  const [claudeLaunch, setClaudeLaunch] = useState<{ session: ClaudeSession; mode: "resume" | "fork"; permission: TerminalPermissionMode } | null>(null);
   const [claudeError, setClaudeError] = useState<string | null>(null);
   const { terminals, stats: terminalStats, update: setTerminals } = useWorkspaceTerminals(cwd, refreshKey);
   const status = useWorkspaceStatus();
@@ -95,6 +97,11 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [modelsLoading, setModelsLoading] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  const [templates, setTemplates] = useState<TaskTemplate[]>([]);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [templateError, setTemplateError] = useState<string | null>(null);
+  const [templateBusyId, setTemplateBusyId] = useState<string | null>(null);
+  const [templateEditor, setTemplateEditor] = useState<{ template?: TaskTemplate } | null>(null);
   const sessionRequestRef = useRef(0);
   const lastCatalogSignatureRef = useRef<{ terminals: string | null; codexRuntimes: string | null }>({ terminals: null, codexRuntimes: null });
   const seenNotificationsRef = useRef<Set<string> | null>(null);
@@ -399,7 +406,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
           sessionId = data.result?.thread?.id ?? data.result?.threadId ?? data.result?.id ?? "";
           if (!response.ok || !sessionId) throw new Error(data.error || "Codex did not return a forked session");
         }
-        const approvalPolicy = launchPermission === "confirm" ? "untrusted" : launchPermission === "bypass" ? "never" : launchPermission;
+        const approvalPolicy = launchPermission === "on-request" || launchPermission === "never" ? launchPermission : launchPermission === "bypass" ? "never" : "untrusted";
         onOpenCodexSession?.({ sessionId, sessionName: mode === "fork" ? `${session.name} (fork)` : session.name, cwd: session.cwd || cwd, model: launchModel || undefined, reasoningEffort: launchReasoningEffort || undefined, serviceTier: launchServiceTier || undefined, approvalPolicy });
       } else {
         const response = await fetch("/api/terminals", {
@@ -560,6 +567,57 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     }
   }, [cwd, onTerminalRemoved, setTerminals, terminals]);
 
+  useEffect(() => {
+    // Only the newest request may update the list; a slower older one is ignored.
+    let request = 0;
+    const load = () => {
+      const current = ++request;
+      void fetch(`/api/task-templates?${new URLSearchParams({ cwd })}`, { cache: "no-store" })
+        .then(async (response) => {
+          const data = await response.json() as { templates?: TaskTemplate[]; error?: string };
+          if (!response.ok || !data.templates) throw new Error(data.error || "Unable to load templates");
+          if (current === request) { setTemplates(data.templates); setTemplateError(null); }
+        })
+        .catch((cause) => { if (current === request) setTemplateError(cause instanceof Error ? cause.message : "Unable to load templates"); });
+    };
+    setTemplates([]);
+    setTemplateError(null);
+    load();
+    window.addEventListener(TASK_TEMPLATES_CHANGED_EVENT, load);
+    return () => { request = -1; window.removeEventListener(TASK_TEMPLATES_CHANGED_EVENT, load); };
+  }, [cwd]);
+
+  const runTemplate = useCallback(async (template: TaskTemplate) => {
+    setTemplateBusyId(template.id);
+    setTemplateError(null);
+    try {
+      const response = await fetch("/api/terminals", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: template.provider, cwd, permissionMode: template.permissionMode, launchMode: "new", noAltScreen: template.provider === "codex", model: template.model ?? undefined, initialPrompt: template.initialPrompt ?? undefined, webSearch: template.webSearch, title: template.name }),
+      });
+      const data = await response.json() as { terminal?: TerminalSession; error?: string };
+      if (!response.ok || !data.terminal) throw new Error(data.error || "Unable to start template");
+      setTerminals((current) => current.some((item) => item.id === data.terminal!.id) ? current : [...current, data.terminal!]);
+      onOpenTerminal?.(data.terminal, template.name);
+    } catch (cause) {
+      setTemplateError(cause instanceof Error ? cause.message : "Unable to start template");
+    } finally {
+      setTemplateBusyId(null);
+    }
+  }, [cwd, onOpenTerminal, setTerminals]);
+
+  const deleteTemplate = useCallback(async (template: TaskTemplate) => {
+    setTemplateError(null);
+    try {
+      const response = await fetch(`/api/task-templates/${encodeURIComponent(template.id)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error((await response.json().catch(() => ({})) as { error?: string }).error || "Unable to delete template");
+      window.dispatchEvent(new Event(TASK_TEMPLATES_CHANGED_EVENT));
+    } catch (cause) {
+      setTemplateError(cause instanceof Error ? cause.message : "Unable to delete template");
+    }
+  }, []);
+
   const runningTerminalCount = terminals.filter((terminal) => terminal.state === "running").length;
   const endedTerminalCount = terminals.length - runningTerminalCount;
   const workspaceStats = terminalStats?.workspace ?? { running: runningTerminalCount, records: terminals.length, bufferBytes: terminals.reduce((total, terminal) => total + terminal.bufferBytes, 0) };
@@ -574,8 +632,9 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     if (pending.kind === "session") void manageSession(pending.session, pending.action, renameValue);
     else if (pending.kind === "claude-session") void deleteClaudeSession(pending.session);
     else if (pending.kind === "terminal") void (pending.action === "stop" ? stopTerminal(pending.terminal) : removeTerminalRecord(pending.terminal));
+    else if (pending.kind === "template") void (pending.action === "run" ? runTemplate(pending.template) : deleteTemplate(pending.template));
     else void clearEndedTerminalRecords(pending.provider);
-  }, [clearEndedTerminalRecords, deleteClaudeSession, manageSession, pendingAction, removeTerminalRecord, renameValue, stopTerminal]);
+  }, [clearEndedTerminalRecords, deleteClaudeSession, deleteTemplate, manageSession, pendingAction, removeTerminalRecord, renameValue, runTemplate, stopTerminal]);
 
   const requestSessionAction = useCallback((session: CodexSession, action: "rename" | "archive" | "unarchive" | "delete") => {
     setRenameValue(session.name);
@@ -593,6 +652,39 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
         <span title={`Global: ${globalStats.running}/${limits.running} running · ${globalStats.records}/${limits.records} records · ${formatBytes(globalStats.bufferBytes)}`} style={overviewMetaStyle}>{globalStats.records} sessions · {formatBytes(globalStats.bufferBytes)}</span>
         {endedTerminalCount > 0 && <button type="button" onClick={() => setPendingAction({ kind: "clear", count: endedTerminalCount })} style={resourceClearStyle}>Clear {endedTerminalCount}</button>}
       </div>
+      <div style={providerStyle}>
+        <button type="button" onClick={() => setTemplatesOpen((value) => !value)} aria-expanded={templatesOpen} style={providerToggleStyle}>
+          <Chevron open={templatesOpen} />
+          <span style={{ display: "grid", width: 20, placeItems: "center", color: "var(--text-muted)", fontSize: 11, fontWeight: 700 }}>≡</span>
+          <span style={{ flex: 1, color: "var(--text)", fontSize: 12 }}>Templates</span>
+          {templateError && !templatesOpen && <span role="alert" title={templateError} style={{ color: "#f87171", fontSize: 12, fontWeight: 700 }}>!</span>}
+          <span title={`${templates.length} templates`} style={providerCountStyle}>{templates.length}</span>
+        </button>
+        <button type="button" onClick={() => setTemplateEditor({})} title="New template" aria-label="New template" style={addStyle}>＋</button>
+      </div>
+      {templatesOpen && <div style={sessionListStyle}>
+        {templateError && <div role="alert" style={errorStyle}>{templateError}</div>}
+        {templates.length === 0 ? <InlineMessage>No templates yet</InlineMessage> : templates.map((template) => <div key={template.id} style={sessionContainerStyle}>
+          <button
+            type="button"
+            disabled={templateBusyId !== null}
+            style={sessionMainStyle}
+            title={[template.name, template.initialPrompt, template.cwd ? `Only in ${template.cwd}` : "All workspaces"].filter(Boolean).join("\n")}
+            onClick={() => { if (template.permissionMode === "bypass") setPendingAction({ kind: "template", action: "run", template }); else void runTemplate(template); }}
+          >
+            <span style={{ display: "grid", width: 14, placeItems: "center", color: template.provider === "codex" ? "var(--accent)" : "#d97706", fontSize: 10, fontWeight: 700 }}>{template.provider === "codex" ? "C" : "A"}</span>
+            <span style={{ minWidth: 0, flex: 1 }}>
+              <span style={sessionNameStyle}>{template.name}</span>
+              <span style={{ ...sessionMetaStyle, color: template.permissionMode === "bypass" ? "#f87171" : sessionMetaStyle.color }}>{[template.provider === "codex" ? "Codex" : "Claude", permissionLabel(template.provider, template.permissionMode), template.model, !template.cwd && "all workspaces"].filter(Boolean).join(" · ")}</span>
+            </span>
+            <span style={timeStyle}>{templateBusyId === template.id ? "starting" : "run"}</span>
+          </button>
+          <ActionMenu label={`Manage ${template.name}`}>
+            <MenuButton onClick={() => setTemplateEditor({ template })}>Edit…</MenuButton>
+            <MenuButton danger onClick={() => setPendingAction({ kind: "template", action: "delete", template })}>Delete…</MenuButton>
+          </ActionMenu>
+        </div>)}
+      </div>}
       <ProviderRow provider="shell" label="Terminal" badge=">_" badgeColor="#16a34a" open={shellOpen} count={shellTerminals.length} running={shellTerminals.filter((terminal) => terminal.state === "running").length} onToggle={() => setShellOpen((value) => !value)} onNewAgent={onNewAgent} />
       {shellOpen && <div style={sessionListStyle}>
         {projectScripts.length > 0 && <div style={projectScriptsStyle}>
@@ -740,6 +832,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
       onCancel={() => { if (!busyId) setClaudeLaunch(null); }}
       onStart={() => void startClaudeSession()}
     />}
+    {templateEditor && <TaskTemplateDialog cwd={cwd} template={templateEditor.template} onClose={() => setTemplateEditor(null)} />}
     {pendingAction && <AgentActionDialog action={pendingAction} renameValue={renameValue} busy={Boolean(busyId)} onRenameChange={setRenameValue} onCancel={() => setPendingAction(null)} onConfirm={confirmPendingAction} />}
     {taskNotices.length > 0 && createPortal(<div aria-live="polite" style={taskNoticesStackStyle}>{taskNotices.map((notice) => <div key={notice.terminal.id} role="status" style={taskNoticeStyle}>
       <button type="button" onClick={() => { void markNotificationsRead({ ids: [notice.notificationId] }); onOpenTerminal?.(notice.terminal, notice.terminal.title); setTaskNotices((current) => current.filter((item) => item.terminal.id !== notice.terminal.id)); }} style={taskNoticeMainStyle}><strong>{notice.title}</strong><span>{notice.summary}</span></button>
@@ -751,9 +844,10 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
 function AgentActionDialog({ action, renameValue, busy, onRenameChange, onCancel, onConfirm }: { action: PendingAction; renameValue: string; busy: boolean; onRenameChange: (value: string) => void; onCancel: () => void; onConfirm: () => void }) {
   useDialogEscape(onCancel, busy);
   const rename = action.kind === "session" && action.action === "rename";
-  const destructive = action.kind === "session" && action.action === "delete" || action.kind === "claude-session" || action.kind === "terminal" || action.kind === "clear";
-  const title = rename ? "Rename Codex session" : action.kind === "claude-session" ? "Delete Claude session" : action.kind === "session" ? `${action.action === "unarchive" ? "Restore" : action.action[0].toUpperCase() + action.action.slice(1)} Codex session` : action.kind === "terminal" ? `${action.action === "stop" ? "Stop" : "Remove"} ${action.terminal.provider} terminal` : `Clear ended ${action.provider ? `${action.provider} ` : ""}terminals`;
-  const description = action.kind === "claude-session" ? `“${action.session.title}” and its sub-agent transcripts will be permanently deleted. This cannot be undone.`
+  const destructive = action.kind === "session" && action.action === "delete" || action.kind === "claude-session" || action.kind === "terminal" || action.kind === "clear" || action.kind === "template";
+  const title = rename ? "Rename Codex session" : action.kind === "template" ? action.action === "run" ? `Run “${action.template.name}” with dangerous bypass` : "Delete template" : action.kind === "claude-session" ? "Delete Claude session" : action.kind === "session" ? `${action.action === "unarchive" ? "Restore" : action.action[0].toUpperCase() + action.action.slice(1)} Codex session` : action.kind === "terminal" ? `${action.action === "stop" ? "Stop" : "Remove"} ${action.terminal.provider} terminal` : `Clear ended ${action.provider ? `${action.provider} ` : ""}terminals`;
+  const description = action.kind === "template" ? action.action === "run" ? `${action.template.provider === "codex" ? "Codex skips all approval and sandboxing" : "Claude skips its permission confirmations"} in this terminal, so it may edit files and run commands without asking.` : `“${action.template.name}” will be deleted. Terminals it started keep running.`
+    : action.kind === "claude-session" ? `“${action.session.title}” and its sub-agent transcripts will be permanently deleted. This cannot be undone.`
     : action.kind === "session"
     ? action.action === "delete" ? `“${action.session.name}” will be permanently deleted. This cannot be undone.` : action.action === "archive" ? `“${action.session.name}” will move out of the active session list.` : action.action === "unarchive" ? `“${action.session.name}” will return to the active session list.` : "Choose a concise name that identifies this session."
     : action.kind === "terminal" ? action.action === "stop" ? "The running process will be interrupted. Its session history will remain available." : "This removes the ended terminal record from the workspace."
@@ -766,17 +860,17 @@ function AgentActionDialog({ action, renameValue, busy, onRenameChange, onCancel
       {rename && <input autoFocus value={renameValue} maxLength={120} onChange={(event) => onRenameChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !confirmDisabled) onConfirm(); }} style={{ ...inputStyle, marginTop: 14 }} />}
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
         <button type="button" disabled={busy} onClick={onCancel} style={dialogButtonStyle}>Cancel</button>
-        <button type="button" disabled={confirmDisabled} onClick={onConfirm} style={{ ...dialogButtonStyle, borderColor: destructive ? "rgb(239 68 68 / 45%)" : "var(--accent)", background: destructive ? "rgb(239 68 68 / 10%)" : "var(--accent)", color: destructive ? "#ef4444" : "white", opacity: confirmDisabled ? .5 : 1 }}>{busy ? "Working…" : rename ? "Rename" : action.kind === "session" && action.action === "unarchive" ? "Restore" : action.kind === "session" && action.action === "archive" ? "Archive" : action.kind === "terminal" && action.action === "stop" ? "Stop terminal" : "Remove"}</button>
+        <button type="button" disabled={confirmDisabled} onClick={onConfirm} style={{ ...dialogButtonStyle, borderColor: destructive ? "rgb(239 68 68 / 45%)" : "var(--accent)", background: destructive ? "rgb(239 68 68 / 10%)" : "var(--accent)", color: destructive ? "#ef4444" : "white", opacity: confirmDisabled ? .5 : 1 }}>{busy ? "Working…" : rename ? "Rename" : action.kind === "session" && action.action === "unarchive" ? "Restore" : action.kind === "session" && action.action === "archive" ? "Archive" : action.kind === "terminal" && action.action === "stop" ? "Stop terminal" : action.kind === "template" ? action.action === "run" ? "Run anyway" : "Delete" : "Remove"}</button>
       </div>
     </section>
   </div>;
 }
 
 function ClaudeLaunchDialog({ target, busy, error, onChange, onCancel, onStart }: {
-  target: { session: ClaudeSession; mode: "resume" | "fork"; permission: "confirm" | "bypass" };
+  target: { session: ClaudeSession; mode: "resume" | "fork"; permission: TerminalPermissionMode };
   busy: boolean;
   error: string | null;
-  onChange: (change: { mode?: "resume" | "fork"; permission?: "confirm" | "bypass" }) => void;
+  onChange: (change: { mode?: "resume" | "fork"; permission?: TerminalPermissionMode }) => void;
   onCancel: () => void;
   onStart: () => void;
 }) {
@@ -786,9 +880,10 @@ function ClaudeLaunchDialog({ target, busy, error, onChange, onCancel, onStart }
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}><strong style={{ flex: 1, fontSize: 14 }}>{target.session.title}</strong><button type="button" onClick={onCancel} disabled={busy} style={dialogButtonStyle}>Cancel</button></div>
       <div style={dialogGridStyle}>
         <label style={fieldStyle}>Action<select value={target.mode} disabled={busy} onChange={(event) => onChange({ mode: event.target.value as "resume" | "fork" })} style={inputStyle}><option value="resume">Resume session</option><option value="fork">Fork session</option></select></label>
-        <label style={fieldStyle}>Permissions<select value={target.permission} disabled={busy} onChange={(event) => onChange({ permission: event.target.value as "confirm" | "bypass" })} style={inputStyle}><option value="confirm">Keep CLI confirmations</option><option value="bypass">Dangerous bypass</option></select></label>
+        <label style={fieldStyle}>Permissions<select value={target.permission} disabled={busy} onChange={(event) => onChange({ permission: event.target.value as TerminalPermissionMode })} style={inputStyle}>{permissionOptions("claude").map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
       </div>
       <small style={{ ...hintStyle, display: "block", marginTop: 10 }}>{target.mode === "fork" ? "Starts a new session with a copy of this history; the original is left unchanged." : "Continues this session in a Terminal. Only one Terminal can resume a session at a time."}</small>
+      {target.permission !== "confirm" && target.permission !== "bypass" && <small style={{ ...hintStyle, display: "block", marginTop: 6 }}>{permissionOptions("claude").find(([value]) => value === target.permission)?.[2]}</small>}
       {target.permission === "bypass" && <div style={dangerStyle}>Claude will skip its permission confirmations in this Terminal.</div>}
       {error && <div role="alert" style={errorStyle}>{error}</div>}
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}><button type="button" disabled={busy} onClick={onStart} style={{ ...dialogButtonStyle, background: "var(--accent)", borderColor: "var(--accent)", color: "white" }}>{busy ? "Starting…" : `${target.mode === "fork" ? "Fork" : "Resume"} in Terminal`}</button></div>

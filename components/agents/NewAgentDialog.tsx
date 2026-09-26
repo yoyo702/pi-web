@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { TerminalLaunchMode, TerminalPermissionMode, TerminalProvider, TerminalSession } from "@/lib/agents/terminal";
+import { permissionOptions, TaskTemplateDialog } from "./TaskTemplateDialog";
 
 export function NewAgentDialog({ cwd, provider: initialProvider, onClose, onCreated }: { cwd: string; provider: TerminalProvider; onClose: () => void; onCreated: (terminal: TerminalSession) => void }) {
   const [provider, setProvider] = useState<TerminalProvider>(initialProvider);
@@ -12,6 +13,7 @@ export function NewAgentDialog({ cwd, provider: initialProvider, onClose, onCrea
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [existing, setExisting] = useState<TerminalSession[]>([]);
+  const [savingTemplate, setSavingTemplate] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -23,11 +25,11 @@ export function NewAgentDialog({ cwd, provider: initialProvider, onClose, onCrea
   }, [cwd]);
 
   useEffect(() => {
-    if (busy) return;
+    if (busy || savingTemplate) return;
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [busy, onClose]);
+  }, [busy, onClose, savingTemplate]);
 
   useEffect(() => {
     setPermissionMode("confirm");
@@ -67,17 +69,9 @@ export function NewAgentDialog({ cwd, provider: initialProvider, onClose, onCrea
         </label>
         {provider !== "shell" && <fieldset style={{ border: "1px solid var(--border)", borderRadius: 7, margin: "16px 0", padding: 10 }}>
           <legend style={{ color: "var(--text-muted)", fontSize: 12 }}>{provider === "codex" ? "Codex permissions" : "CLI permissions"}</legend>
-          {(provider === "codex" ? [
-            ["confirm", "Safe", "Ask before untrusted commands (on request with Codex 0.155+); workspace-write sandbox."],
-            ["on-request", "Balanced", "Codex decides when to ask; workspace-write sandbox."],
-            ["never", "No approval", "Never asks, but keeps workspace-write sandbox."],
-            ["bypass", "Dangerous bypass", "Skips all approval and sandboxing."],
-          ] : [
-            ["confirm", "Keep CLI confirmations", "Claude asks in the terminal."],
-            ["bypass", "Dangerous bypass", "Claude skips its permission confirmations."],
-          ]).map(([value, label, description]) => (
+          {permissionOptions(provider).map(([value, label, description]) => (
             <label key={value} style={{ display: "flex", gap: 8, alignItems: "start", color: value === "bypass" ? "#fca5a5" : "var(--text)", fontSize: 13, marginTop: 8 }}>
-              <input type="radio" checked={permissionMode === value} onChange={() => setPermissionMode(value as TerminalPermissionMode)} />
+              <input type="radio" checked={permissionMode === value} onChange={() => setPermissionMode(value)} />
               <span><strong>{label}</strong><br /><small style={mutedStyle}>{description}</small></span>
             </label>
           ))}
@@ -106,10 +100,12 @@ export function NewAgentDialog({ cwd, provider: initialProvider, onClose, onCrea
         )}
         {error && <p role="alert" style={{ color: "#f87171", fontSize: 12 }}>{error}</p>}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          {provider !== "shell" && <button type="button" onClick={() => setSavingTemplate(true)} disabled={busy} style={{ ...buttonStyle, marginRight: "auto" }}>Save as template…</button>}
           <button type="button" onClick={onClose} disabled={busy} style={buttonStyle}>Cancel</button>
           <button type="button" onClick={() => void create()} disabled={busy || (provider !== "shell" && permissionMode === "bypass" && !acknowledged)} style={{ ...buttonStyle, background: "var(--accent)", color: "white", borderColor: "var(--accent)" }}>{busy ? "Starting…" : provider === "shell" ? "Open Terminal" : `Start ${provider}`}</button>
         </div>
       </div>
+      {savingTemplate && provider !== "shell" && <TaskTemplateDialog cwd={cwd} initial={{ provider, permissionMode }} onClose={() => setSavingTemplate(false)} />}
     </div>
   );
 }

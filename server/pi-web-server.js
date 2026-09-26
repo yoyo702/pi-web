@@ -297,6 +297,8 @@ function handleRequest(req, res) {
     if (!auth.isSameOrigin(req)) return writeJson(res, 403, { error: "cross-origin request rejected" });
     return webPushApi.handle(req, res, url);
   }
+  const taskTemplatesApi = require("./task-templates-api.cjs");
+  if (taskTemplatesApi.isPath(url.pathname)) return taskTemplatesApi.handle(req, res, url, { isSameOrigin: (request) => auth.isSameOrigin(request) });
   const codexAppApi = require("./agents/codex-app-api.cjs");
   if (codexAppApi.isPath(url.pathname)) {
     return codexAppApi.handle(req, res, url);

@@ -4,7 +4,8 @@ import { getAllowedFileRoots, isExistingFilePathAllowed } from "../file-access";
 
 /** Shared client contracts for optional external agent terminals. */
 export type TerminalProvider = "shell" | "codex" | "claude";
-export type TerminalPermissionMode = "confirm" | "on-request" | "never" | "bypass";
+/** Codex: confirm, on-request, never, bypass. Claude: confirm, plan, accept-edits, bypass. */
+export type TerminalPermissionMode = "confirm" | "on-request" | "never" | "bypass" | "plan" | "accept-edits";
 export type TerminalLaunchMode = "new" | "resume-last" | "resume" | "fork";
 export type TerminalState = "running" | "ended" | "stopped";
 /** What a running Claude or Codex terminal is doing; null for shells or when unknown. */
@@ -67,7 +68,7 @@ export class TerminalRequestError extends Error {
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const manager = require("@/server/agents/terminal-manager.cjs") as {
   TerminalError: new (code: string, message: string) => Error & { code: string };
-  createTerminal(input: { provider: TerminalProvider; cwd: string; cols: number; rows: number; permissionMode: TerminalPermissionMode; launchMode: TerminalLaunchMode; noAltScreen: boolean; sourceSessionId?: string; model?: string; webSearch?: boolean; initialPrompt?: string; chatMode?: boolean }): TerminalSession;
+  createTerminal(input: { provider: TerminalProvider; cwd: string; cols: number; rows: number; permissionMode: TerminalPermissionMode; launchMode: TerminalLaunchMode; noAltScreen: boolean; sourceSessionId?: string; model?: string; webSearch?: boolean; initialPrompt?: string; chatMode?: boolean; title?: string }): TerminalSession;
   listTerminals(cwd?: string): TerminalSession[];
   terminalStats(cwd?: string): TerminalStats;
   getTerminal(id: string): TerminalSession;
@@ -106,7 +107,7 @@ export async function resolveTerminalCwd(cwd: string): Promise<string> {
   return canonical;
 }
 
-export async function createTerminal(input: { provider: TerminalProvider; cwd: string; cols?: number; rows?: number; permissionMode?: TerminalPermissionMode; launchMode?: TerminalLaunchMode; noAltScreen?: boolean; sourceSessionId?: string; model?: string; webSearch?: boolean; initialPrompt?: string; chatMode?: boolean }): Promise<TerminalSession> {
+export async function createTerminal(input: { provider: TerminalProvider; cwd: string; cols?: number; rows?: number; permissionMode?: TerminalPermissionMode; launchMode?: TerminalLaunchMode; noAltScreen?: boolean; sourceSessionId?: string; model?: string; webSearch?: boolean; initialPrompt?: string; chatMode?: boolean; title?: string }): Promise<TerminalSession> {
   const cwd = await resolveTerminalCwd(input.cwd);
   return translate(() => manager.createTerminal({
     provider: input.provider,
@@ -121,6 +122,7 @@ export async function createTerminal(input: { provider: TerminalProvider; cwd: s
     webSearch: input.webSearch,
     initialPrompt: input.initialPrompt,
     chatMode: input.chatMode,
+    title: input.title,
   }));
 }
 

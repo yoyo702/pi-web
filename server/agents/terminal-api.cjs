@@ -173,6 +173,7 @@ async function handleTerminalRequest(req, res, url) {
     }
     if (url.pathname === "/api/terminals" && req.method === "POST") {
       const body = await readJson(req);
+      if (body.title !== undefined && typeof body.title !== "string") throw Object.assign(new Error("title must be a string"), { code: "invalid_title" });
       const cwd = authorizedCwd(body.cwd);
       // Only `resume` writes the source session; `fork` starts a new one.
       if (body.provider === "codex" && body.launchMode === "resume" && typeof body.sourceSessionId === "string") {
@@ -196,7 +197,7 @@ async function handleTerminalRequest(req, res, url) {
           if (claudeChat.runtimeForSession(body.sourceSessionId) || manager.runtimeForSession(body.sourceSessionId)) throw Object.assign(new Error("This Claude session was opened elsewhere meanwhile"), { code: "session_busy" });
         }
       }
-      const terminal = manager.createTerminal({ provider: body.provider, cwd, cols: body.cols ?? 100, rows: body.rows ?? 30, permissionMode: body.permissionMode ?? "confirm", launchMode: body.launchMode ?? "new", noAltScreen: body.noAltScreen ?? body.provider === "codex", sourceSessionId: body.sourceSessionId, model: body.model, webSearch: body.webSearch, initialPrompt: body.initialPrompt, chatMode: body.chatMode === true });
+      const terminal = manager.createTerminal({ provider: body.provider, cwd, cols: body.cols ?? 100, rows: body.rows ?? 30, permissionMode: body.permissionMode ?? "confirm", launchMode: body.launchMode ?? "new", noAltScreen: body.noAltScreen ?? body.provider === "codex", sourceSessionId: body.sourceSessionId, model: body.model, webSearch: body.webSearch, initialPrompt: body.initialPrompt, chatMode: body.chatMode === true, title: body.title });
       return json(res, 201, { terminal });
     }
     const id = parts[2];

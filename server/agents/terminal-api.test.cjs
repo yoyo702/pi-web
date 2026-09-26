@@ -118,3 +118,13 @@ test("an open Codex Chat blocks input only for a terminal resuming the same sess
   assert.equal(api.chatOwnsInput({ launchMode: "fork", sourceSessionId: "parent" }), false);
   assert.equal(api.chatOwnsInput({ launchMode: "resume", sourceSessionId: "other" }), false);
 });
+
+test("a non-string terminal title is rejected before anything starts", async (t) => {
+  const { api } = loadTerminalApi(t);
+  const { Readable } = require("node:stream");
+  const req = Object.assign(Readable.from([Buffer.from(JSON.stringify({ provider: "claude", cwd: "/nowhere", title: 5 }))]), { method: "POST", headers: { "content-type": "application/json" } });
+  const res = { status: 0, body: "", writeHead(status) { this.status = status; }, end(body) { this.body = body ?? ""; } };
+  await api.handleTerminalRequest(req, res, new URL("http://localhost/api/terminals"));
+  assert.equal(res.status, 400);
+  assert.equal(JSON.parse(res.body).code, "invalid_title");
+});

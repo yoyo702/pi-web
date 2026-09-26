@@ -1449,6 +1449,81 @@ test("lists Claude sessions, resumes one in a terminal and shows delete conflict
   expect(launches).toEqual([{ provider: "claude", cwd: "/tmp/pi-web-e2e", permissionMode: "confirm", launchMode: "resume", sourceSessionId: firstId }]);
 });
 
+test("saves a task template, runs it and confirms dangerous runs", async ({ page, request }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  // Templates use the real API (PI_WEB_TASK_TEMPLATES_FILE in playwright.config.ts); start empty.
+  const existing = await (await request.get("/api/task-templates")).json() as { templates: { id: string }[] };
+  for (const template of existing.templates) await request.delete(`/api/task-templates/${template.id}`);
+  const launches: Record<string, unknown>[] = [];
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
+    id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
+    created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
+  }], runningSessionIds: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
+  await page.route("**/api/terminals?*", async (route) => route.fulfill({ json: { cwd: "/tmp/pi-web-e2e", terminals: [], stats: null } }));
+  await mockStatusStream(page, [
+    { type: "running", runningSessionIds: [] },
+    { type: "terminals", terminals: [], limits: { running: 20, records: 100 } },
+    { type: "codex_runtimes", runtimes: [] },
+  ]);
+  await page.route("**/api/project-scripts?*", async (route) => route.fulfill({ json: { scripts: [], runner: "npm" } }));
+  await page.route("**/api/claude/sessions?*", async (route) => route.fulfill({ json: { sessions: [], nextCursor: null } }));
+  await page.route("**/api/codex/sessions?*", async (route) => route.fulfill({ json: { sessions: [] } }));
+  await page.route("**/api/terminals", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    launches.push(body);
+    return route.fulfill({ status: 201, json: { terminal: {
+      id: `template-term-${launches.length}`, provider: body.provider, cwd: "/tmp/pi-web-e2e", state: "running", createdAt: new Date().toISOString(),
+      launchMode: "new", permissionMode: body.permissionMode, title: body.title,
+    } } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.getByRole("button", { name: "New template" }).click();
+  const editor = page.getByRole("dialog", { name: "New template" });
+  await editor.getByRole("textbox", { name: "Name" }).fill("Review changes");
+  await editor.getByRole("combobox", { name: "CLI" }).selectOption("claude");
+  await editor.getByRole("radio", { name: /^Plan/ }).check();
+  await editor.getByRole("textbox", { name: "Model (optional)" }).fill("opus");
+  await editor.getByRole("textbox", { name: "Initial prompt (optional)" }).fill("Review the diff");
+  await editor.getByRole("button", { name: "Save template" }).click();
+  await expect(editor).toHaveCount(0);
+
+  const group = page.locator("button[aria-expanded]").filter({ hasText: "Templates" });
+  await expect(group).toContainText("1");
+  await group.click();
+  await expect(page.getByText("Claude · Plan · opus", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^A Review changes/ }).click();
+  await expect.poll(() => launches.length).toBe(1);
+  expect(launches[0]).toEqual({ provider: "claude", cwd: "/tmp/pi-web-e2e", permissionMode: "plan", launchMode: "new", noAltScreen: false, model: "opus", initialPrompt: "Review the diff", webSearch: false, title: "Review changes" });
+  await expect(page.getByRole("tab", { name: /Review changes/ }).first()).toBeVisible();
+
+  const trigger = page.getByRole("button", { name: "Manage Review changes" });
+  await trigger.hover();
+  await trigger.click();
+  await page.getByRole("menuitem", { name: "Edit…" }).click();
+  const edit = page.getByRole("dialog", { name: "Edit template" });
+  await edit.getByRole("radio", { name: /^Dangerous bypass/ }).check();
+  await edit.getByRole("button", { name: "Save template" }).click();
+  await expect(page.getByText("Claude · Dangerous bypass · opus", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /^A Review changes/ }).click();
+  const confirm = page.getByRole("dialog", { name: "Run “Review changes” with dangerous bypass" });
+  await confirm.getByRole("button", { name: "Cancel" }).click();
+  expect(launches).toHaveLength(1);
+  await page.getByRole("button", { name: /^A Review changes/ }).click();
+  await confirm.getByRole("button", { name: "Run anyway" }).click();
+  await expect.poll(() => launches.length).toBe(2);
+  expect(launches[1].permissionMode).toBe("bypass");
+
+  await trigger.hover();
+  await trigger.click();
+  await page.getByRole("menuitem", { name: "Delete…" }).click();
+  await page.getByRole("dialog", { name: "Delete template" }).getByRole("button", { name: "Delete" }).click();
+  await expect(page.getByText("No templates yet", { exact: true })).toBeVisible();
+});
+
 // Codex and Claude chat event streams are driven from the test through window.__codexStreams.
 async function fakeCodexStreams(page: Page) {
   await page.addInitScript(() => {

@@ -23,6 +23,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - Session 支持新建、恢复、Fork、重命名、归档和删除确认。
 - Terminal 支持停止、重启、删除记录、清理已结束任务和重连缓冲区。
 - Codex Terminal 的权限：Safe 用 `--sandbox workspace-write --ask-for-approval untrusted`（执行不受信任的命令前询问）。Codex 0.155 起 CLI 不再接受 `untrusted`（参数和配置都会报错，终端无法启动），这时 Safe 改用 `on-request`，与 Balanced 相同；是否支持看 `codex --help` 是否列出 `untrusted`（结果按可执行文件缓存到它变化）。Codex Chat 走 app-server，仍可用 `untrusted`。
+- Claude Terminal 的权限：Keep CLI confirmations（不加参数，Claude 在终端里询问）、Plan（`--permission-mode plan`，批准计划前只读）、Accept edits（`--permission-mode acceptEdits`，编辑文件不询问，命令仍需确认）、Dangerous bypass（`--dangerously-skip-permissions`）。新建终端和 Claude 会话的 Resume/Fork to Terminal 都可选。Claude Terminal 也接受模型（`--model`）和第一条消息（最后一个参数，以 “-” 开头时前面加 `--`），规则与 Codex 相同。
 - Chat 支持中断运行及处理审批卡片。
 - 模型和权限配置保存在工作区标签中，刷新后恢复。
 
@@ -153,6 +154,16 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - 状态：运行时状态通过工作区状态 SSE 的 `claude_runtimes` 推送（`idle` / `running` / `approval`），用于项目栏活动、通知（kind `claude`）和 Agents 面板的状态点。
 - 接口错误码：400 参数错误（含不支持的模型、权限模式），403 目录未授权，404 会话不存在；409 `session_busy`、`terminal_owns_session`、`approval_expired`、`no_active_turn`；503 进程不可用或控制请求超时（10 秒）；其余 500。
 
+## 任务模板
+
+把常用的 Claude/Codex 终端启动存成模板，在当前工作区一键启动。
+
+- 模板字段：名称（1–80 字，也是终端标题）、CLI（Codex / Claude）、权限（Codex：`confirm` / `on-request` / `never` / `bypass`；Claude：`confirm` / `plan` / `accept-edits` / `bypass`）、模型（可选）、第一条消息（可选，≤ 8000 字）、联网搜索（仅 Codex）、适用范围（本工作区或所有工作区）。
+- 存储：服务端 `~/.pi-web/task-templates.json`（0600，先写临时文件再改名），所有浏览器共用；最多 100 个。本工作区模板按 realpath 匹配文件夹。
+- 接口：`GET /api/task-templates?cwd=` 返回所有工作区的模板和该文件夹的模板（按名称排序）；`POST` 新建（201）；`PUT /:id` 修改；`DELETE /:id` 删除（204）。400 参数错误（`{error, code}`），404 模板不存在，409 已达上限，405 其他方法。修改请求拒绝跨站来源（未设密码时也拒绝），因为点击 Run 会执行模板里的消息。
+- 运行：用现有的 `POST /api/terminals`，带模板字段和 `title`，终端在当前工作区启动并打开标签。Codex 模板默认保留终端滚动缓冲（`noAltScreen`）。`bypass` 模板每次运行前都要确认。
+- 界面：Agents 面板顶部的 Templates 分组（默认折叠，显示数量）；“＋” 新建；每行显示 CLI、名称、权限、模型，点击运行，⋯ 菜单 Edit / Delete（删除需确认）。新建终端对话框的 “Save as template…” 用当前 CLI 和权限预填模板。出错时在分组内显示。
+
 ## 活动通知
 
 跑完、失败或等待审批的任务会留下一条通知，手机和电脑共用同一份列表和已读状态：在手机上发起、锁屏后，回到电脑上能看到结果。
@@ -244,7 +255,7 @@ Claude/Codex 终端运行时带 `activity`：`working`（正在跑一轮）、`w
 
 ## 后续计划
 
-- 任务模板、批量启动和跨项目任务队列。
+- 批量启动、跨项目任务队列和模板里的变量（任务模板已实现，见上）。
 - 更细粒度的资源使用和运行时间统计。
 
 ## 依赖
