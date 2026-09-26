@@ -110,3 +110,24 @@ test("a 401 while still signed in does not show the sign-in prompt", async ({ pa
   await page.waitForTimeout(300);
   await expect(page.getByRole("alertdialog", { name: "Signed out" })).toHaveCount(0);
 });
+
+test("a failed steer keeps the message and shows why", async ({ page }) => {
+  // The mobile "Install TianForge" prompt sits fixed over the chat input's
+  // Steer/Follow-up buttons; dismiss it up front like a returning user would.
+  await page.addInitScript(() => window.sessionStorage.setItem("tianforge-mobile-install-prompt-dismissed-v2", "1"));
+  let failSteer = true;
+  const { agentPosts } = await mockRunningSession(page, (body) => (
+    body.type === "steer" && failSteer ? { status: 409, json: { error: "agent is compacting" } } : null
+  ));
+  const input = page.getByPlaceholder("Steer now / queue follow-up...");
+  await input.fill("use the staging database instead");
+  await page.getByRole("button", { name: "Steer" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "Not sent: agent is compacting" })).toBeVisible();
+  await expect(input).toHaveValue("use the staging database instead");
+
+  failSteer = false;
+  await page.getByRole("button", { name: "Steer" }).click();
+  await expect(input).toHaveValue("");
+  await expect(page.getByText("Not sent: agent is compacting")).toBeHidden();
+  expect(agentPosts.filter((body) => body.type === "steer")).toHaveLength(2);
+});
