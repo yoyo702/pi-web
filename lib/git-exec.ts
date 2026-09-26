@@ -31,9 +31,12 @@ export async function runGit(
 }
 
 export const GIT_TIMEOUT_MS = 10_000;
-/** Hooks (husky, lint-staged, LFS) and the network can legitimately take minutes. */
+/**
+ * Hooks (husky, lint-staged, LFS) and the network can legitimately take
+ * minutes, and so can stashing large untracked files (Discard saves to a stash).
+ */
 export const GIT_LONG_TIMEOUT_MS = 5 * 60_000;
-const LONG_RUNNING_COMMANDS = new Set(["commit", "push", "fetch", "pull", "switch"]);
+const LONG_RUNNING_COMMANDS = new Set(["commit", "push", "fetch", "pull", "switch", "stash"]);
 
 /** Timeout for `git <args>`; `args[0]` is the subcommand. */
 export function gitCommandTimeout(args: string[]): number {
