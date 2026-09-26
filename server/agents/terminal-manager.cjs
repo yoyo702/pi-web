@@ -6,6 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { ensureNodePtySpawnHelper } = require("./ensure-node-pty-helper.cjs");
+const { PERMISSION_MODES, MAX_PROMPT_LENGTH, isValidModel } = require("./launch-options.cjs");
 const workspaceStatus = require("../workspace-status.cjs");
 const notifications = require("../notifications.cjs");
 
@@ -269,7 +270,7 @@ function buildLaunchArgs(provider, executable, permissionMode, launchMode, noAlt
   }
   if (provider === "claude") {
     if (launchMode === "resume-last") throw new TerminalError("unsupported_launch_mode", "Claude terminals resume a chosen session");
-    if (!["confirm", "plan", "accept-edits", "bypass"].includes(permissionMode)) throw new TerminalError("invalid_permission_mode", "Claude supports confirm, plan, accept-edits or bypass permission mode");
+    if (!PERMISSION_MODES.claude.includes(permissionMode)) throw new TerminalError("invalid_permission_mode", "Claude supports confirm, plan, accept-edits or bypass permission mode");
     if (launchMode !== "new" && (typeof sourceSessionId !== "string" || !CLAUDE_SESSION_ID.test(sourceSessionId))) {
       throw new TerminalError("invalid_session", "A Claude session id is required for this launch mode");
     }
@@ -282,7 +283,7 @@ function buildLaunchArgs(provider, executable, permissionMode, launchMode, noAlt
     return args;
   }
 
-  if (!["confirm", "on-request", "never", "bypass"].includes(permissionMode)) {
+  if (!PERMISSION_MODES.codex.includes(permissionMode)) {
     throw new TerminalError("invalid_permission_mode", "Codex permission mode is invalid");
   }
   if ((launchMode === "resume" || launchMode === "fork") && (typeof sourceSessionId !== "string" || !/^[0-9a-f-]{16,}$/i.test(sourceSessionId))) {
@@ -309,13 +310,13 @@ function buildLaunchArgs(provider, executable, permissionMode, launchMode, noAlt
 // Codex and Claude.
 function pushModel(args, model) {
   if (typeof model === "string" && model.trim()) {
-    if (model.length > 120 || !/^[A-Za-z0-9._:/-]+$/.test(model)) throw new TerminalError("invalid_model", "Model name contains unsupported characters");
+    if (!isValidModel(model)) throw new TerminalError("invalid_model", "Model name contains unsupported characters");
     args.push("--model", model.trim());
   }
 }
 function pushPrompt(args, initialPrompt) {
   if (typeof initialPrompt === "string" && initialPrompt.trim()) {
-    if (initialPrompt.length > 8_000) throw new TerminalError("invalid_prompt", "Initial prompt must be at most 8000 characters");
+    if (initialPrompt.length > MAX_PROMPT_LENGTH) throw new TerminalError("invalid_prompt", `Initial prompt must be at most ${MAX_PROMPT_LENGTH} characters`);
     // A prompt starting with "-" would otherwise be parsed as a CLI option
     // (e.g. Codex `-c key=value` config overrides).
     if (initialPrompt.trim().startsWith("-")) args.push("--");

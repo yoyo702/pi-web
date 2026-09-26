@@ -11,12 +11,9 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
+const { PERMISSION_MODES, MAX_PROMPT_LENGTH, isValidModel } = require("./agents/launch-options.cjs");
 
 const MAX_TEMPLATES = 100;
-const PERMISSION_MODES = {
-  codex: ["confirm", "on-request", "never", "bypass"],
-  claude: ["confirm", "plan", "accept-edits", "bypass"],
-};
 
 class TemplateError extends Error {
   constructor(code, message) { super(message); this.code = code; }
@@ -57,6 +54,12 @@ function save(templates) {
   fs.renameSync(temp, target);
 }
 
+/** Trimmed text, or null when missing or blank. */
+function optionalText(value, code, label) {
+  if (value != null && typeof value !== "string") throw new TemplateError(code, `${label} must be a string`);
+  return value?.trim() || null;
+}
+
 /** Checks a template from the browser and returns its stored fields. */
 function normalize(input) {
   if (!input || typeof input !== "object") throw new TemplateError("invalid_template", "Template must be an object");
@@ -66,12 +69,10 @@ function normalize(input) {
   if (!Object.hasOwn(PERMISSION_MODES, provider)) throw new TemplateError("invalid_provider", "Provider must be codex or claude");
   const permissionMode = input.permissionMode ?? "confirm";
   if (!PERMISSION_MODES[provider].includes(permissionMode)) throw new TemplateError("invalid_permission_mode", `${provider === "codex" ? "Codex" : "Claude"} permissions must be one of ${PERMISSION_MODES[provider].join(", ")}`);
-  const model = typeof input.model === "string" && input.model.trim() ? input.model.trim() : null;
-  if (input.model != null && typeof input.model !== "string") throw new TemplateError("invalid_model", "Model must be a string");
-  if (model && (model.length > 120 || !/^[A-Za-z0-9._:/-]+$/.test(model))) throw new TemplateError("invalid_model", "Model name contains unsupported characters");
-  if (input.initialPrompt != null && typeof input.initialPrompt !== "string") throw new TemplateError("invalid_prompt", "Initial prompt must be a string");
-  const initialPrompt = typeof input.initialPrompt === "string" && input.initialPrompt.trim() ? input.initialPrompt.trim() : null;
-  if (initialPrompt && initialPrompt.length > 8_000) throw new TemplateError("invalid_prompt", "Initial prompt must be at most 8000 characters");
+  const model = optionalText(input.model, "invalid_model", "Model");
+  if (model && !isValidModel(model)) throw new TemplateError("invalid_model", "Model name contains unsupported characters");
+  const initialPrompt = optionalText(input.initialPrompt, "invalid_prompt", "Initial prompt");
+  if (initialPrompt && initialPrompt.length > MAX_PROMPT_LENGTH) throw new TemplateError("invalid_prompt", `Initial prompt must be at most ${MAX_PROMPT_LENGTH} characters`);
   if (input.webSearch != null && typeof input.webSearch !== "boolean") throw new TemplateError("invalid_web_search", "webSearch must be a boolean");
   if (input.cwd != null && (typeof input.cwd !== "string" || !path.isAbsolute(input.cwd))) throw new TemplateError("invalid_cwd", "cwd must be an absolute path or null");
   return { name, provider, permissionMode, model, initialPrompt, webSearch: provider === "codex" && input.webSearch === true, cwd: input.cwd ? canonical(input.cwd) : null };
@@ -111,4 +112,4 @@ function remove(id) {
   save(next);
 }
 
-module.exports = { TemplateError, PERMISSION_MODES, MAX_TEMPLATES, normalize, list, create, update, remove };
+module.exports = { TemplateError, MAX_TEMPLATES, list, create, update, remove };

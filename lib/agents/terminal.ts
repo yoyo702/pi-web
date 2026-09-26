@@ -5,7 +5,9 @@ import { getAllowedFileRoots, isExistingFilePathAllowed } from "../file-access";
 /** Shared client contracts for optional external agent terminals. */
 export type TerminalProvider = "shell" | "codex" | "claude";
 /** Codex: confirm, on-request, never, bypass. Claude: confirm, plan, accept-edits, bypass. */
-export type TerminalPermissionMode = "confirm" | "on-request" | "never" | "bypass" | "plan" | "accept-edits";
+export type CodexPermissionMode = "confirm" | "on-request" | "never" | "bypass";
+export type ClaudePermissionMode = "confirm" | "plan" | "accept-edits" | "bypass";
+export type TerminalPermissionMode = CodexPermissionMode | ClaudePermissionMode;
 export type TerminalLaunchMode = "new" | "resume-last" | "resume" | "fork";
 export type TerminalState = "running" | "ended" | "stopped";
 /** What a running Claude or Codex terminal is doing; null for shells or when unknown. */
