@@ -7,6 +7,9 @@ import { useWorkspaceTerminals } from "@/hooks/useWorkspaceTerminals";
 import { useWorkspaceStatus } from "@/hooks/useWorkspaceStatus";
 import { useClaudeSessions, type ClaudeSession } from "@/hooks/useClaudeSessions";
 import { ProductStatusDot } from "@/components/ProductStatus";
+import { newNotifications } from "@/lib/activity-center";
+import { markNotificationsRead } from "@/lib/activity-notifications";
+import type { ActivityNotification } from "@/lib/workspace-status-store";
 import type { ClaudeChatTarget, ClaudeForkTarget, CodexChatTarget } from "@/components/workspace/WorkspaceActions";
 
 /** Structurally identical to `CodexChatTarget`; kept as a distinct export so AgentsPanel stays usable outside the workspace-actions context. */
@@ -25,7 +28,7 @@ interface CodexSession {
 }
 interface CatalogModel { id: string; label: string; description: string; isDefault: boolean; defaultReasoningEffort: string; reasoningEfforts: { id: string; description: string }[]; defaultServiceTier: string; serviceTiers: { id: string; name: string; description: string }[] }
 interface ProjectScript { name: string; command: string }
-interface TaskNotice { terminal: TerminalSession; title: string; summary: string }
+interface TaskNotice { terminal: TerminalSession; notificationId: string; title: string; summary: string }
 type PendingAction =
   | { kind: "session"; action: "rename" | "archive" | "unarchive" | "delete"; session: CodexSession }
   | { kind: "claude-session"; session: ClaudeSession }
@@ -93,8 +96,9 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [renameValue, setRenameValue] = useState("");
   const sessionRequestRef = useRef(0);
   const lastCatalogSignatureRef = useRef<{ terminals: string | null; codexRuntimes: string | null }>({ terminals: null, codexRuntimes: null });
-  const taskStatesRef = useRef(new Map<string, TerminalSession["state"]>());
-  const taskStatesReadyRef = useRef(false);
+  const seenNotificationsRef = useRef<Set<string> | null>(null);
+  const terminalsRef = useRef(terminals);
+  terminalsRef.current = terminals;
   const taskNoticeTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   useEffect(() => {
@@ -116,9 +120,9 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     try { window.localStorage.setItem(`pi-web:agent-trees:${encodeURIComponent(cwd)}`, JSON.stringify({ shell: shellOpen, codex: codexOpen, claude: claudeOpen })); } catch { /* storage may be disabled */ }
   }, [claudeOpen, codexOpen, cwd, shellOpen, treesHydratedCwd]);
 
-  const showTaskCompletion = useCallback(async (terminal: TerminalSession) => {
-    const taskName = terminal.title?.slice("Task: ".length) || "Project task";
-    let summary = terminal.exitCode === 0 ? "Completed successfully" : terminal.exitCode === null ? "Task ended" : `Failed with exit code ${terminal.exitCode}`;
+  const showTaskCompletion = useCallback(async (terminal: TerminalSession, notification: ActivityNotification) => {
+    const taskName = notification.title.slice("Task: ".length) || "Project task";
+    let summary = notification.event === "completed" ? "Completed successfully" : notification.detail || "Task failed";
     try {
       const response = await fetch(`/api/terminals/${encodeURIComponent(terminal.id)}/buffer`, { cache: "no-store" });
       if (response.ok) {
@@ -128,8 +132,8 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
         if (lines.length > 0) summary = lines.slice(-2).join(" · ").slice(0, 240);
       }
     } catch { /* Exit status remains useful if retained output is unavailable. */ }
-    const outcome = terminal.state === "stopped" ? "stopped" : terminal.exitCode === 0 ? "completed" : "failed";
-    setTaskNotices((current) => [...current.filter((notice) => notice.terminal.id !== terminal.id), { terminal, title: `${taskName} ${outcome}`, summary }]);
+    const outcome = notification.event === "completed" ? "completed" : "failed";
+    setTaskNotices((current) => [...current.filter((notice) => notice.terminal.id !== terminal.id), { terminal, notificationId: notification.id, title: `${taskName} ${outcome}`, summary }]);
     const existingTimer = taskNoticeTimersRef.current.get(terminal.id);
     if (existingTimer) clearTimeout(existingTimer);
     taskNoticeTimersRef.current.set(terminal.id, setTimeout(() => {
@@ -280,20 +284,19 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     return () => window.clearTimeout(timer);
   }, [terminalSignature, runtimeSignature]);
 
+  // A project task of this directory that just finished or failed (a new
+  // server notification, see server/notifications.cjs) gets a toast. Entries
+  // present when the panel mounted are old news.
   useEffect(() => {
-    if (taskStatesReadyRef.current) {
-      for (const terminal of terminals) {
-        if (terminal.title?.startsWith("Task: ") && taskStatesRef.current.get(terminal.id) === "running" && terminal.state !== "running") void showTaskCompletion(terminal);
-      }
+    if (!status.notifications) return;
+    const fresh = newNotifications(status.notifications, seenNotificationsRef.current);
+    seenNotificationsRef.current = new Set(status.notifications.map((notification) => notification.id));
+    for (const notification of fresh) {
+      if (notification.kind !== "terminal" || notification.read || !notification.title.startsWith("Task: ")) continue;
+      const terminal = terminalsRef.current.find((candidate) => candidate.id === notification.targetId);
+      if (terminal) void showTaskCompletion(terminal, notification);
     }
-    taskStatesRef.current = new Map(terminals.map((terminal) => [terminal.id, terminal.state]));
-    taskStatesReadyRef.current = true;
-  }, [showTaskCompletion, terminals]);
-
-  useEffect(() => {
-    taskStatesRef.current.clear();
-    taskStatesReadyRef.current = false;
-  }, [cwd, refreshKey]);
+  }, [showTaskCompletion, status.notifications]);
 
   useEffect(() => {
     let cancelled = false;
@@ -738,7 +741,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     />}
     {pendingAction && <AgentActionDialog action={pendingAction} renameValue={renameValue} busy={Boolean(busyId)} onRenameChange={setRenameValue} onCancel={() => setPendingAction(null)} onConfirm={confirmPendingAction} />}
     {taskNotices.length > 0 && createPortal(<div aria-live="polite" style={taskNoticesStackStyle}>{taskNotices.map((notice) => <div key={notice.terminal.id} role="status" style={taskNoticeStyle}>
-      <button type="button" onClick={() => { onOpenTerminal?.(notice.terminal, notice.terminal.title); setTaskNotices((current) => current.filter((item) => item.terminal.id !== notice.terminal.id)); }} style={taskNoticeMainStyle}><strong>{notice.title}</strong><span>{notice.summary}</span></button>
+      <button type="button" onClick={() => { void markNotificationsRead({ ids: [notice.notificationId] }); onOpenTerminal?.(notice.terminal, notice.terminal.title); setTaskNotices((current) => current.filter((item) => item.terminal.id !== notice.terminal.id)); }} style={taskNoticeMainStyle}><strong>{notice.title}</strong><span>{notice.summary}</span></button>
       <button type="button" aria-label="Dismiss task notification" onClick={() => setTaskNotices((current) => current.filter((item) => item.terminal.id !== notice.terminal.id))} style={taskNoticeCloseStyle}>×</button>
     </div>)}</div>, document.body)}
   </>;

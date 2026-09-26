@@ -159,7 +159,7 @@ function loadTerminalManagerWithFakePty(t) {
   return { manager, handlers };
 }
 
-test("terminal exits are recorded unless stopped or a clean shell exit", (t) => {
+test("terminal exits are recorded unless stopped or a clean shell exit; finished tasks are", (t) => {
   useLog(t);
   t.mock.method(workspaceStatus, "notify", () => {});
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-fake-codex-"));
@@ -179,11 +179,13 @@ test("terminal exits are recorded unless stopped or a clean shell exit", (t) => 
   handlers[2].exit({ exitCode: 0, signal: 15 });
   const codex = manager.createTerminal({ provider: "codex", cwd: "/tmp", title: "Codex" });
   handlers[3].exit({ exitCode: 0, signal: 0 });
+  const task = manager.createTerminal({ provider: "shell", cwd: "/tmp", title: "Task: build" });
+  handlers[4].exit({ exitCode: 0, signal: 0 });
 
   const recorded = notifications.list();
-  assert.deepEqual(recorded.map((item) => [item.targetId, item.event]), [[codex.id, "completed"], [failed.id, "failed"]]);
-  assert.equal(recorded[1].detail, "Exited with code 1");
-  assert.equal(recorded[1].title, "Build");
+  assert.deepEqual(recorded.map((item) => [item.targetId, item.event]), [[task.id, "completed"], [codex.id, "completed"], [failed.id, "failed"]]);
+  assert.equal(recorded[2].detail, "Exited with code 1");
+  assert.equal(recorded[2].title, "Build");
 });
 
 function protocolState() {

@@ -161,14 +161,32 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - 记录的事件：
   - Codex 聊天：一轮完成（Completed）、失败（Failed，带 `turn.error` 原因）、等待审批或提问（Needs your input）；这一轮中途运行时意外退出算失败（用户停止或服务端正常关闭时先停止运行时，不记录）。被中断（interrupted）的一轮不记录；pi-web 不支持而直接拒绝的请求不记录。标题为会话名，无名字时用第一条消息。
   - Pi 会话：等整次运行结束（`agent_settled`）后，按最后一次 `agent_end` 的最后一条助手消息判断：`stopReason: "error"` 记为失败（带错误信息），用户中止（aborted）不记录，其余记为完成。Pi 自动重试成功、或上下文溢出后压缩并继续成功的，只记一条完成。标题为会话名，否则第一条用户消息。worktree 里的会话同时记录项目根目录，用来找到对应项目。
-  - 终端：退出码非 0 或被信号结束记为失败（“Exited with code N” / “Killed by signal …”）；Codex/Claude 终端正常退出记为完成；普通 shell 正常退出、用户点 Stop 停止的终端不记录。
+  - 终端：退出码非 0 或被信号结束记为失败（“Exited with code N” / “Killed by signal …”）；Codex/Claude 终端和项目任务终端（“Task: <脚本>”）正常退出记为完成；普通 shell 正常退出、用户点 Stop 停止的终端不记录。
 - 已读：同一个聊天、会话或终端有新通知时，它之前未读的通知自动标为已读（只需关注最新状态；同一聊天连续两个审批时，只有后一个显示为未读，两个审批卡片仍都在聊天里）。点击通知标为已读，“Mark all read” 全部标为已读；已读状态保存在服务端，所有设备同步。接口 `POST /api/notifications/read`，请求体 `{"ids": [...]}`（最多 500 个）或 `{"all": true}`，返回 `{changed}`；格式错误 400，非 POST 405。
 - 推送：通知列表作为 `notifications` 快照（`{notifications, unread}`，新的在前）通过状态 SSE（`/api/agent/running/events`）推送，连接时先发一次完整快照。
-- 界面：
-  - 项目栏铃铛（“Workspace activity”）的角标为未读数；有等待审批的任务时角标为审批颜色，鼠标悬停显示未读数和等待数。
-  - 中间工具栏的 “Workspace activity” 按钮（手机上也有）显示未读数。
-  - 两处活动面板底部都有 “Recent” 列表：未读加粗，显示项目、类型、事件、时间，失败时附原因；点击后标为已读，并切换到所在项目打开对应的聊天、会话或终端（项目未打开时只标已读；终端记录只在内存中，服务端重启或 “Clear ended” 之后点击终端通知只切换到所在项目）。没有通知时显示 “No notifications in the last 7 days”。
-- 暂未实现：浏览器系统推送（Push API）；正在查看的标签不会自动标为已读。
+- 活动中心（`components/ActivityCenter.tsx`）：项目栏铃铛和中间工具栏的 “Workspace activity” 按钮（手机上也有）打开同一个面板（对话框 “Workspace activity”）。活动数据由 `hooks/useWorkspaceActivity.ts` 在 AppShell 里算一次，项目栏角标、弹出菜单和活动中心共用（规则见 `lib/rail-activity.ts`）。
+  - 顺序：当前项目在最前（标 “Current”，空闲时显示 “Nothing running”），然后 “Other workspaces”：其他有运行、等待、失败或刚完成条目的项目（按项目栏顺序，空闲的不列出），每个项目下列出条目；最后是 “Recent” 通知列表和 “Notify this device” 开关。
+  - 点击项目名切换到该项目，点击条目切换项目并打开对应的会话、终端或聊天；打开任何东西都会关闭面板。Esc、点击面板外或关闭按钮关闭。
+  - 手机上（宽度 ≤ 640px）是贴底的全宽面板（最高 82% 屏幕高度），电脑上是居中弹窗。
+  - 铃铛角标为未读数；有等待审批的任务时角标为审批颜色，鼠标悬停显示未读数和等待数。工具栏按钮显示所有项目中运行中（含等待）的条目数、审批圆点和未读数。
+  - “Recent” 列表：未读加粗，显示项目、类型、事件、时间，失败时附原因；点击后标为已读，并切换到所在项目打开对应的聊天、会话或终端（项目未打开时只标已读；终端记录只在内存中，服务端重启或 “Clear ended” 之后点击终端通知只切换到所在项目）。没有通知时显示 “No notifications in the last 7 days”。
+- Agents 面板的任务完成提示（右下角 toast，8 秒自动消失）由新到的通知触发：本项目的 “Task: <脚本>” 终端有新的未读通知（完成或失败）时显示，内容附终端最后几行输出；点击 toast 打开终端并把该通知标为已读。为此，项目任务终端（标题以 “Task: ” 开头，与 Agents 面板的任务分组规则相同）正常退出也记为完成（普通 shell 正常退出仍不记录）。用户点 Stop 停止的任务不记录，所以也不再提示。页面打开前已有的通知不提示。
+- 系统推送（Web Push，`server/web-push.cjs`）：每条新通知同时发到开启了 “Notify this device” 的设备，锁屏的手机也能收到。
+  - 服务端自己实现加密（RFC 8291 aes128gcm）和 VAPID 签名（RFC 8292），只用 `node:crypto` 和 `fetch`，不加依赖；请求走全局 fetch，遵循 `HTTP(S)_PROXY`。推送服务（Google、Apple、Mozilla）只转发密文。
+  - 存储：VAPID 密钥和设备订阅在 `~/.pi-web/push.json`（权限 0600，`PI_WEB_PUSH_FILE` 改路径；测试和 e2e 用临时文件）。第一次有设备查询或订阅时才生成密钥；没有这个文件时不发送。最多 20 台设备，超出时丢弃最早的。只接受浏览器推送服务的 https 地址（FCM `fcm.googleapis.com`、Apple `*.push.apple.com`、Mozilla `*.push.services.mozilla.com`、Windows `*.notify.windows.com`，不带端口），公钥须是 P-256 曲线上的点；发送时不跟随重定向。服务端每条通知都会请求这些地址，这样客户端无法让服务端去请求内网或其他地址。推送服务返回 404/410（设备已失效）时删除该设备；其他失败只记日志。VAPID 的 `sub` 默认是项目地址，可用 `PI_WEB_PUSH_SUBJECT` 改（如 `mailto:you@example.com`）。
+  - 消息：标题如 “Terminal failed”、“Codex needs your input”，正文为条目名 · 项目（失败时附原因）；`tag` 和 `Topic` 按聊天、会话或终端区分，同一目标的新消息替换旧消息。TTL 24 小时；完成为普通优先级，失败和等待审批为高优先级。
+  - 接口（都是 POST，请求体须为 `application/json`，否则 415）：`/api/push` `{endpoint?}` → `{publicKey, subscribed}`（查询用 POST，订阅地址不进日志）；`/api/push/subscribe` `{subscription}`（`PushSubscription.toJSON()`）→ 204；`/api/push/unsubscribe` `{endpoint}` → 204。格式错误 400，其他方法 405。设置了密码时需登录；不论是否设置密码，跨站请求都返回 403（否则没有密码时，任何网站都能替用户订阅一个自己的设备，收到所有通知）。
+  - 点击系统通知（`public/sw.js`）：
+    - 有已打开的 TianForge 窗口时，优先选当前聚焦的、其次可见的窗口，聚焦它并发消息给页面；该窗口停在其他页面（如登录页）时改为在其中加载 `/?notification=<id>`（不能加载时新开窗口）。没有窗口时新开 `/?notification=<id>`。
+    - 窗口还在加载、没收到消息时：Service Worker 记住这条（30 秒内），页面加载完成后发 `pi-web:ready`，再发一次；页面收到后回 `pi-web:notification-received`。
+    - 需要登录时，登录页保留 `notification` 参数，登录后打开它。
+    - 页面等项目恢复完成后关闭活动中心、把该通知标为已读，并像点击 “Recent” 条目一样打开目标；找不到通知或项目未打开时打开活动中心。
+  - 开关（活动中心底部 “Notify this device”，`components/PushNotificationsToggle.tsx`）：打开时请求通知权限、等 Service Worker 激活（`navigator.serviceWorker.ready`）后用服务端公钥订阅并上报；关闭只取消本设备。订阅所用的公钥与服务端不同（`push.json` 被重置过）时先取消旧订阅再重新订阅。不能开启时显示原因（`lib/push-support.ts`）：
+    - 非安全来源（HTTP 局域网地址）：浏览器只允许在可信 HTTPS 下推送，需通过 `*.ts.net` 地址（Tailscale Serve，见 README）或 localhost 打开。
+    - iPhone / iPad：需 iOS 16.4 以上，并把 TianForge 添加到主屏幕、从主屏幕打开。
+    - 浏览器已拒绝通知权限：提示到站点设置里允许。
+  - 退出登录不会取消订阅（目前没有退出登录的界面）；推送内容只含标题、项目名和失败原因。
+- 暂未实现：按设备选择推送哪些事件；正在查看的标签不会自动标为已读。
 
 ## 状态模型
 
@@ -210,7 +228,7 @@ Codex Chat 的审批来自 app-server 协议，Claude Chat 的审批来自 strea
 
 ## 后续计划
 
-- 合并三处活动显示（项目栏铃铛、中间工具栏活动面板、Agents 面板）为一个活动中心；浏览器系统推送（Push API）。
+- 系统推送按设备选择事件类型（如只推送等待审批和失败）。
 - 为 Terminal CLI 增加结构化“等待输入”状态。
 - 任务模板、批量启动和跨项目任务队列。
 - 更细粒度的资源使用和运行时间统计。

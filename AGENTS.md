@@ -72,6 +72,9 @@ app/api/
 
 server/
   workspace-status.cjs process-wide bus for terminal/Codex run status; coalesces notify() calls and forwards snapshots to the running-status SSE
+  notifications.cjs    activity notification log (~/.pi-web/notifications.json, PI_WEB_NOTIFICATIONS_FILE); each new entry is also sent by web-push.cjs
+  web-push.cjs         Web Push to subscribed devices: VAPID key + subscriptions in ~/.pi-web/push.json (0600, PI_WEB_PUSH_FILE; VAPID sub PI_WEB_PUSH_SUBJECT), RFC 8291/8292 with node:crypto + global fetch (no redirects); endpoints limited to the browser push services (no SSRF), drops devices on 404/410
+  web-push-api.cjs     POST /api/push {endpoint?} → {publicKey, subscribed}; /api/push/subscribe {subscription}; /api/push/unsubscribe {endpoint}; JSON only, cross-origin rejected even without a password
 
 lib/
   access-links.ts      classifies and formats LAN/Tailscale addresses
@@ -94,6 +97,8 @@ lib/
   normalize.ts        normalizeToolCalls() — field name mismatch between file format and our types
   workspace-status-store.ts client store applying pushed terminals/codex_runtimes/claude_runtimes/running snapshots
   rail-activity.ts    project rail activity items (running / ended / recently completed) grouped per workspace
+  activity-center.ts  activity center sections (current workspace first), summaries, totals, new-notification diffing
+  push-support.ts     whether this browser can use Web Push and why not (insecure origin, iOS Home Screen); VAPID key helpers
   worktree.ts         project/worktree resolution and git worktree operations
   workspace/
     tabs.ts           type definitions for tab kinds
@@ -103,6 +108,8 @@ lib/
 
 components/
   AppShell.tsx        layout + URL state + tab management
+  ActivityCenter.tsx  "Workspace activity" panel opened by the rail bell and toolbar button (bottom sheet on phones)
+  PushNotificationsToggle.tsx "Notify this device" switch: permission, pushManager.subscribe, /api/push*
   MobileAccessDialog.tsx Settings-embedded LAN/Tailscale URL picker, copy action, and QR code
   SessionSidebar.tsx  session tree + FileExplorer
   ChatWindow.tsx      chat composition + completion sound wrapper
@@ -131,6 +138,7 @@ components/
 hooks/
   useAgentSession.ts  messages + streaming + SSE + fork/navigate/reconciliation logic
   useWorkspaceStatus.ts shared EventSource for /api/agent/running/events; feeds workspace-status-store
+  useWorkspaceActivity.ts per-workspace activity computed once in AppShell, shared by the rail and the activity center
   useAudio.ts         completion sound + browser AudioContext unlock
   useDragDrop.ts      shared drag/drop state
   useIsMobile.ts      responsive breakpoint hook

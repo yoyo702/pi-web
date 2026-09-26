@@ -260,7 +260,9 @@ function handleRequest(req, res) {
       res.end(JSON.stringify({ error: "authentication required" }));
       return;
     }
-    res.writeHead(302, { Location: "/login", "Cache-Control": "no-store" });
+    // A clicked system notification (`/?notification=<id>`) opens after login.
+    const notification = url.pathname === "/" ? url.searchParams.get("notification") : null;
+    res.writeHead(302, { Location: notification ? `/login?notification=${encodeURIComponent(notification)}` : "/login", "Cache-Control": "no-store" });
     res.end();
     return;
   }
@@ -285,6 +287,12 @@ function handleRequest(req, res) {
   const notificationsApi = require("./notifications-api.cjs");
   if (notificationsApi.isPath(url.pathname)) {
     return notificationsApi.handle(req, res);
+  }
+  const webPushApi = require("./web-push-api.cjs");
+  if (webPushApi.isPath(url.pathname)) {
+    // Also without a password: a subscription receives every notification.
+    if (!auth.isSameOrigin(req)) return writeJson(res, 403, { error: "cross-origin request rejected" });
+    return webPushApi.handle(req, res, url);
   }
   const codexAppApi = require("./agents/codex-app-api.cjs");
   if (codexAppApi.isPath(url.pathname)) {
