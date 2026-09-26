@@ -110,7 +110,9 @@ test("Claude terminals get hooks that report their turns, and approvals and fini
   assert.equal(manager.getTerminal(terminal.id).activity, "waiting");
   assert.deepEqual(entries().map((entry) => entry.event), ["approval", "completed", "approval"]);
 
+  // Quitting from the prompt adds no exit notice.
   pty.exit({ exitCode: 0, signal: 0 });
+  assert.equal(entries().length, 3);
   assert.equal(manager.getTerminal(terminal.id).activity, null);
   assert.equal(manager.reportHookActivity({ token, activity: "working" }), false);
 });
@@ -171,6 +173,15 @@ test("Codex terminals follow the terminal title, even when a title is split acro
   pty.emit("\x1b]0;Next | work\x07");
   assert.equal(manager.getTerminal(terminal.id).activity, "waiting");
   assert.equal(entries().length, 2);
+
+  // Quitting from the prompt adds no second "finished" notice.
+  pty.exit({ exitCode: 0, signal: 0 });
+  assert.equal(entries().length, 2);
+  // Exiting mid-turn still does.
+  const busy = manager.createTerminal({ provider: "codex", cwd: "/tmp", permissionMode: "on-request", launchMode: "new" });
+  spawned[1].emit("\x1b]0;⠇ Next | work\x07");
+  spawned[1].exit({ exitCode: 0, signal: 0 });
+  assert.deepEqual(entries().at(-1), { event: "completed", detail: undefined, targetId: busy.id });
 });
 
 function runHook(activity, env, input) {

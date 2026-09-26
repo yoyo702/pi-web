@@ -354,23 +354,27 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
     session.signal = signal;
     session.endedAt = new Date().toISOString();
     session.terminal = null;
+    const lastActivity = session.activity;
     session.activity = null;
     session.hookToken = null;
     for (const subscriber of session.subscribers) {
       try { subscriber(null); } catch { /* ignore */ }
     }
     workspaceStatus.notify("terminals");
-    recordExit(session);
+    recordExit(session, lastActivity);
   });
   return publicSession(session);
 }
 
 // A terminal the user stopped, or a shell they exited normally, needs no
-// notice; a project task ("Task: <script>") that finished does.
-function recordExit(session) {
+// notice; a project task ("Task: <script>") that finished does. A Claude or
+// Codex CLI quit from its prompt has either reported its last turn already or
+// never ran one.
+function recordExit(session, lastActivity) {
   if (session.state === "stopped") return;
   const failed = (session.exitCode ?? 0) !== 0 || Boolean(session.signal);
   if (!failed && session.provider === "shell" && !session.title?.startsWith("Task: ")) return;
+  if (!failed && lastActivity === "waiting") return;
   notifications.add({
     kind: "terminal",
     event: failed ? "failed" : "completed",
