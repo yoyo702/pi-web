@@ -11,7 +11,7 @@ export interface ChatQueue {
   failed: boolean;
 }
 
-export const EMPTY_CHAT_QUEUE: ChatQueue = Object.freeze({ items: [], failed: false }) as ChatQueue;
+export const EMPTY_CHAT_QUEUE: Readonly<ChatQueue> = Object.freeze({ items: [], failed: false });
 
 // Module memory like the draft store: queued messages outlive the chat
 // component (tab and project switches) but not a page reload.
@@ -32,4 +32,22 @@ export function updateChatQueue(key: string, update: (queue: ChatQueue) => ChatQ
 export function subscribeChatQueues(listener: () => void): () => void {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
+}
+
+// The in-flight lock lives here, not on the ChatQueue snapshot: workspace tabs
+// can stay mounted while hidden, so more than one CodexAssistantThread instance
+// can share a draftKey. Keying the lock by queue key (instead of a per-component
+// ref) stops both instances from sending the same head item at once. It's kept
+// out of the snapshot so claiming/releasing it doesn't trigger a re-render.
+const sendingKeys = new Set<string>();
+
+/** Claims the send lock for `key`; returns false if another sender already holds it. */
+export function claimChatQueueSend(key: string): boolean {
+  if (sendingKeys.has(key)) return false;
+  sendingKeys.add(key);
+  return true;
+}
+
+export function releaseChatQueueSend(key: string): void {
+  sendingKeys.delete(key);
 }

@@ -4,7 +4,7 @@
 import { AssistantRuntimeProvider, MessagePrimitive, ThreadPrimitive, useAuiState, useExternalStoreRuntime, useMessagePartText, type AppendMessage, type ThreadMessage } from "@assistant-ui/react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { CodexConversationItem } from "@/lib/agents/codex-conversation";
-import { EMPTY_CHAT_QUEUE, getChatQueue, subscribeChatQueues, updateChatQueue } from "@/lib/chat-queue-store";
+import { claimChatQueueSend, EMPTY_CHAT_QUEUE, getChatQueue, releaseChatQueueSend, subscribeChatQueues, updateChatQueue } from "@/lib/chat-queue-store";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
 import type { AgentMessage, AssistantMessage, BashExecutionMessage, ToolResultMessage, UserMessage } from "@/lib/types";
 import { MarkdownBody } from "../../MarkdownBody";
@@ -224,7 +224,6 @@ export function CodexAssistantThread({ items, maxImageBytes = 5 * 1024 * 1024, r
   const sourceMessages = useMemo(() => messagesFrom(visibleItems), [visibleItems]);
   const [messages, setMessages] = useState<readonly ThreadMessage[]>(sourceMessages);
   const queue = useSyncExternalStore(subscribeChatQueues, () => getChatQueue(draftKey), () => EMPTY_CHAT_QUEUE);
-  const queueSendingRef = useRef(false);
   useEffect(() => setMessages(sourceMessages), [sourceMessages]);
   useEffect(() => { setExpandDetails(localStorage.getItem("pi-codex-expand-details") === "1"); }, []);
   const onNew = useCallback(async (message: AppendMessage) => { const text = message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim(); if (text) await onSend(text); }, [onSend]);
@@ -235,15 +234,14 @@ export function CodexAssistantThread({ items, maxImageBytes = 5 * 1024 * 1024, r
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "smooth") => { const viewport = viewportRef.current; if (!viewport) return; viewport.scrollTo({ top: viewport.scrollHeight, behavior }); followRef.current = true; setShowJump(false); }, []);
   useEffect(() => { if (!followRef.current) { setShowJump(true); return; } const frame = requestAnimationFrame(() => scrollToBottom(items.length ? "smooth" : "auto")); return () => cancelAnimationFrame(frame); }, [approvals, items, requestCards, running, scrollToBottom]);
   useEffect(() => {
-    if (running || !queue.items.length || queue.failed || queueSendingRef.current) return;
-    queueSendingRef.current = true;
+    if (running || !queue.items.length || queue.failed || !claimChatQueueSend(draftKey)) return;
     const next = queue.items[0];
     void onSend(next.text, next.images).then((sent) => {
       updateChatQueue(draftKey, (current) => {
         if (current.items[0] !== next) return current; // Cleared or changed meanwhile.
         return sent ? { items: current.items.slice(1), failed: false } : { ...current, failed: true };
       });
-    }).finally(() => { queueSendingRef.current = false; });
+    }).finally(() => releaseChatQueueSend(draftKey));
   }, [draftKey, onSend, queue, running]);
   // The first user message of each turn after the first maps to the turn before it.
   const forkTargets = useMemo(() => {
