@@ -104,3 +104,39 @@ export interface GitBranchesResponse {
   local: GitBranch[];
   remotes: GitBranch[];
 }
+
+export type GitPrecheckKind = "conflict-marker" | "debug" | "todo" | "secret" | "large-file";
+
+/** A hint about the staged changes; never blocks a commit. */
+export interface GitPrecheckFinding {
+  kind: GitPrecheckKind;
+  /** Repository-relative path with `/` separators. */
+  path: string;
+  /** New-side line number, for line findings. */
+  line?: number;
+  /** The added line, trimmed and shortened; never set for secrets. */
+  text?: string;
+  message: string;
+}
+
+export interface GitPrecheckResponse {
+  /** Changes whenever the staged changes do. */
+  stagedFingerprint: string;
+  findings: GitPrecheckFinding[];
+  /** Some findings or some of the diff were left out. */
+  truncated: boolean;
+}
+
+export interface GitAiReviewIssue {
+  path: string | null;
+  note: string;
+}
+
+export interface GitAiReviewResponse {
+  summary: string;
+  issues: GitAiReviewIssue[];
+  stagedFingerprint: string;
+  provider: string;
+  modelId: string;
+  truncated: boolean;
+}

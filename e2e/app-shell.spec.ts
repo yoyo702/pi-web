@@ -2269,3 +2269,66 @@ test("stages and discards selected lines in Git Review", async ({ page }, testIn
   await page.getByRole("button", { name: "Stage hunk" }).click();
   await expect.poll(() => lineRequests.at(-1)).toMatchObject({ fingerprint: "fp-2", lineIds: [0, 1, 2] });
 });
+
+test("shows optional pre-commit checks in Git Review", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop Git Review test");
+  const repo = "/tmp/pi-web-e2e/service-a";
+  const file = { filePath: `${repo}/src/a.js`, status: "modified", code: "M", indexStatus: "M", worktreeStatus: " " };
+  let stagedFingerprint = "staged-1";
+  const reviewRequests: Array<Record<string, unknown>> = [];
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
+    id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: "/tmp/pi-web-e2e", projectRoot: "/tmp/pi-web-e2e",
+    created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
+  }], runningSessionIds: [] } }));
+  await page.route("**/api/files/**", async (route) => route.fulfill({ json: { entries: [] } }));
+  await page.route("**/api/cwd/validate", async (route) => route.fulfill({ json: { success: true, cwd: "/tmp/pi-web-e2e" } }));
+  await page.route("**/api/git/repositories?*", async (route) => route.fulfill({ json: { repositories: [
+    { path: repo, repositoryRoot: repo, label: "service-a", relativePath: "service-a" },
+  ] } }));
+  await page.route("**/api/git/status?*", async (route) => route.fulfill({ json: { isGitRepository: true, repositoryRoot: repo, branch: "main", remotes: [], files: [file] } }));
+  await page.route("**/api/git/diff?*", async (route) => route.fulfill({ json: { supported: true, status: "modified", scope: "staged", patch: "diff --git a/src/a.js b/src/a.js\n--- a/src/a.js\n+++ b/src/a.js\n@@ -1 +1,2 @@\n let a = 1;\n+console.log(a);\n" } }));
+  await page.route("**/api/git/precheck?*", async (route) => route.fulfill({ json: { stagedFingerprint, truncated: false, findings: [
+    { kind: "debug", path: "src/a.js", line: 2, text: "console.log(a);", message: "Debug statement" },
+    { kind: "secret", path: "src/a.js", line: 3, message: "Possible API key" },
+  ] } }));
+  await page.route("**/api/git/review", async (route) => {
+    reviewRequests.push(route.request().postDataJSON());
+    return route.fulfill({ json: { summary: "Logs a.", issues: [{ path: "src/a.js", note: "Remove the log before shipping" }], stagedFingerprint: "staged-1", provider: "test", modelId: "model", truncated: false } });
+  });
+
+  await page.goto("/");
+  await page.evaluate(() => localStorage.removeItem("pi-web:precommit-checks-open"));
+  await page.getByRole("button", { name: "Show file panel" }).click();
+  await page.getByRole("button", { name: "Open Git Review" }).click();
+
+  const checks = page.getByRole("region", { name: "Pre-commit checks" });
+  const toggle = checks.getByRole("button", { name: /Pre-commit checks/ });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(toggle).toContainText("2 notes");
+  // The checks never block committing.
+  await page.getByPlaceholder("Commit message (⌘/Ctrl+Enter)").fill("feat: a");
+  await expect(page.getByRole("button", { name: "Commit", exact: true })).toBeEnabled();
+
+  await toggle.click();
+  await expect(checks.getByRole("group", { name: "Open work" })).toContainText("No running agents or failed tasks.");
+  await checks.getByRole("button", { name: /Debug statement/ }).click();
+  await expect(page.getByText("Select a changed file")).toBeHidden();
+  await expect(page.locator(".file-diff-view")).toBeVisible();
+
+  // Possible secrets need a confirmation before the diff goes to the model.
+  page.once("dialog", (dialog) => void dialog.dismiss());
+  await checks.getByRole("button", { name: "Review with AI" }).click();
+  await expect(checks.getByText("Not reviewed yet.")).toBeVisible();
+  expect(reviewRequests).toEqual([]);
+  page.once("dialog", (dialog) => void dialog.accept());
+  await checks.getByRole("button", { name: "Review with AI" }).click();
+  await expect(checks.getByText("Logs a.")).toBeVisible();
+  await expect(checks.getByText("Remove the log before shipping")).toBeVisible();
+  await expect(toggle).toContainText("3 notes");
+  expect(reviewRequests).toEqual([{ cwd: repo }]);
+
+  stagedFingerprint = "staged-2";
+  await page.getByTitle("Refresh local Git status").click();
+  await expect(checks.getByText("Staged changes changed since this review.")).toBeVisible();
+  await expect(toggle).toContainText("2 notes");
+});

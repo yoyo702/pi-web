@@ -19,6 +19,7 @@ import type {
 import { getFileName, getRelativeFilePath } from "@/lib/file-paths";
 import { DiffView } from "./FileViewer";
 import { GitLineDiffView } from "./GitLineDiffView";
+import { PrecommitChecks } from "./PrecommitChecks";
 
 type PanelTab = "changes" | "branch" | "history";
 
@@ -537,6 +538,16 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
             </main>
           </div>
           <div style={{ flexShrink: 0, borderTop: "1px solid var(--border)", padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+            <PrecommitChecks
+              cwd={repositoryCwd!}
+              repoRoot={repoRoot}
+              stagedCount={grouped.get("staged")?.length ?? 0}
+              statusVersion={status}
+              onOpenFile={(relativePath) => {
+                const file = grouped.get("staged")?.find((candidate) => getRelativeFilePath(candidate.filePath, repoRoot) === relativePath);
+                if (file) setSelected({ file, scope: "staged" });
+              }}
+            />
             <textarea
               value={commitMessage}
               onChange={(event) => setCommitMessage(event.target.value)}
