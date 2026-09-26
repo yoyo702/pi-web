@@ -40,8 +40,9 @@ interface UseGlobalKeyboardShortcutsOptions {
  * ChatInput manages its own Esc logic (closing slash / @ file menus, stopping
  * the agent when no menu is open) because it needs intimate knowledge of menu
  * state that is local to that component. Esc is also skipped while a modal
- * (Settings or any other dialog) is open, so closing it doesn't also abort
- * the agent.
+ * (Settings or any other `[aria-modal="true"]` dialog, or a native
+ * `<dialog>` opened with showModal() such as the Mermaid zoom viewer) is
+ * open, so closing it doesn't also abort the agent.
  */
 export function useGlobalKeyboardShortcuts(
   options: UseGlobalKeyboardShortcutsOptions,
@@ -54,11 +55,18 @@ export function useGlobalKeyboardShortcuts(
       if (e.key === "Escape") {
         if (!globalAbortHandler) return;
         // Text fields handle Esc themselves (ChatInput menus / stop); an open
-        // modal (every dialog sets aria-modal) owns Esc to close itself.
+        // modal owns Esc to close itself — either an `aria-modal` dialog
+        // (Settings, etc.) or a native `<dialog>` opened via showModal()
+        // (e.g. the Mermaid zoom viewer, which has no aria-modal attribute).
+        // defaultPrevented is checked too, but is only a defensive fallback:
+        // this listener runs in the capture phase (see addEventListener
+        // below), so it fires before any bubble-phase handler elsewhere in
+        // the app (e.g. a dialog's own Esc handler) has a chance to call
+        // preventDefault().
         if (!shouldAbortOnEscape({
           targetTag: (e.target as HTMLElement | null)?.tagName,
           defaultPrevented: e.defaultPrevented,
-          modalOpen: document.querySelector('[aria-modal="true"]') !== null,
+          modalOpen: document.querySelector('[aria-modal="true"], dialog[open]') !== null,
         })) return;
 
         e.preventDefault();
