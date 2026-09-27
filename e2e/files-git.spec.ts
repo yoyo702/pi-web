@@ -296,7 +296,7 @@ test("selecting a different project's session via Quick Switcher prompts to disc
   await expect(textarea).toHaveValue("edited in project a\n");
 });
 
-test("Amend recommits with a new message and no staged changes required", async ({ page }, testInfo) => {
+for (const pushed of [false, true]) test(`Amend recommits with a new message and no staged changes required${pushed ? " (warns when HEAD is already pushed)" : ""}`, async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.startsWith("mobile"), "desktop Git Review test");
   const repo = "/tmp/pi-web-e2e/service-a";
   const commitRequests: Array<Record<string, unknown>> = [];
@@ -312,7 +312,7 @@ test("Amend recommits with a new message and no staged changes required", async 
   await page.route("**/api/git/status?*", async (route) => route.fulfill({ json: { isGitRepository: true, repositoryRoot: repo, branch: "main", remotes: [], files: [] } }));
   await page.route("**/api/git/log?*", async (route) => route.fulfill({ json: { isGitRepository: true, hasMore: false, commits: [
     { hash: "abc1234def", shortHash: "abc1234", author: "Test", date: "2026-08-03T00:00:00.000Z", parents: [], refs: [], subject: "feat: the previous commit" },
-  ] } }));
+  ], ...(new URL(route.request().url()).searchParams.get("headPushed") === "1" ? { headPushed: pushed } : {}) } }));
   await page.route("**/api/git/commit", async (route) => {
     commitRequests.push(route.request().postDataJSON());
     return route.fulfill({ json: { isGitRepository: true, repositoryRoot: repo, branch: "main", remotes: [], files: [] } });
@@ -324,6 +324,9 @@ test("Amend recommits with a new message and no staged changes required", async 
   await page.getByRole("button", { name: "Open Git Review" }).click();
   await page.getByRole("checkbox", { name: "Amend previous commit" }).check();
   await expect(page.getByTestId("amend-target")).toHaveText(/abc1234.*feat: the previous commit/);
+  const warning = page.getByTestId("amend-pushed-warning");
+  if (pushed) await expect(warning).toHaveText("This commit is already pushed. Amending rewrites history and will need a force push.");
+  else await expect(warning).toHaveCount(0);
   await page.getByPlaceholder("Commit message (⌘/Ctrl+Enter)").fill("fix: correct typo from the previous commit");
   await expect(page.getByRole("button", { name: "Amend" })).toBeEnabled();
   await page.getByRole("button", { name: "Amend" }).click();

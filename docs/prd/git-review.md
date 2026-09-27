@@ -11,7 +11,7 @@
 - 暂存、取消暂存。丢弃（单文件或整组，包括未跟踪文件）会把改动保存为一条名为 "TianForge: discarded changes" 的 stash，可在 stash 列表中恢复；冲突文件无法 stash，仍重置到 HEAD，确认框会单独说明。仓库还没有任何提交时拒绝丢弃；其他文件还有未解决的冲突时也拒绝（两者都返回 409，而不是 500）。
 - 行级和 hunk 级操作：Changes 组可暂存或丢弃选中的行，Staged 组可取消暂存选中的行，Untracked 文件可只暂存部分行。点击行号左侧的选择框选中一行，Shift+点击或拖动选中一段；每个 hunk 标题上有整段操作按钮。重命名文件只支持整文件操作。
 - 提交和基础远端同步操作。
-- 提交支持 Amend（勾选 "Amend previous commit"），用新的提交信息覆盖上一次提交；不预填历史提交信息，也不要求有暂存的改动。勾选后在复选框旁显示将被修改的 HEAD 提交（短 hash 和标题）；切换仓库时 Amend 勾选会被重置。
+- 提交支持 Amend（勾选 "Amend previous commit"），用新的提交信息覆盖上一次提交；不预填历史提交信息，也不要求有暂存的改动。勾选后在复选框旁显示将被修改的 HEAD 提交（短 hash 和标题）；如果该提交已经推送（当前分支有上游且 HEAD 可从上游到达，即 `git merge-base --is-ancestor HEAD @{upstream}` 成立；没有上游视为未推送），在下方显示提示 "This commit is already pushed. Amending rewrites history and will need a force push."，只提示不阻止提交。该状态由 `/api/git/log?headPushed=1` 随 HEAD 提交一起返回（`headPushed` 字段）。切换仓库时 Amend 勾选会被重置。
 - History 中的提交详情可执行 "Revert commit"（`git revert --no-edit`），会创建一条新的反向提交；如果无法自动反转（存在冲突）会中止本次发起的 revert 并返回明确错误，不留下未完成的 revert 状态。仓库中已有进行中的 revert、cherry-pick、merge 或 rebase 时直接拒绝（"Another git operation is in progress"），绝不中止用户自己的操作。合并提交不支持 Revert（"Reverting merge commits is not supported"）。Revert 超时时不会执行 abort（反向提交可能已经创建），会提示用户先用 git 检查仓库状态。暂不提供分支级 reset 操作。
 - 提交信息草稿按 Git 仓库保存在浏览器 localStorage 中，切换标签、切换仓库或刷新页面后仍保留；成功提交或 Amend 后自动清空。没有选中仓库时不读写草稿，切换仓库时不会把上一个仓库的草稿写入新仓库。
 - Pull 只在 Git 判断本地改动会被覆盖时才会阻止（例如未跟踪文件会被合并覆盖），并展示 Git 自身给出的错误信息；无关的未提交改动不会再阻止 Pull。只有本地历史已分叉（无法快进）或本地文件会被覆盖时才作为冲突（409）返回；网络、认证等远端失败按远端错误（502）返回并展示 Git 的错误信息。

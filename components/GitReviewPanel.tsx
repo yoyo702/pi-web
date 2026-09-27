@@ -185,7 +185,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
   const [generationNotice, setGenerationNotice] = useState<string | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
   const [amend, setAmend] = useState(false);
-  const [amendTarget, setAmendTarget] = useState<{ shortHash: string; subject: string } | null>(null);
+  const [amendTarget, setAmendTarget] = useState<{ shortHash: string; subject: string; pushed: boolean } | null>(null);
   const [draftRepository, setDraftRepository] = useState<string | null>(null);
   const [repositories, setRepositories] = useState<GitRepositoryEntry[]>([]);
   const [selectedRepositoryPath, setSelectedRepositoryPath] = useState<string | null>(null);
@@ -252,12 +252,12 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
     setAmendTarget(null);
     if (!amend || !repositoryCwd) return;
     const controller = new AbortController();
-    void fetch(`/api/git/log?${new URLSearchParams({ cwd: repositoryCwd, limit: "1" })}`, { signal: controller.signal })
+    void fetch(`/api/git/log?${new URLSearchParams({ cwd: repositoryCwd, limit: "1", headPushed: "1" })}`, { signal: controller.signal })
       .then(async (response) => {
         const data = await response.json() as GitLogResponse & { error?: string };
         if (!response.ok) return;
         const head = data.commits?.[0];
-        if (head) setAmendTarget({ shortHash: head.shortHash, subject: head.subject });
+        if (head) setAmendTarget({ shortHash: head.shortHash, subject: head.subject, pushed: data.headPushed === true });
       })
       .catch(() => { /* the label simply stays without the commit summary */ });
     return () => controller.abort();
@@ -639,6 +639,11 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
                 </span>
               )}
             </label>
+            {amend && amendTarget?.pushed && (
+              <div data-testid="amend-pushed-warning" role="status" style={{ color: "var(--status-approval)", fontSize: 11 }}>
+                This commit is already pushed. Amending rewrites history and will need a force push.
+              </div>
+            )}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{grouped.get("staged")?.length ?? 0} staged</span>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>

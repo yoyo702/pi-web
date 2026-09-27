@@ -34,6 +34,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(await getGitLog(cwd, {
       limit: Number.isFinite(limit) ? limit : undefined,
       skip: Number.isFinite(skip) ? skip : undefined,
+      includeHeadPushed: request.nextUrl.searchParams.get("headPushed") === "1",
     }));
   } catch (error) {
     return errorResponse(error);

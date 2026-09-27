@@ -45,6 +45,8 @@ export interface GitLogResponse {
   isGitRepository: boolean;
   commits: GitCommitSummary[];
   hasMore: boolean;
+  /** Only present when requested: HEAD is reachable from its upstream. */
+  headPushed?: boolean;
 }
 
 export interface GitCommitFile {

@@ -430,23 +430,40 @@ function parseRefs(decoration: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * Whether HEAD is already on its upstream (reachable from `@{upstream}`), i.e.
+ * amending it would rewrite published history. No upstream, no commits or any
+ * git failure counts as not pushed.
+ */
+export async function isHeadPushed(cwd: string): Promise<boolean> {
+  try {
+    await git(cwd, ["merge-base", "--is-ancestor", "HEAD", "@{upstream}"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function getGitLog(
   cwd: string,
-  options: { limit?: number; skip?: number } = {},
+  options: { limit?: number; skip?: number; includeHeadPushed?: boolean } = {},
 ): Promise<GitLogResponse> {
   const repositoryRoot = await findRepositoryRoot(cwd);
   if (!repositoryRoot) return { isGitRepository: false, commits: [], hasMore: false };
 
   const limit = Math.min(Math.max(options.limit ?? 60, 1), 500);
   const skip = Math.max(options.skip ?? 0, 0);
-  const output = await git(repositoryRoot, [
-    "log",
-    "-z",
-    "--topo-order",
-    `--max-count=${limit + 1}`,
-    `--skip=${skip}`,
-    `--pretty=format:${LOG_FORMAT}`,
-  ], GIT_LOG_MAX_BUFFER);
+  const [output, headPushed] = await Promise.all([
+    git(repositoryRoot, [
+      "log",
+      "-z",
+      "--topo-order",
+      `--max-count=${limit + 1}`,
+      `--skip=${skip}`,
+      `--pretty=format:${LOG_FORMAT}`,
+    ], GIT_LOG_MAX_BUFFER),
+    options.includeHeadPushed ? isHeadPushed(repositoryRoot) : undefined,
+  ]);
 
   const records = output.split("\0").filter((record) => record.length > 0);
   const commits: GitLogResponse["commits"] = records.slice(0, limit).map((record) => {
@@ -461,7 +478,12 @@ export async function getGitLog(
       subject: subject ?? "",
     };
   });
-  return { isGitRepository: true, commits, hasMore: records.length > limit };
+  return {
+    isGitRepository: true,
+    commits,
+    hasMore: records.length > limit,
+    ...(headPushed === undefined ? {} : { headPushed }),
+  };
 }
 
 const STATUS_LETTER_TO_KIND: Record<string, GitFileStatusKind> = {
