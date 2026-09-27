@@ -108,15 +108,37 @@ test("a stopped chat resumes the session; another model or permission mode resta
   t.after(off);
   await chat.send(state, { text: "one" });
   await waitFor(() => events.some((event) => event.type === "result"));
-  await chat.send(state, { text: "two", model: "haiku", permissionMode: "plan" });
+  await chat.send(state, { text: "two", model: "claude-haiku-4-5-20251001", permissionMode: "plan" });
   await waitFor(() => events.filter((event) => event.type === "result").length === 2);
   assert.equal(launches().length, 2);
   const second = launches()[1];
   assert.deepEqual(second.slice(second.indexOf("--resume"), second.indexOf("--resume") + 2), ["--resume", ID]);
-  assert.deepEqual(second.slice(second.indexOf("--model"), second.indexOf("--model") + 2), ["--model", "haiku"]);
+  assert.deepEqual(second.slice(second.indexOf("--model"), second.indexOf("--model") + 2), ["--model", "claude-haiku-4-5-20251001"]);
   assert.deepEqual(second.slice(second.indexOf("--permission-mode"), second.indexOf("--permission-mode") + 2), ["--permission-mode", "plan"]);
-  await assert.rejects(chat.send(state, { text: "x", model: "gpt" }), { code: "invalid_request" });
+  await assert.rejects(chat.send(state, { text: "x", model: "opus --dangerously-skip-permissions" }), { code: "invalid_request" });
   await assert.rejects(chat.send(state, { text: "x", permissionMode: "yolo" }), { code: "invalid_request" });
+});
+
+test("a live Claude switches permission mode at once; bypass waits for a restart", async (t) => {
+  const { cwd, launches } = useFakeClaude(t);
+  const state = chat.open(ID, cwd);
+  const { events, off } = collect(state);
+  t.after(off);
+  assert.equal(await chat.setPermissionMode(state, "plan"), false);
+  await chat.send(state, { text: "one" });
+  await waitFor(() => events.some((event) => event.type === "result"));
+  assert.equal(await chat.setPermissionMode(state, "acceptEdits"), true);
+  assert.equal(chat.describe(state).permissionMode, "acceptEdits");
+  assert.equal(events.filter((event) => event.type === "system" && event.subtype === "status" && event.permissionMode === "acceptEdits").length, 1);
+  // The next message in that mode keeps the process.
+  await chat.send(state, { text: "two", permissionMode: "acceptEdits" });
+  await waitFor(() => events.filter((event) => event.type === "result").length === 2);
+  assert.equal(launches().length, 1);
+  assert.equal(await chat.setPermissionMode(state, "bypassPermissions"), false);
+  assert.equal(chat.describe(state).permissionMode, "acceptEdits");
+  await assert.rejects(chat.setPermissionMode(state, "yolo"), { code: "invalid_request" });
+  const response = await request("POST", `/api/claude/chat/${ID}/permission-mode`, { cwd, permissionMode: "plan" });
+  assert.deepEqual([response.status, response.body], [200, { applied: true }]);
 });
 
 test("a restart counts as busy and gives up if the server shuts the chat down meanwhile", async (t) => {
@@ -422,6 +444,30 @@ test("a chat never writes a session a terminal is resuming", async (t) => {
   assert.equal((await request("POST", `/api/claude/chat/${id}/send`, { cwd, text: "hi" })).status, 202);
 });
 
+test("a chat does not write a session Claude has open outside pi-web until it is closed there", async (t) => {
+  const { cwd } = useFakeClaude(t);
+  const created = await request("POST", "/api/claude/chat", { cwd, text: "first" });
+  const id = created.body.sessionId;
+  await waitFor(() => !chat.get(id).running);
+  chat.shutdownRuntimes();
+  // `claude -c` in a terminal on this computer registers the session it opened.
+  const pid = Number(require("node:child_process").execFileSync("sh", ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"], { encoding: "utf8" }).trim());
+  t.after(() => { try { process.kill(pid, "SIGKILL"); } catch { /* exited */ } });
+  fs.mkdirSync(path.join(process.env.CLAUDE_CONFIG_DIR, "sessions"), { recursive: true });
+  fs.writeFileSync(path.join(process.env.CLAUDE_CONFIG_DIR, "sessions", `${pid}.json`), JSON.stringify({ pid, sessionId: id, name: "pc", status: "idle", entrypoint: "cli" }));
+
+  const read = await request("GET", `/api/claude/chat/${id}?cwd=${encodeURIComponent(cwd)}`);
+  assert.deepEqual(read.body.external, [{ pid, name: "pc", status: "idle", entrypoint: "cli" }]);
+  const refused = await request("POST", `/api/claude/chat/${id}/send`, { cwd, text: "hi" });
+  assert.deepEqual([refused.status, refused.body.code, refused.body.external.length], [409, "external_owns_session", 1]);
+  // Claiming without `external` leaves it running.
+  assert.equal((await request("POST", `/api/claude/chat/${id}/claim`, { cwd })).status, 204);
+  assert.equal((await request("POST", `/api/claude/chat/${id}/send`, { cwd, text: "hi" })).status, 409);
+  assert.equal((await request("POST", `/api/claude/chat/${id}/claim`, { cwd, external: true })).status, 204);
+  assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  assert.equal((await request("POST", `/api/claude/chat/${id}/send`, { cwd, text: "hi" })).status, 202);
+});
+
 test("resuming a session in a terminal stops an idle chat process and refuses a busy one", async (t) => {
   const { cwd, transcript } = useFakeClaude(t);
   terminalApi.addRoot(cwd);
@@ -495,6 +541,12 @@ test("slash commands come from Claude's initialize answer, without the ones a ch
   assert.equal(listed.body.commands[2].description, "Show current context usage");
   assert.deepEqual(listed.body.commands[0].aliases, ["brainstorming"]);
   assert.equal(listed.body.commands[1].argumentHint, "<optional custom summarization instructions>");
+  // The models come with the IDs their aliases point to; `default` only names what "no model" runs.
+  assert.deepEqual(listed.body.models, [
+    { id: "opus[1m]", label: "Opus (1M context)", resolved: "claude-opus-5[1m]", description: "Opus 5 with 1M context" },
+    { id: "haiku", label: "Haiku", resolved: "claude-haiku-4-5-20251001", description: "Haiku 4.5" },
+  ]);
+  assert.equal(listed.body.defaultModel, "claude-opus-5[1m]");
   // The probe starts no session, and the answer is cached per workspace.
   assert.equal(launches()[0].includes("--session-id") || launches()[0].includes("--resume"), false);
   await request("GET", `/api/claude/chat/commands?cwd=${encodeURIComponent(cwd)}`);
@@ -507,6 +559,10 @@ test("slash commands come from Claude's initialize answer, without the ones a ch
   await chat.send(state, { text: "hello" });
   await waitFor(() => events.some((event) => event.type === "pi/commands"));
   assert.deepEqual(events.find((event) => event.type === "pi/commands").commands, listed.body.commands);
+  assert.deepEqual(events.find((event) => event.type === "pi/commands").models, listed.body.models);
+  // A listed alias with a variant suffix is a model a chat can pick; a shell pattern is not.
+  const { isValidModel } = require("./launch-options.cjs");
+  assert.deepEqual(["opus[1m]", "claude-opus-5-5", "opus[*]", "opus[1m]x"].map(isValidModel), [true, true, false, false]);
   for (const text of ["/clear", "/reset now", "/new"]) await assert.rejects(chat.send(state, { text }), { code: "invalid_request" });
 });
 

@@ -6,12 +6,13 @@ const chat = require("./claude-chat-runtime.cjs");
 const catalog = require("./claude-sessions.cjs");
 const terminals = require("./terminal-api.cjs");
 const terminalManager = require("./terminal-manager.cjs");
+const externalClaude = require("./claude-external.cjs");
 const { readBody } = require("../http-body.cjs");
 
 // Five images at the limit, plus the text.
 const MAX_IMAGE_BASE64 = 5_000_000;
 const MAX_BODY_BYTES = 26 * 1024 * 1024;
-function isPath(pathname) { return pathname === "/api/claude/chat" || pathname === "/api/claude/chat/commands" || /^\/api\/claude\/chat\/[0-9a-f-]+(?:\/(?:events|send|interrupt|respond|claim|agents\/[\w-]+))?$/i.test(pathname); }
+function isPath(pathname) { return pathname === "/api/claude/chat" || pathname === "/api/claude/chat/commands" || /^\/api\/claude\/chat\/[0-9a-f-]+(?:\/(?:events|send|interrupt|respond|permission-mode|claim|agents\/[\w-]+))?$/i.test(pathname); }
 function requestError(message, code = "invalid_request") { return Object.assign(new Error(message), { code }); }
 async function read(req) {
   let text;
@@ -34,10 +35,14 @@ function sessionFor(id, cwd) {
 }
 // Two Claude processes appending to one session file corrupt its history, so
 // a chat never writes a session a terminal is resuming.
-function assertNoTerminal(id) {
+async function assertNoTerminal(id) {
   if (chat.runtimeForSession(id)) return;
   const terminal = terminalManager.runtimeForSession(id);
   if (terminal) throw Object.assign(requestError("This session is open in a Claude terminal. Stop the terminal to continue here.", "terminal_owns_session"), { terminalId: terminal.terminalId });
+  // Claude in a terminal outside pi-web: once the chat runs, the chat owns
+  // the session, so only a send that would start Claude checks.
+  const external = await externalClaude.processesForSession(id);
+  if (external.length) throw Object.assign(requestError("This session is open in Claude on this computer. Close it there to continue here.", "external_owns_session"), { external });
 }
 // Images arrive as data URLs, as in Codex Chat.
 function imageInputs(value) {
@@ -78,13 +83,13 @@ function afterSeq(req, url, state) {
   const value = Number(seq);
   return runtimeId === state.runtimeId && Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
-const STATUS = { invalid_request: 400, invalid_session: 400, invalid_cwd: 400, forbidden_cwd: 403, not_found: 404, session_busy: 409, terminal_owns_session: 409, approval_expired: 409, no_active_turn: 409, runtime_unavailable: 503, runtime_timeout: 503, rpc_error: 502 };
+const STATUS = { invalid_request: 400, invalid_session: 400, invalid_cwd: 400, forbidden_cwd: 403, not_found: 404, session_busy: 409, terminal_owns_session: 409, external_owns_session: 409, external_still_running: 409, approval_expired: 409, no_active_turn: 409, runtime_unavailable: 503, runtime_timeout: 503, rpc_error: 502 };
 function sendError(res, cause) {
   const code = cause?.code;
   const status = STATUS[code] || 500;
   if (status >= 500) console.error("[pi-web] Claude chat request failed:", cause);
   const message = status < 500 || code === "rpc_error" ? cause.message : status === 503 ? "Claude is unavailable. Try again shortly." : "Claude chat request failed";
-  return send(res, status, { error: message, code, ...(cause?.terminalId ? { terminalId: cause.terminalId } : {}) });
+  return send(res, status, { error: message, code, ...(cause?.terminalId ? { terminalId: cause.terminalId } : {}), ...(cause?.external ? { external: cause.external } : {}) });
 }
 
 async function handle(req, res, url) {
@@ -103,7 +108,7 @@ async function handle(req, res, url) {
     }
     if (url.pathname === "/api/claude/chat/commands") {
       if (req.method !== "GET") return send(res, 405, { error: "method not allowed" });
-      return send(res, 200, { commands: await chat.commandsFor(requireCwd(url.searchParams.get("cwd"))) });
+      return send(res, 200, await chat.catalogFor(requireCwd(url.searchParams.get("cwd"))));
     }
     const [, , , , id, action, toolUseId] = url.pathname.split("/");
     if (req.method === "GET") {
@@ -124,7 +129,8 @@ async function handle(req, res, url) {
           history: history.records,
           cursor: history.cursor,
           // Older pages only need the transcript.
-          ...(before ? {} : { events: state ? state.events : [], runtime: state ? chat.describe(state) : null, terminal: terminal ? { terminalId: terminal.terminalId } : null }),
+          // `external`: Claude outside pi-web with this session open.
+          ...(before ? {} : { events: state ? state.events : [], runtime: state ? chat.describe(state) : null, terminal: terminal ? { terminalId: terminal.terminalId } : null, external: state?.child ? [] : await externalClaude.processesForSession(id) }),
         });
       }
       const state = chat.open(id, cwd, { title: session.title });
@@ -139,13 +145,15 @@ async function handle(req, res, url) {
     const cwd = requireCwd(body.cwd);
     const session = sessionFor(id, cwd);
     if (action === "claim") {
-      // Stops the terminals resuming this session (Ctrl+C, then stop).
+      // Stops the terminals resuming this session (Ctrl+C, then stop), and
+      // Claude outside pi-web when asked to.
       await terminalManager.interruptAndStopTerminalsForSession(id);
+      if (body.external === true) await externalClaude.stopProcessesForSession(id);
       return send(res, 204, {});
     }
     if (action === "send") {
       const input = messageInput(body);
-      assertNoTerminal(id);
+      await assertNoTerminal(id);
       const state = chat.open(id, cwd, { title: session.title });
       return send(res, 202, await chat.send(state, input));
     }
@@ -153,6 +161,11 @@ async function handle(req, res, url) {
     if (action === "interrupt") {
       if (!state) throw requestError("No active turn was found", "no_active_turn");
       return send(res, 200, { result: await chat.interrupt(state) });
+    }
+    if (action === "permission-mode") {
+      // `applied: false`: no live process took it; the next message uses it.
+      if (typeof body.permissionMode !== "string") throw requestError("permissionMode is required");
+      return send(res, 200, { applied: state ? await chat.setPermissionMode(state, body.permissionMode) : false });
     }
     if (action === "respond") {
       if (!state) throw requestError("Permission request is no longer pending", "approval_expired");

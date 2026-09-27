@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { getFileIcon } from "./FileIcons";
 import { ProductBrand } from "./ProductBrand";
 import { ProductStatusDot } from "./ProductStatus";
-import type { Tab } from "@/lib/workspace/tabs";
+import { tabAgent, type Tab } from "@/lib/workspace/tabs";
 
 interface Props {
   tabs: Tab[];
@@ -16,6 +16,8 @@ interface Props {
   onToggleTabLocked?: (id: string) => void;
   onReorderTabs?: (id: string, beforeId: string | null) => void;
   onRevealFile?: (filePath: string) => void;
+  /** Shows a chat's session or a terminal in the Agents list. */
+  onRevealAgent?: (tab: Tab) => void;
   ariaLabel?: string;
 }
 
@@ -55,7 +57,7 @@ function isTabClosable(tab: Tab): boolean {
   return tab.closable !== false && !tab.locked;
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs, onToggleTabLocked, onReorderTabs, onRevealFile, ariaLabel = "Open tabs" }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs, onToggleTabLocked, onReorderTabs, onRevealFile, onRevealAgent, ariaLabel = "Open tabs" }: Props) {
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<TabContextMenu | null>(null);
   const [copiedFilePath, setCopiedFilePath] = useState<string | null>(null);
@@ -98,6 +100,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
 
   const contextTabIndex = contextMenu ? tabs.findIndex((tab) => tab.id === contextMenu.tabId) : -1;
   const contextTab = contextTabIndex >= 0 ? tabs[contextTabIndex] : null;
+  const revealableAgent = Boolean(contextTab && tabAgent(contextTab));
   const closeableIds = (candidates: Tab[]) => candidates.filter(isTabClosable).map((tab) => tab.id);
   const leftIds = contextTabIndex >= 0 ? closeableIds(tabs.slice(0, contextTabIndex)) : [];
   const rightIds = contextTabIndex >= 0 ? closeableIds(tabs.slice(contextTabIndex + 1)) : [];
@@ -305,6 +308,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
             top: Math.max(4, Math.min(contextMenu.y, window.innerHeight - 304)),
           }}
         >
+          {revealableAgent && onRevealAgent && <>{menuItem("Reveal in Agents", false, () => onRevealAgent(contextTab))}<div role="separator" style={{ height: 1, margin: "4px 3px", background: "var(--border)" }} /></>}
           {contextTab.kind === "file" && contextTab.filePath && onRevealFile && menuItem("Reveal in File Explorer", false, () => onRevealFile(contextTab.filePath))}
           {contextTab.kind === "file" && contextTab.filePath && menuItem(copiedFilePath === contextTab.filePath ? "File Path Copied" : "Copy File Path", false, () => { void copyFilePath(contextTab.filePath); }, false)}
           {contextTab.kind === "file" && contextTab.filePath && <div role="separator" style={{ height: 1, margin: "4px 3px", background: "var(--border)" }} />}

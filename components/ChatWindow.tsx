@@ -1,4 +1,5 @@
 "use client";
+import { formatRunDuration } from "@/lib/run-duration";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, CustomMessage, ExtensionUiRequest, ImageContent, SessionInfo, SessionTreeNode, TextContent, ToolResultMessage, UserMessage } from "@/lib/types";
@@ -13,6 +14,7 @@ import { useAgentSession, type ActiveToolProgress, type AgentPhase, type Attache
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useCoarsePointer, useIsMobile } from "@/hooks/useIsMobile";
+import { useNow } from "@/hooks/useNow";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import {
   captureScrollDistance,
@@ -49,23 +51,8 @@ function phaseLabel(phase: AgentPhase): string {
   return "Thinking...";
 }
 
-function formatRunDuration(milliseconds: number): string {
-  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
-  if (minutes < 60) return `${minutes}m ${seconds}s`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
-}
-
 function RunningToolsStatus({ tools }: { tools: ActiveToolProgress[] }) {
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, []);
+  const now = useNow();
 
   return (
     <div className="my-2 space-y-2" aria-live="polite">

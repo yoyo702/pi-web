@@ -1821,6 +1821,45 @@ async function mockClaudeWorkspace(page: Page, sessions: Array<Record<string, un
   await page.route("**/api/claude/chat/commands?*", async (route) => route.fulfill({ json: { commands } }));
 }
 
+test("warns when Claude on this computer has the session open and closes it on request", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const id = "66666666-6666-4666-8666-666666666666";
+  await fakeCodexStreams(page);
+  await mockClaudeWorkspace(page, [{ id, title: "Fix payments", firstMessage: "Fix payments", cwd: "/tmp/pi-web-e2e", gitBranch: null, createdAt: null, updatedAt: "2026-08-03T00:00:00.000Z", size: 2048, runtime: null }]);
+  let externalOpen = true;
+  await page.route(`**/api/claude/chat/${id}?*`, async (route) => route.fulfill({ json: {
+    session: { id, title: "Fix payments" },
+    history: [{ type: "user", uuid: "h1", message: { role: "user", content: "Fix payments" } }],
+    cursor: null, events: [], runtime: null, terminal: null,
+    external: externalOpen ? [{ pid: 4242, name: "pi-web-61", status: "busy", entrypoint: "cli" }] : [],
+  } }));
+  const claims: Array<Record<string, unknown>> = [];
+  await page.route(`**/api/claude/chat/${id}/*`, async (route) => {
+    const action = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
+    if (action === "events") return route.fallback();
+    if (action === "claim") { claims.push(route.request().postDataJSON() as Record<string, unknown>); externalOpen = false; }
+    return route.fulfill({ status: 200, json: {} });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.locator("button[aria-expanded]").filter({ hasText: "Claude" }).last().click();
+  await page.getByText("Fix payments", { exact: true }).click();
+  const chat = page.locator("section").filter({ hasText: "Claude Chat · Fix payments" });
+  const banner = chat.getByTestId("claude-session-conflict");
+  await expect(banner).toContainText("open in Claude on this computer and it is working");
+
+  // Closing it ends a reply it is writing there, so it asks first.
+  page.once("dialog", (dialog) => void dialog.dismiss());
+  await banner.getByRole("button", { name: "Close it and continue here" }).click();
+  await expect(banner).toBeVisible();
+  expect(claims).toEqual([]);
+  page.once("dialog", (dialog) => void dialog.accept());
+  await banner.getByRole("button", { name: "Close it and continue here" }).click();
+  await expect.poll(() => claims).toEqual([{ cwd: "/tmp/pi-web-e2e", external: true }]);
+  await expect(banner).toHaveCount(0);
+});
+
 test("opens a Claude session in Claude Chat, answers permissions and stops a terminal that owns it", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
   const id = "55555555-5555-4555-8555-555555555555";
@@ -1850,6 +1889,14 @@ test("opens a Claude session in Claude Chat, answers permissions and stops a ter
   await page.getByText("Refactor login", { exact: true }).click();
   const chat = page.locator("section").filter({ hasText: "Claude Chat · Refactor login" });
   await expect(chat.getByText("Done refactoring.")).toBeVisible();
+  // The list marks the session open in the workspace.
+  await expect(page.locator("button[aria-current=\"true\"]").filter({ hasText: "Refactor login" })).toBeVisible();
+  // The tab menu finds the session in the Agents list from another sidebar module.
+  await page.locator("button[aria-expanded]").filter({ hasText: "Claude" }).last().click();
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Pi" }).click();
+  await page.locator("[data-tab-id^=\"claude-chat:\"]").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Reveal in Agents" }).click();
+  await expect(page.locator(`[data-agent-session="${id}"]`)).toBeFocused();
 
   // A terminal resuming the session owns it until the user stops it here.
   await chat.getByRole("alert").filter({ hasText: "open in a Claude terminal" }).getByRole("button", { name: "Stop terminal" }).click();
@@ -1878,7 +1925,29 @@ test("opens a Claude session in Claude Chat, answers permissions and stops a ter
   await expect.poll(() => actions.find((entry) => entry.action === "respond")?.body).toEqual({ cwd: "/tmp/pi-web-e2e", requestId: "req-1", decision: "allowSession" });
   await expect(card).toHaveCount(0);
 
-  await emit({ type: "assistant", uuid: "a1", piBlockIndex: 0, message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "tool-1", name: "Bash", input: { command: "npm test" } }] }, piSeq: 3, piRuntime: "r1" });
+  const command = `npm test -- ${"--reporter spec ".repeat(20)}\n  && npm run lint`;
+  await emit({ type: "assistant", uuid: "a1", piBlockIndex: 0, message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "tool-1", name: "Bash", input: { command } }] }, piSeq: 3, piRuntime: "r1" });
+  // The activity line names the running step, with how long the turn has
+  // run; a long command is shortened until the line is opened.
+  const activity = chat.locator(".codex-aui-activity");
+  await expect(activity.locator(".codex-aui-activity-detail")).toContainText(/· \d+s/);
+  const activityText = activity.locator(".codex-aui-activity-text");
+  await expect(activityText).toHaveCSS("white-space", "nowrap");
+  await activity.click();
+  await expect(activity).toHaveAttribute("aria-expanded", "true");
+  await expect(activityText).toHaveCSS("white-space", "pre-wrap");
+  expect(await activityText.evaluate((node) => (node as HTMLElement).innerText)).toBe(`Running ${command}`);
+  await activity.click();
+  await expect(activity).toHaveAttribute("aria-expanded", "false");
+  // Queued messages are listed.
+  const queueComposer = chat.getByPlaceholder("Queue a message for the next turn…");
+  await queueComposer.fill("then update the changelog");
+  await queueComposer.press("Enter");
+  const queued = chat.getByRole("list", { name: "Queued messages" });
+  await expect(chat.locator(".codex-aui-queue")).toContainText("1 queued · sends after this reply");
+  await expect(queued.getByText("then update the changelog")).toBeVisible();
+  await queued.getByRole("button", { name: "Remove queued message 1" }).click();
+  await expect(chat.locator(".codex-aui-queue")).toHaveCount(0);
   await emit({ type: "user", uuid: "a2", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "tool-1", content: "12 passing" }] }, piSeq: 4, piRuntime: "r1" });
   await emit({ type: "assistant", uuid: "a3", piBlockIndex: 1, message: { id: "m1", role: "assistant", content: [{ type: "text", text: "All tests pass." }] }, piSeq: 5, piRuntime: "r1" });
   // A replayed event is ignored.
@@ -1887,6 +1956,47 @@ test("opens a Claude session in Claude Chat, answers permissions and stops a ter
   await expect(chat.getByText("All tests pass.")).toBeVisible();
   await expect(chat.getByText("replayed")).toHaveCount(0);
   await expect(chat.getByPlaceholder("Message…", { exact: true })).toBeVisible();
+});
+
+test("a message queued in a Claude chat that reopens while its turn runs is sent after the turn", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop agent sidebar test");
+  const id = "77777777-7777-4777-8777-777777777777";
+  await fakeCodexStreams(page);
+  await mockClaudeWorkspace(page, [{ id, title: "Queue work", firstMessage: "Queue work", cwd: "/tmp/pi-web-e2e", gitBranch: null, createdAt: null, updatedAt: "2026-08-03T00:00:00.000Z", size: 2048, runtime: null }]);
+  await page.route(`**/api/claude/chat/${id}?*`, async (route) => route.fulfill({ json: {
+    session: { id, title: "Queue work" },
+    history: [{ type: "user", uuid: "h1", message: { role: "user", content: "Queue work" } }],
+    cursor: null, events: [], runtime: { runtimeId: "r1", running: true }, terminal: null,
+  } }));
+  const sent: Array<Record<string, unknown>> = [];
+  await page.route(`**/api/claude/chat/${id}/*`, async (route) => {
+    const action = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
+    if (action === "events") return route.fallback();
+    if (action === "send") sent.push(route.request().postDataJSON() as Record<string, unknown>);
+    return route.fulfill({ status: action === "send" ? 202 : 200, json: { ok: true } });
+  });
+
+  await page.goto("/");
+  await page.getByRole("navigation", { name: "Sidebar modules" }).getByRole("button", { name: "Agents" }).click();
+  await page.locator("button[aria-expanded]").filter({ hasText: "Claude" }).last().click();
+  const open = () => page.locator(`[data-agent-session="${id}"]`).getByText("Queue work", { exact: true }).click();
+  await open();
+  const chat = page.locator("section").filter({ hasText: "Claude Chat · Queue work" });
+  const composer = chat.getByPlaceholder("Queue a message for the next turn…");
+  await composer.fill("then update the changelog");
+  await composer.press("Enter");
+  await expect(chat.locator(".codex-aui-queue")).toContainText("1 queued · sends after this reply");
+
+  // The chat mounts again (closed and reopened; in development, a Fast
+  // Refresh) before it learns the turn is still running.
+  await page.locator("[data-tab-id^=\"claude-chat:\"]").click({ button: "middle" });
+  await expect(chat).toHaveCount(0);
+  await open();
+  await expect(chat.locator(".codex-aui-queue")).toContainText("1 queued · sends after this reply");
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __codexStreams?: unknown[] }).__codexStreams?.length ?? 0)).toBeGreaterThan(1);
+  await emitCodexEvent(page, { type: "pi/connected", sessionId: id, runtimeId: "r1" });
+  await emitCodexEvent(page, { type: "result", subtype: "success", is_error: false, piSeq: 1, piRuntime: "r1" });
+  await expect.poll(() => sent.map((body) => body.text)).toEqual(["then update the changelog"]);
 });
 
 test("Claude Chat lists Claude's slash commands and shows a sub-agent's steps under its tool call", async ({ page }, testInfo) => {
@@ -1912,6 +2022,7 @@ test("Claude Chat lists Claude's slash commands and shows a sub-agent's steps un
   await page.route(`**/api/claude/chat/${id}/agents/*`, async (route) => {
     const toolUseId = new URL(route.request().url()).pathname.split("/").at(-1) ?? "";
     agentReads.push(toolUseId);
+    if (toolUseId === "toolu_live") return route.fulfill({ json: { truncated: false, records: agentReads.filter((read) => read === toolUseId).length > 1 ? [{ type: "assistant", uuid: "b1", parentToolUseId: "toolu_live", message: { id: "mb", role: "assistant", content: [{ type: "text", text: "Saved background step" }] } }] : [] } });
     if (toolUseId !== "toolu_saved") return route.fulfill({ status: 404, json: { error: "This agent's steps were not saved", code: "not_found" } });
     return route.fulfill({ json: { truncated: false, records: [
       { type: "user", uuid: "s1", parentToolUseId: "toolu_saved", message: { role: "user", content: "List the files" } },
@@ -1961,6 +2072,18 @@ test("Claude Chat lists Claude's slash commands and shows a sub-agent's steps un
   const live = chat.getByRole("button", { name: /Agent steps.*Running Grep · 2 tool uses/ });
   await live.click();
   await expect(chat.getByText("Live sub-agent note")).toBeVisible();
+
+  // In the background: the tool call ends at once, task events tell it still
+  // runs, and its saved steps are read again as it uses more tools.
+  await emit({ type: "user", uuid: "l4", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_live", content: "Async agent launched successfully." }] }, piSeq: 7, piRuntime: "r1" });
+  await emit({ type: "system", subtype: "task_progress", tool_use_id: "toolu_live", last_tool_name: "Read", usage: { tool_uses: 3, duration_ms: 65_000 }, piSeq: 8, piRuntime: "r1" });
+  const steps = chat.locator(".claude-agent-steps").last();
+  await expect(steps.getByRole("button", { name: /Agent steps.*Running Read · 3 tool uses · 1m 5s/ })).toBeVisible();
+  await expect(steps.locator(".claude-agent-steps-pulse")).toBeVisible();
+  await expect(chat.getByText("Saved background step")).toBeVisible();
+  await emit({ type: "system", subtype: "task_notification", tool_use_id: "toolu_live", status: "completed", usage: { tool_uses: 3, duration_ms: 70_000 }, piSeq: 9, piRuntime: "r1" });
+  await expect(steps.getByRole("button", { name: /Agent steps.*Done · 3 tool uses · 1m 10s/ })).toBeVisible();
+  await expect(steps.locator(".claude-agent-steps-pulse")).toHaveCount(0);
 });
 
 test("starts a new Claude chat whose first message creates the session", async ({ page }, testInfo) => {

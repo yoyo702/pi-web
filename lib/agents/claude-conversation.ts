@@ -184,3 +184,26 @@ export function claudeConversationItems(records: ClaudeRecord[]): CodexConversat
   }
   return [...items.values()];
 }
+
+/**
+ * What Claude is doing in the running turn, from its items: the tool running
+ * (or whose input is still streaming in), a reply or thinking being written.
+ * A command is given whole; the activity line shortens it until opened.
+ */
+export function claudeActivity(items: CodexConversationItem[]): string {
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index];
+    if (item.kind === "message" && item.role === "user") break;
+    if (item.kind === "command" && !item.done) return item.command ? `Running ${item.command}` : "Preparing a command";
+    if (item.kind === "toolCall" && !item.done) {
+      const input = item.input;
+      const subject = [input.file_path, input.pattern, input.description, input.url, input.query].find((value) => typeof value === "string" && value);
+      if (!Object.keys(input).length) return `Preparing ${item.toolName}`;
+      return subject ? `${item.toolName} ${String(subject)}` : `Running ${item.toolName}`;
+    }
+    if (item.kind === "message" && item.streaming) return "Writing a reply";
+    if (item.kind === "reasoning") return "Thinking";
+    if (item.kind === "message" || item.kind === "command" || item.kind === "toolCall") break;
+  }
+  return "Working";
+}

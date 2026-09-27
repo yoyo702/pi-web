@@ -8,8 +8,9 @@ const PERMISSION_MODES = {
 };
 const MAX_PROMPT_LENGTH = 8_000;
 
+// An alias or ID, optionally with a variant suffix such as `opus[1m]`.
 function isValidModel(model) {
-  return model.length <= 120 && /^[A-Za-z0-9._:/-]+$/.test(model);
+  return model.length <= 120 && /^[A-Za-z0-9._:/-]+(\[[A-Za-z0-9]+\])?$/.test(model);
 }
 
 module.exports = { PERMISSION_MODES, MAX_PROMPT_LENGTH, isValidModel };

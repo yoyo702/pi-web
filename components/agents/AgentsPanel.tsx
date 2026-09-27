@@ -19,6 +19,10 @@ import { dangerousPermissionWarning } from "@/lib/chat-permissions";
 
 /** Structurally identical to `CodexChatTarget`; kept as a distinct export so AgentsPanel stays usable outside the workspace-actions context. */
 export type CodexSessionTarget = CodexChatTarget;
+/** The session or terminal behind the open workspace tab, marked in the lists. */
+export type ActiveAgent = { sessionId: string | null; terminalId: string | null };
+/** A request (from a tab's menu) to show a session or terminal in the lists; `key` changes per request. */
+export type AgentRevealRequest = ActiveAgent & { provider: TerminalProvider; key: number };
 
 interface CodexSession {
   id: string;
@@ -58,9 +62,13 @@ interface Props {
   onOpenTerminal?: (terminal: TerminalSession, label?: string) => void;
   onTerminalRemoved?: (terminalId: string) => void;
   onCodexSessionChanged?: (change: { id: string; action: "rename" | "archive" | "unarchive" | "delete"; name?: string }) => void;
+  active?: ActiveAgent;
+  reveal?: AgentRevealRequest | null;
+  /** The panel took `reveal`; clear it so a remount does not repeat it. */
+  onRevealHandled?: () => void;
 }
 
-export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAgent, onOpenCodexSession, onNewCodexChat, onOpenClaudeChat, onNewClaudeChat, onForkClaudeChat, onOpenTerminal, onTerminalRemoved, onCodexSessionChanged }: Props) {
+export function AgentsPanel({ active, reveal, onRevealHandled, cwd, refreshKey, style, onExpandedChange, onNewAgent, onOpenCodexSession, onNewCodexChat, onOpenClaudeChat, onNewClaudeChat, onForkClaudeChat, onOpenTerminal, onTerminalRemoved, onCodexSessionChanged }: Props) {
   const [open, setOpen] = useState(true);
   const [shellOpen, setShellOpen] = useState(false);
   const [codexOpen, setCodexOpen] = useState(false);
@@ -126,6 +134,24 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     }
     setTreesHydratedCwd(cwd);
   }, [cwd]);
+
+  // Revealing opens the group (clearing its search and archive filter) and,
+  // once the row renders, scrolls to it and focuses it.
+  const [revealing, setRevealing] = useState<AgentRevealRequest | null>(null);
+  useEffect(() => {
+    if (!reveal) return;
+    onRevealHandled?.();
+    setOpen(true);
+    if (reveal.provider === "codex") { setCodexOpen(true); if (!reveal.terminalId) { setShowArchived(false); setSessionQuery(""); } }
+    else if (reveal.provider === "claude") { setClaudeOpen(true); if (!reveal.terminalId) { setClaudeShowArchived(false); setClaudeQuery(""); } }
+    else setShellOpen(true);
+    setRevealing(reveal);
+  }, [onRevealHandled, reveal]);
+  useEffect(() => {
+    if (!revealing) return;
+    const timer = window.setTimeout(() => setRevealing(null), 5_000);
+    return () => window.clearTimeout(timer);
+  }, [revealing]);
 
   useEffect(() => {
     if (treesHydratedCwd !== cwd) return;
@@ -355,6 +381,15 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const liveCodexSessionIds = new Set(codexTerminals.filter((terminal) => terminal.state === "running" && terminal.launchMode === "resume").map((terminal) => terminal.sourceSessionId).filter(Boolean));
   const sessionNames = new Map(sessions.map((session) => [session.id, session.name]));
   const codexHistory = showArchived ? sessions : sessions.filter((session) => !liveCodexSessionIds.has(session.id));
+  useEffect(() => {
+    if (!revealing) return;
+    const selector = revealing.terminalId ? `[data-agent-terminal="${CSS.escape(revealing.terminalId)}"]` : `[data-agent-session="${CSS.escape(revealing.sessionId ?? "")}"]`;
+    const row = document.querySelector<HTMLElement>(selector);
+    if (!row) return;
+    row.scrollIntoView({ block: "nearest" });
+    row.focus({ preventScroll: true });
+    setRevealing(null);
+  }, [revealing, open, codexOpen, claudeOpen, shellOpen, codexHistory, claudeHistory, terminals]);
   const matchingProjectScripts = projectScripts.filter((script) => `${script.name} ${script.command}`.toLowerCase().includes(projectScriptQuery.trim().toLowerCase()));
   const visibleProjectScripts = showAllProjectScripts || projectScriptQuery ? matchingProjectScripts : matchingProjectScripts.slice(0, 8);
 
@@ -722,11 +757,11 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
         </div>}
         {orphanedTaskTerminals.length > 0 && <div style={previousTasksStyle}>
           <span style={projectScriptsLabelStyle}>Previous tasks</span>
-          {orphanedTaskTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
+          {orphanedTaskTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} current={active?.terminalId === terminal.id} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
         </div>}
         {projectScriptError && <div role="alert" style={errorStyle}>{projectScriptError}</div>}
         {manualShellTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "shell", count: shellTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
-        {manualShellTerminals.length === 0 && projectScripts.length === 0 ? <InlineMessage>No workspace terminals</InlineMessage> : manualShellTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
+        {manualShellTerminals.length === 0 && projectScripts.length === 0 ? <InlineMessage>No workspace terminals</InlineMessage> : manualShellTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} current={active?.terminalId === terminal.id} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
       </div>}
       <ProviderRow provider="codex" label="Codex" badge="C" badgeColor="var(--accent)" open={codexOpen} count={codexTerminals.length + codexHistory.length} running={codexTerminals.filter(terminalIsBusy).length + sessions.filter((session) => session.runtime?.state === "running" || session.runtime?.state === "approval").length} onToggle={() => setCodexOpen((value) => !value)} onNewAgent={onNewAgent} onNewChat={onNewCodexChat ? () => onNewCodexChat(cwd) : undefined} />
       {codexOpen && <div style={sessionListStyle}>
@@ -743,13 +778,15 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
         </div>
         {actionError && <div role="alert" style={errorStyle}>{actionError}</div>}
         {!showArchived && codexTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "codex", count: codexTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
-        {!showArchived && codexTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} preferredLabel={sessions.find((session) => session.id === terminal.sourceSessionId)?.name} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
+        {!showArchived && codexTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} current={active?.terminalId === terminal.id} preferredLabel={sessions.find((session) => session.id === terminal.sourceSessionId)?.name} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
         {loading ? <InlineMessage>Loading sessions…</InlineMessage>
           : error ? <button type="button" onClick={() => void loadSessions()} style={retryStyle}>Couldn&apos;t load sessions · Retry</button>
             : codexHistory.length === 0 && (showArchived || codexTerminals.length === 0) ? <InlineMessage>{sessionQuery ? "No matching sessions" : `No ${showArchived ? "archived" : "active"} Codex sessions`}</InlineMessage>
-              : codexHistory.map((session) => <div key={session.id} style={sessionContainerStyle}>
+              : codexHistory.map((session) => <div key={session.id} style={active?.sessionId === session.id ? currentSessionContainerStyle : sessionContainerStyle}>
                 <button
                   type="button"
+                  data-agent-session={session.id}
+                  aria-current={active?.sessionId === session.id || undefined}
                   disabled={busyId === session.id}
                   style={{ ...sessionMainStyle, cursor: showArchived ? "default" : "pointer" }}
                   title={[session.name, session.cwd, session.model && `Model: ${session.model}`, session.forkedFromId && `Forked from ${sessionNames.get(session.forkedFromId) || session.forkedFromId}`].filter(Boolean).join("\n")}
@@ -791,13 +828,15 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
         </div>
         {claudeError && !claudeLaunch && <div role="alert" style={errorStyle}>{claudeError}</div>}
         {!claudeShowArchived && claudeTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "claude", count: claudeTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
-        {!claudeShowArchived && claudeTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} preferredLabel={claudeCatalog.sessions.find((session) => session.id === terminal.sourceSessionId && terminal.launchMode === "resume")?.title} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
+        {!claudeShowArchived && claudeTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} current={active?.terminalId === terminal.id} preferredLabel={claudeCatalog.sessions.find((session) => session.id === terminal.sourceSessionId && terminal.launchMode === "resume")?.title} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
         {claudeCatalog.loading && claudeCatalog.sessions.length === 0 ? <InlineMessage>Loading sessions…</InlineMessage>
           : claudeCatalog.error ? <button type="button" onClick={() => void claudeCatalog.reload()} style={retryStyle}>Couldn&apos;t load sessions · Retry</button>
             : claudeHistory.length === 0 && (claudeShowArchived || claudeTerminals.length === 0) ? <InlineMessage>{claudeQuery ? "No matching sessions" : `No ${claudeShowArchived ? "archived" : "active"} Claude sessions`}</InlineMessage>
-              : claudeHistory.map((session) => <div key={session.id} style={sessionContainerStyle}>
+              : claudeHistory.map((session) => <div key={session.id} style={active?.sessionId === session.id ? currentSessionContainerStyle : sessionContainerStyle}>
                 <button
                   type="button"
+                  data-agent-session={session.id}
+                  aria-current={active?.sessionId === session.id || undefined}
                   disabled={busyId === session.id}
                   style={{ ...sessionMainStyle, cursor: claudeShowArchived ? "default" : "pointer" }}
                   title={[session.title, session.firstMessage !== session.title && session.firstMessage, session.gitBranch && `Branch: ${session.gitBranch}`, session.id].filter(Boolean).join("\n")}
@@ -1050,12 +1089,12 @@ function MenuButton({ children, danger, onClick }: { children: ReactNode; danger
   return <button className="agent-action-menu-item" role="menuitem" type="button" onClick={onClick} style={{ ...menuButtonStyle, color: danger ? "#f87171" : "var(--text)" }}>{children}</button>;
 }
 
-function TerminalRow({ terminal, preferredLabel, onOpen, onStop, onRemove }: { terminal: TerminalSession; preferredLabel?: string; onOpen?: (terminal: TerminalSession, label?: string) => void; onStop: (terminal: TerminalSession) => void; onRemove: (terminal: TerminalSession) => void }) {
+function TerminalRow({ terminal, current, preferredLabel, onOpen, onStop, onRemove }: { terminal: TerminalSession; current?: boolean; preferredLabel?: string; onOpen?: (terminal: TerminalSession, label?: string) => void; onStop: (terminal: TerminalSession) => void; onRemove: (terminal: TerminalSession) => void }) {
   const state = terminal.state !== "running" || terminal.activity === "waiting" ? "idle" : terminal.activity === "approval" ? "approval" : "running";
   const status = terminal.state !== "running" ? terminal.state : terminal.activity === "approval" ? "needs approval" : terminal.activity === "waiting" ? "waiting for input" : terminal.activity === "working" ? "working" : "running";
   const label = preferredLabel || terminal.title || (terminal.sourceSessionId ? `${terminal.provider} · ${terminal.sourceSessionId.slice(0, 8)}` : `${terminal.provider} terminal`);
-  return <div style={sessionContainerStyle}>
-    <button type="button" style={sessionMainStyle} title={`${label}\n${terminal.cwd}`} onClick={() => onOpen?.(terminal, label)}>
+  return <div style={current ? currentSessionContainerStyle : sessionContainerStyle}>
+    <button type="button" data-agent-terminal={terminal.id} aria-current={current || undefined} style={sessionMainStyle} title={`${label}\n${terminal.cwd}`} onClick={() => onOpen?.(terminal, label)}>
       <StatusDot state={state} />
       <span style={{ minWidth: 0, flex: 1 }}>
         <span style={sessionNameStyle}>{label}</span>
@@ -1157,6 +1196,7 @@ const searchInputStyle: CSSProperties = { minWidth: 0, flex: 1, padding: 0, bord
 const searchClearStyle: CSSProperties = { width: 18, height: 18, padding: 0, border: 0, borderRadius: 4, background: "transparent", color: "var(--text-dim)", cursor: "pointer", font: "15px/1 inherit" };
 const sessionRowStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 8, width: "100%", minHeight: 44, padding: "6px 7px 6px 9px", border: 0, borderRadius: 7, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", font: "inherit" };
 const sessionContainerStyle: CSSProperties = { position: "relative", display: "flex", alignItems: "stretch", minWidth: 0, borderRadius: 6 };
+const currentSessionContainerStyle: CSSProperties = { ...sessionContainerStyle, background: "var(--bg-selected)", boxShadow: "inset 2px 0 0 var(--accent)" };
 const sessionMainStyle: CSSProperties = { ...sessionRowStyle, minWidth: 0, paddingRight: 2, flex: 1 };
 const SESSION_PAGE_SIZE = 50;
 const sessionNameStyle: CSSProperties = { display: "block", overflow: "hidden", color: "var(--text)", fontSize: 11.5, lineHeight: "16px", textOverflow: "ellipsis", whiteSpace: "nowrap" };

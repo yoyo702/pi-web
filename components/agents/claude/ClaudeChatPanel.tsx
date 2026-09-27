@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { claudeConversationItems, type ClaudeRecord } from "@/lib/agents/claude-conversation";
+import { claudeActivity, claudeConversationItems, type ClaudeRecord } from "@/lib/agents/claude-conversation";
+import { formatRunDuration } from "@/lib/run-duration";
+import { useNow } from "@/hooks/useNow";
 import type { ChatDraftImage } from "@/lib/draft-store";
 import { streamFailure } from "@/lib/agents/stream-failure";
 import type { ClaudePermissionMode } from "@/lib/workspace/tabs";
@@ -11,20 +13,24 @@ import { CodexAssistantThread, type SlashCommand } from "../codex/CodexAssistant
 import { ClaudeAgentContext, ClaudeAgentSteps, isAgentTool, type ClaudeAgentProgress } from "./ClaudeAgentSteps";
 import { ClaudePermissionCard, type ClaudePermissionAnswer, type ClaudePermissionRequest } from "./ClaudePermissionCard";
 import { CLAUDE_CHAT_PERMISSION_OPTIONS } from "@/lib/chat-permissions";
+import { CLAUDE_MODEL_OPTIONS, claudeModelLabel, claudeModelMenuLabel, type ClaudeModelOption } from "@/lib/agents/claude-models";
 
-type ClaudeEvent = ClaudeRecord & { piRuntime?: string; runtimeId?: string; request_id?: string; request?: ClaudePermissionRequest["request"]; requestId?: string; permissionMode?: string; model?: string; interrupted?: boolean; error?: string; code?: string; compacting?: boolean; commands?: SlashCommand[]; tool_use_id?: string; description?: string; last_tool_name?: string; status?: string; usage?: { tool_uses?: number } };
+type ClaudeEvent = ClaudeRecord & { piRuntime?: string; runtimeId?: string; request_id?: string; request?: ClaudePermissionRequest["request"]; requestId?: string; permissionMode?: string; model?: string; interrupted?: boolean; error?: string; code?: string; compacting?: boolean; commands?: SlashCommand[]; models?: ClaudeModelOption[]; defaultModel?: string | null; tool_use_id?: string; description?: string; last_tool_name?: string; status?: string; usage?: { tool_uses?: number; duration_ms?: number } };
 type Runtime = { runtimeId: string; running: boolean; compacting?: boolean; model: string | null; permissionMode: string | null; process: boolean; requests: ClaudePermissionRequest[] };
-type ChatRead = { session?: { id: string; title: string | null; created?: boolean }; history?: ClaudeRecord[]; cursor?: number | null; events?: ClaudeEvent[]; runtime?: Runtime | null; terminal?: { terminalId: string } | null };
-type ApiError = { error?: string; code?: string };
+type ChatRead = { session?: { id: string; title: string | null; created?: boolean }; history?: ClaudeRecord[]; cursor?: number | null; events?: ClaudeEvent[]; runtime?: Runtime | null; terminal?: { terminalId: string } | null; external?: ExternalClaude[] };
+type ApiError = { error?: string; code?: string; external?: ExternalClaude[] };
+// A `claude` outside pi-web (a terminal on this computer) with the session open.
+type ExternalClaude = { pid: number; name: string | null; status: string | null };
+// Who else has the session open: a pi-web terminal, or Claude outside pi-web.
+type Conflict = { kind: "terminal" } | { kind: "external"; processes: ExternalClaude[] };
 
-const MODEL_OPTIONS = [{ id: "sonnet", label: "Sonnet" }, { id: "opus", label: "Opus" }, { id: "haiku", label: "Haiku" }];
 const PERMISSION_OPTIONS = CLAUDE_CHAT_PERMISSION_OPTIONS;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isPermissionMode = (value: unknown): value is ClaudePermissionMode => PERMISSION_OPTIONS.some((option) => option.value === value);
 const post = (url: string, body: unknown) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 async function failure(response: Response, fallback: string) {
   const data = await response.json().catch(() => ({})) as ApiError;
-  return Object.assign(new Error(data.error || fallback), { code: data.code });
+  return Object.assign(new Error(data.error || fallback), { code: data.code, external: data.external });
 }
 
 /**
@@ -36,6 +42,13 @@ async function failure(response: Response, fallback: string) {
  * Slash commands come from Claude (a probe per workspace, then each spawn's
  * `pi/commands`); an Agent tool call shows its sub-agent's steps.
  */
+/** How long the turn has run, and how long Claude has been quiet once that passes 10s. Ticks on its own so the thread does not re-render every second. */
+function TurnClock({ startedAt, lastEventAt }: { startedAt: number; lastEventAt: number }) {
+  const now = useNow();
+  const quiet = now - lastEventAt;
+  return <>{formatRunDuration(now - startedAt)}{quiet >= 10_000 ? ` · last update ${formatRunDuration(quiet)} ago` : ""}</>;
+}
+
 export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName, model: initialModel, permissionMode: initialPermissionMode, workspaceTabId, forkOf, onCreated, onFork, onOpenFile, onStatusChange, onConfigurationChange }: { sessionId: string | null; cwd: string; sessionName?: string; model: string; permissionMode: ClaudePermissionMode; workspaceTabId: string; forkOf?: { sessionId: string; at?: string }; onCreated?: (tabId: string, cwd: string, sessionId: string, title: string) => void; onFork?: (target: ClaudeForkTarget) => void; onOpenFile?: (filePath: string) => void; onStatusChange?: (tabId: string, status: "idle" | "running" | "approval") => void; onConfigurationChange?: (tabId: string, configuration: { model?: string; permissionMode?: ClaudePermissionMode }) => void }) {
   const [sessionId, setSessionId] = useState(initialSessionId);
   const [title, setTitle] = useState(sessionName ?? "");
@@ -48,7 +61,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
   const [sending, setSending] = useState(false);
   const [connection, setConnection] = useState<"loading" | "connected" | "reconnecting" | "failed">(initialSessionId ? "loading" : "connected");
   const [error, setError] = useState<string | null>(null);
-  const [terminalConflict, setTerminalConflict] = useState(false);
+  const [conflict, setConflict] = useState<Conflict | null>(null);
   const [model, setModel] = useState(initialModel);
   const [reportedModel, setReportedModel] = useState<string | null>(null);
   const [permissionMode, setPermissionMode] = useState<ClaudePermissionMode>(initialPermissionMode);
@@ -56,6 +69,9 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
   const [loadingEarlier, setLoadingEarlier] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [commands, setCommands] = useState<SlashCommand[]>([]);
+  // Claude's own model list (aliases with the IDs they point to), per folder.
+  const [models, setModels] = useState<ClaudeModelOption[]>(CLAUDE_MODEL_OPTIONS);
+  const [defaultModel, setDefaultModel] = useState<string | null>(null);
   const [compacting, setCompacting] = useState(false);
   // Sequence numbers restart with each chat runtime on the server.
   const runtimeIdRef = useRef("");
@@ -65,6 +81,15 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
   const createdRef = useRef(false);
 
   const runState = requests.length ? "approval" : running || sending ? "running" : "idle";
+  // When the turn started and when Claude last sent anything, for the
+  // activity line: a tool can run for minutes without output.
+  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
+  const [lastEventAt, setLastEventAt] = useState(0);
+  useEffect(() => {
+    if (runState !== "running") { setTurnStartedAt(null); return; }
+    const started = Date.now();
+    setTurnStartedAt(started); setLastEventAt(started);
+  }, [runState]);
   useEffect(() => { onStatusChange?.(workspaceTabId, runState); }, [onStatusChange, runState, workspaceTabId]);
   useEffect(() => {
     if (!notice) return;
@@ -84,14 +109,24 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
   useEffect(() => {
     const abort = new AbortController();
     void fetch(`/api/claude/chat/commands?${new URLSearchParams({ cwd })}`, { cache: "no-store", signal: abort.signal })
-      .then(async (response) => { if (response.ok) setCommands(((await response.json()) as { commands?: SlashCommand[] }).commands ?? []); })
+      .then(async (response) => {
+        if (!response.ok) return;
+        const data = await response.json() as { commands?: SlashCommand[]; models?: ClaudeModelOption[]; defaultModel?: string | null };
+        setCommands(data.commands ?? []);
+        if (data.models?.length) setModels(data.models);
+        setDefaultModel(data.defaultModel ?? null);
+      })
       .catch(() => undefined);
     return () => abort.abort();
   }, [cwd]);
 
   const apply = useCallback((event: ClaudeEvent) => {
     if (event.type === "user") setRunning(true);
-    else if (event.type === "pi/commands" && event.commands) setCommands(event.commands);
+    else if (event.type === "pi/commands" && event.commands) {
+      setCommands(event.commands);
+      if (event.models?.length) setModels(event.models);
+      if (event.defaultModel !== undefined) setDefaultModel(event.defaultModel);
+    }
     else if (event.type === "result") {
       setRunning(false); setRequests([]); setCompacting(false);
       if (event.interrupted) setNotice("Turn interrupted");
@@ -116,7 +151,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
     let source: EventSource | null = null;
     const probe = new AbortController();
     runtimeIdRef.current = ""; lastSeqRef.current = 0;
-    setConnection("loading"); setTerminalConflict(false);
+    setConnection("loading"); setConflict(null);
     const connect = () => {
       const params = new URLSearchParams({ cwd });
       if (runtimeIdRef.current && lastSeqRef.current) params.set("after", `${runtimeIdRef.current}:${lastSeqRef.current}`);
@@ -137,6 +172,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         }
         if (event.piSeq && event.piSeq <= lastSeqRef.current) return;
         if (event.piSeq) lastSeqRef.current = event.piSeq;
+        setLastEventAt(Date.now());
         apply(event);
         // Deltas are superseded by the finished records once the turn ends.
         setEvents((current) => event.type === "result" ? [...current.filter((item) => item.type !== "stream_event"), event] : [...current, event]);
@@ -173,7 +209,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         setRequests(data.runtime?.requests ?? []);
         if (data.runtime?.model) setReportedModel(data.runtime.model);
         if (data.runtime?.process) adoptPermissionMode(data.runtime.permissionMode);
-        setTerminalConflict(Boolean(data.terminal));
+        setConflict(data.terminal ? { kind: "terminal" } : data.external?.length ? { kind: "external", processes: data.external } : null);
         connect();
       })
       .catch((cause) => { if (!closed) { setConnection("failed"); setError(cause instanceof Error ? cause.message : "Unable to load the Claude session"); } });
@@ -200,7 +236,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         if (records) records.push(event); else live.set(event.parentToolUseId, [event]);
       } else if (event.tool_use_id) {
         const previous = progress.get(event.tool_use_id);
-        progress.set(event.tool_use_id, { description: event.description ?? previous?.description, lastTool: event.last_tool_name ?? previous?.lastTool, status: event.status ?? previous?.status, toolUses: event.usage?.tool_uses ?? previous?.toolUses });
+        progress.set(event.tool_use_id, { description: event.description ?? previous?.description, lastTool: event.last_tool_name ?? previous?.lastTool, status: event.status ?? previous?.status, toolUses: event.usage?.tool_uses ?? previous?.toolUses, durationMs: event.usage?.duration_ms ?? previous?.durationMs });
       }
     }
     return { sessionId, cwd, live, progress, onOpenFile };
@@ -246,7 +282,9 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
       return true;
     } catch (cause) {
       setPending((current) => current.filter((record) => record.uuid !== uuid));
-      if ((cause as { code?: string }).code === "terminal_owns_session") setTerminalConflict(true);
+      const { code, external } = cause as { code?: string; external?: ExternalClaude[] };
+      if (code === "terminal_owns_session") setConflict({ kind: "terminal" });
+      else if (code === "external_owns_session") setConflict({ kind: "external", processes: external ?? [] });
       else setError(cause instanceof Error ? cause.message : "Unable to send the message to Claude");
       return false;
     } finally { setSending(false); }
@@ -292,24 +330,43 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
 
   const claim = useCallback(async () => {
     if (!sessionId) return;
+    const external = conflict?.kind === "external";
+    // Closing Claude elsewhere ends whatever it is doing there.
+    if (external && !window.confirm("Close Claude on this computer and continue here? A reply it is writing there stops.")) return;
     setSending(true);
     try {
-      const response = await post(`/api/claude/chat/${encodeURIComponent(sessionId)}/claim`, { cwd });
-      if (!response.ok) throw await failure(response, "Unable to stop the terminal");
-      setTerminalConflict(false); setError(null); setReloadKey((key) => key + 1);
+      const response = await post(`/api/claude/chat/${encodeURIComponent(sessionId)}/claim`, { cwd, external });
+      if (!response.ok) throw await failure(response, external ? "Unable to close Claude on this computer" : "Unable to stop the terminal");
+      setConflict(null); setError(null); setReloadKey((key) => key + 1);
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Unable to stop the terminal"); }
     finally { setSending(false); }
-  }, [cwd, sessionId]);
+  }, [conflict, cwd, sessionId]);
 
-  const modelLabel = MODEL_OPTIONS.find((option) => option.id === model)?.label ?? (reportedModel || "Default model");
+  // A live Claude switches at once, mid-turn included; otherwise (or when
+  // Claude refuses, as for bypass) the next message restarts it in this mode.
+  const changePermissionMode = async (value: ClaudePermissionMode) => {
+    setPermissionMode(value);
+    onConfigurationChange?.(workspaceTabId, { permissionMode: value });
+    const label = PERMISSION_OPTIONS.find((option) => option.value === value)?.label ?? value;
+    let applied = false;
+    if (sessionId) {
+      try {
+        const response = await post(`/api/claude/chat/${encodeURIComponent(sessionId)}/permission-mode`, { cwd, permissionMode: value });
+        applied = response.ok && ((await response.json()) as { applied?: boolean }).applied === true;
+      } catch { /* applies to the next message */ }
+    }
+    setNotice(applied ? `Permission mode changed to ${label}` : `Permission mode changed to ${label} · applies to the next message`);
+  };
+  const modelLabel = claudeModelLabel(model, reportedModel, models, defaultModel);
+  const modelOptions = useMemo(() => [...models, ...(model && !models.some((option) => option.id === model) ? [{ id: model, label: model }] : [])].map((option) => ({ id: option.id, label: claudeModelMenuLabel(option) })), [model, models]);
   return <section style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg)" }}>
     <header style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 12px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>
       <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><strong style={{ color: "var(--text)" }}>Claude Chat{title ? ` · ${title}` : !sessionId ? " · New chat" : ""}</strong><span title={cwd}> · {cwd}</span></span>
       {cursor !== null && <button type="button" onClick={() => void loadEarlier()} disabled={loadingEarlier} style={buttonStyle}>{loadingEarlier ? "Loading…" : "Load earlier"}</button>}
     </header>
-    {terminalConflict ? <div role="alert" style={{ padding: "7px 10px", color: "#fbbf24", fontSize: 12 }}>
-      This session is open in a Claude terminal. Stop the terminal to continue here.
-      <button type="button" onClick={() => void claim()} disabled={sending} style={{ ...buttonStyle, marginLeft: 8 }}>Stop terminal</button>
+    {conflict ? <div role="alert" data-testid="claude-session-conflict" style={{ padding: "7px 10px", color: "#fbbf24", fontSize: 12 }}>
+      {conflict.kind === "terminal" ? "This session is open in a Claude terminal. Stop the terminal to continue here." : `This session is open in Claude on this computer${conflict.processes.some((process) => process.status === "busy") ? " and it is working" : ""}. Its conversation and this one would split; close it there, or close it from here to continue.`}
+      <button type="button" onClick={() => void claim()} disabled={sending} style={{ ...buttonStyle, marginLeft: 8 }}>{conflict.kind === "terminal" ? "Stop terminal" : "Close it and continue here"}</button>
     </div> : !sessionId && forkOf && !error ? <div style={{ padding: "7px 10px", color: "var(--text-muted)", fontSize: 12 }}>
       {forkOf.at ? "Your first message starts a fork with the conversation before the chosen message." : "Your first message starts a fork with a copy of the whole conversation."} The original session is left unchanged.
     </div> : error && <div role="alert" style={{ padding: "7px 10px", color: "#fca5a5", fontSize: 12 }}>{error}{connection === "failed" ? <button type="button" onClick={() => { setError(null); setReloadKey((key) => key + 1); }} style={{ ...buttonStyle, marginLeft: 8 }}>Reconnect</button> : null}</div>}
@@ -319,6 +376,7 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         // Base64 grows it to the API's 5 MB image limit.
         maxImageBytes={3_750_000}
         running={runState !== "idle"}
+        loaded={connection !== "loading"}
         requestCards={requests.map((request, index) => <ClaudePermissionCard key={request.request_id} request={request} position={index + 1} total={requests.length} onAnswer={(requestId, value) => void answer(requestId, value)} />)}
         canSteer={false}
         slashCommands={commands}
@@ -328,22 +386,25 @@ export function ClaudeChatPanel({ sessionId: initialSessionId, cwd, sessionName,
         draftKey={`claude:${sessionId ?? workspaceTabId}`}
         modelLabel={modelLabel}
         modelValue={model}
-        modelOptions={MODEL_OPTIONS}
+        modelOptions={modelOptions}
         modelMenuRequest={0}
+        customModel
+        livePermissions
         reasoningEffort=""
         serviceTier=""
         approvalPolicy={permissionMode}
         approvalLabel={PERMISSION_OPTIONS.find((option) => option.value === permissionMode)?.label ?? permissionMode}
         statusLabel={connection !== "connected" ? connection === "reconnecting" ? "Reconnecting" : connection === "loading" ? "Loading" : "Offline" : runState === "approval" ? "Approval" : runState === "running" ? "Working" : "Ready"}
-        activityLabel={compacting ? "Compacting the conversation…" : runState === "running" ? "Claude is working…" : undefined}
+        activityLabel={compacting ? "Compacting the conversation…" : runState === "running" && turnStartedAt ? claudeActivity(items) : undefined}
+        activityDetail={!compacting && runState === "running" && turnStartedAt ? <TurnClock startedAt={turnStartedAt} lastEventAt={lastEventAt} /> : undefined}
         noticeLabel={notice || undefined}
         forkDisabled={!sessionId || runState !== "idle" || connection !== "connected"}
         forkPoints={forkPoints}
         onModelToggle={() => undefined}
-        onModelChange={(value) => { setModel(value); onConfigurationChange?.(workspaceTabId, { model: value || undefined }); setNotice(value ? `Model changed to ${MODEL_OPTIONS.find((option) => option.id === value)?.label ?? value} · applies to the next message` : "Using the default model on the next message"); }}
+        onModelChange={(value) => { setModel(value); setReportedModel(null); onConfigurationChange?.(workspaceTabId, { model: value || undefined }); setNotice(value ? `Model changed to ${claudeModelLabel(value, null, models)} · applies to the next message` : "Using the default model on the next message"); }}
         onReasoningEffortChange={() => undefined}
         onServiceTierChange={() => undefined}
-        onApprovalPolicyChange={(value) => { if (!isPermissionMode(value)) return; setPermissionMode(value); onConfigurationChange?.(workspaceTabId, { permissionMode: value }); setNotice("Permission mode updated · applies to the next message"); }}
+        onApprovalPolicyChange={(value) => { if (isPermissionMode(value)) void changePermissionMode(value); }}
         onFork={onFork && sessionId ? () => fork() : undefined}
         onForkFrom={onFork ? fork : undefined}
         onSend={send}

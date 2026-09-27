@@ -448,4 +448,4 @@ function agentTranscript(id, cwd, toolUseId) {
   } finally { fs.closeSync(handle); }
 }
 
-module.exports = { listSessions, requireSession, remove, rename, setArchived, encodeCwd, sessionFile, readHistory, forkPoint, agentTranscript, compactRecord };
+module.exports = { claudeHome, listSessions, requireSession, remove, rename, setArchived, encodeCwd, sessionFile, readHistory, forkPoint, agentTranscript, compactRecord };

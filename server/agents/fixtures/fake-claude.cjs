@@ -77,6 +77,13 @@ const COMMANDS = [
   { name: "doctor", description: "Diagnose the installation", argumentHint: "" },
   { name: "context", description: "A project command of the same name", argumentHint: "" },
 ];
+// As Claude 2.1 lists them: `default` names what "no model" runs.
+const MODELS = [
+  { value: "default", resolvedModel: "claude-opus-5[1m]", displayName: "Default (recommended)", description: "Use the default model" },
+  { value: "opus[1m]", resolvedModel: "claude-opus-5[1m]", displayName: "Opus (1M context)", description: "Opus 5 with 1M context" },
+  { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku", description: "Haiku 4.5" },
+  { value: "bad model", resolvedModel: "x", displayName: "Unusable" },
+];
 // A sub-agent: Claude's output tags its messages with the Agent tool call;
 // its transcript goes to <session>/subagents/agent-<id>.jsonl.
 function delegate() {
@@ -181,7 +188,12 @@ process.stdin.on("data", (chunk) => {
           persist(entry);
           finish({ stop_reason: null });
         }
-      } else if (subtype === "initialize") out({ type: "control_response", response: { subtype: "success", request_id: input.request_id, response: { commands: COMMANDS, models: [], agents: [] } } });
+      } else if (subtype === "initialize") out({ type: "control_response", response: { subtype: "success", request_id: input.request_id, response: { commands: COMMANDS, models: MODELS, agents: [] } } });
+      else if (subtype === "set_permission_mode") {
+        // Like Claude: bypass only when the process was launched in it.
+        if (input.request.mode === "bypassPermissions" && flag("--permission-mode") !== "bypassPermissions") out({ type: "control_response", response: { subtype: "error", request_id: input.request_id, error: "Cannot set permission mode to bypassPermissions" } });
+        else { permissionMode = input.request.mode; out({ type: "control_response", response: { subtype: "success", request_id: input.request_id, response: { mode: permissionMode } } }); out({ type: "system", subtype: "status", status: null, permissionMode }); }
+      }
       else if (subtype === "set_model") { model = input.request.model; out({ type: "control_response", response: { subtype: "success", request_id: input.request_id } }); }
       else out({ type: "control_response", response: { subtype: "error", request_id: input.request_id, error: `unsupported ${subtype}` } });
     } else if (input.type === "control_response" && pendingPermission && input.response?.request_id === pendingPermission.requestId) {

@@ -5,8 +5,9 @@ import { claudeConversationItems, type ClaudeRecord } from "@/lib/agents/claude-
 import type { AssistantMessage, BashExecutionMessage, ToolResultMessage } from "@/lib/types";
 import { MessageView } from "../../MessageView";
 import { useCoarsePointer } from "@/hooks/useIsMobile";
+import { formatRunDuration } from "@/lib/run-duration";
 
-export type ClaudeAgentProgress = { description?: string; lastTool?: string; status?: string; toolUses?: number };
+export type ClaudeAgentProgress = { description?: string; lastTool?: string; status?: string; toolUses?: number; durationMs?: number };
 export type ClaudeAgentSources = { sessionId: string | null; cwd: string; live: Map<string, ClaudeRecord[]>; progress: Map<string, ClaudeAgentProgress>; onOpenFile?: (path: string) => void };
 export const ClaudeAgentContext = createContext<ClaudeAgentSources>({ sessionId: null, cwd: "", live: new Map(), progress: new Map() });
 
@@ -15,8 +16,11 @@ export const isAgentTool = (name: string) => name === "Agent" || name === "Task"
 /**
  * A sub-agent's steps under its Agent tool call: the records Claude streamed
  * for it (`parentToolUseId`) merged with its saved transcript, loaded when
- * opened and again when the agent finishes. Sub-agent records are one block
- * each, so they are keyed by uuid; its prompt is the tool input and is left out.
+ * opened, as it uses more tools (a background agent's records are not
+ * streamed) and when it finishes. Sub-agent records are one block each, so
+ * they are keyed by uuid; its prompt is the tool input and is left out.
+ * A background agent's tool call ends at once; its task events (`progress`)
+ * tell whether it still runs.
  */
 export function ClaudeAgentSteps({ toolUseId, done }: { toolUseId: string; done: boolean }) {
   const { sessionId, cwd, live, progress, onOpenFile } = useContext(ClaudeAgentContext);
@@ -26,6 +30,8 @@ export function ClaudeAgentSteps({ toolUseId, done }: { toolUseId: string; done:
   const [error, setError] = useState<string | null>(null);
   const liveRecords = live.get(toolUseId);
   const state = progress.get(toolUseId);
+  const running = state ? !state.status || state.status === "running" : !done;
+  const toolUses = state?.toolUses;
 
   useEffect(() => {
     if (!open || !sessionId) return;
@@ -39,7 +45,7 @@ export function ClaudeAgentSteps({ toolUseId, done }: { toolUseId: string; done:
       })
       .catch(() => { if (!abort.signal.aborted) setError("Unable to load the agent's steps"); });
     return () => abort.abort();
-  }, [cwd, done, open, sessionId, toolUseId]);
+  }, [cwd, open, running, sessionId, toolUseId, toolUses]);
 
   const items = useMemo(() => {
     if (!open) return [];
@@ -50,13 +56,14 @@ export function ClaudeAgentSteps({ toolUseId, done }: { toolUseId: string; done:
       if (record.type === "user" && !(Array.isArray(content) && content.some((block) => block.type === "tool_result"))) continue;
       records.set(record.uuid, { ...record, parentToolUseId: undefined, piBlockIndex: 0, message: { ...record.message, id: record.uuid } });
     }
-    return claudeConversationItems([...records.values(), ...done ? [{ type: "result" }] : []]);
-  }, [done, liveRecords, open, saved]);
+    return claudeConversationItems([...records.values(), ...running ? [] : [{ type: "result" }]]);
+  }, [liveRecords, open, running, saved]);
 
-  const summary = [state?.lastTool && !done ? `Running ${state.lastTool}` : "", state?.toolUses ? `${state.toolUses} tool use${state.toolUses === 1 ? "" : "s"}` : "", state?.status && state.status !== "completed" ? state.status : ""].filter(Boolean).join(" · ");
-  return <div className="claude-agent-steps">
+  const failed = !running && state?.status !== undefined && state.status !== "completed";
+  const summary = [running ? state?.lastTool ? `Running ${state.lastTool}` : "Running" : state?.status === "completed" ? "Done" : "", toolUses ? `${toolUses} tool use${toolUses === 1 ? "" : "s"}` : "", state?.durationMs ? formatRunDuration(state.durationMs) : "", failed ? state?.status : ""].filter(Boolean).join(" · ");
+  return <div className="claude-agent-steps" data-state={running ? "running" : failed ? "failed" : "done"}>
     <button type="button" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
-      <span>{open ? "▾" : "▸"} Agent steps</span>{summary && <small>{summary}</small>}
+      <span>{open ? "▾" : "▸"} Agent steps</span>{running && <span className="claude-agent-steps-pulse" aria-hidden />}{summary && <small>{summary}</small>}
     </button>
     {open && <div className="claude-agent-steps-body">
       {error && <p role="alert">{error}</p>}

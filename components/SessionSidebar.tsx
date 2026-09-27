@@ -4,7 +4,7 @@ import { memo, useEffect, useLayoutEffect, useState, useCallback, useMemo, useRe
 import type { SessionInfo } from "@/lib/types";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import type { TerminalProvider } from "@/lib/agents/terminal";
-import { AgentsPanel } from "./agents/AgentsPanel";
+import { AgentsPanel, type ActiveAgent, type AgentRevealRequest } from "./agents/AgentsPanel";
 import { applyBackgroundSessionEvent, type BackgroundAgentEvent } from "@/lib/session-background-sync";
 import { filterSessionsByQuery, getSessionDisplayTitle, resolveSessionLineage, sortSessionsByRecent } from "@/lib/session-list";
 import { getProductStatus } from "@/lib/product-status";
@@ -45,6 +45,10 @@ interface Props {
   onNewAgent?: (provider: TerminalProvider) => void;
   onAgentTerminalRemoved?: (terminalId: string) => void;
   onCodexSessionChanged?: (change: { id: string; action: "rename" | "archive" | "unarchive" | "delete"; name?: string }) => void;
+  activeAgent?: ActiveAgent;
+  /** Shows this session or terminal in the Agents list. */
+  agentRevealRequest?: AgentRevealRequest | null;
+  onAgentRevealHandled?: () => void;
   requestedModule?: "sessions" | "agents" | "explorer";
   explorerRevealKey?: number;
   explorerRevealRequest?: { path: string; key: number } | null;
@@ -329,7 +333,7 @@ function TianForgeTitle({ onOpenSettings }: { onOpenSettings?: () => void }) {
   </div>;
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onExplorerPathRenamed, onExplorerPathDeleted, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, gitReviewOpen, onNewAgent, onAgentTerminalRemoved, onCodexSessionChanged, requestedModule, explorerRevealKey, explorerRevealRequest, cwdResetKey = 0, onOpenSettings }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onExplorerPathRenamed, onExplorerPathDeleted, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, gitReviewOpen, onNewAgent, onAgentTerminalRemoved, onCodexSessionChanged, activeAgent, agentRevealRequest, onAgentRevealHandled, requestedModule, explorerRevealKey, explorerRevealRequest, cwdResetKey = 0, onOpenSettings }: Props) {
   const actions = useWorkspaceActions();
   const openExplorerFile = useCallback((path: string) => actions.openFile(path), [actions]);
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
@@ -372,6 +376,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [requestedModule, selectSidebarMode]);
   useEffect(() => { if (explorerRevealKey !== undefined) setExplorerOpen(true); }, [explorerRevealKey]);
   useEffect(() => { if (explorerRevealRequest) setExplorerOpen(true); }, [explorerRevealRequest]);
+  useEffect(() => { if (agentRevealRequest) selectSidebarMode("agents"); }, [agentRevealRequest, selectSidebarMode]);
   // Worktree switcher state
   const [worktreeState, setWorktreeState] = useState<WorktreeState | null>(null);
   const [wtDropdownOpen, setWtDropdownOpen] = useState(false);
@@ -1348,7 +1353,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
       {/* Optional external agents — separate from the Pi session browser and file explorer. */}
       {sidebarMode === "agents" && (selectedCwdProp || selectedCwd) && onNewAgent && <>
-        <AgentsPanel cwd={(selectedCwdProp || selectedCwd)!} refreshKey={agentsRefreshKey} style={agentsExpanded && explorerOpen ? { flex: `0 1 ${sessionPane.size}px`, height: sessionPane.size, minHeight: 90 } : agentsExpanded ? { flex: "1 1 0", minHeight: 90 } : { flex: "0 0 auto" }} onExpandedChange={setAgentsExpanded} onNewAgent={onNewAgent} onOpenCodexSession={actions.openCodexChat} onNewCodexChat={actions.newCodexChat} onOpenClaudeChat={actions.openClaudeChat} onNewClaudeChat={actions.newClaudeChat} onForkClaudeChat={actions.forkClaudeChat} onOpenTerminal={actions.openTerminal} onTerminalRemoved={onAgentTerminalRemoved} onCodexSessionChanged={onCodexSessionChanged} />
+        <AgentsPanel cwd={(selectedCwdProp || selectedCwd)!} refreshKey={agentsRefreshKey} style={agentsExpanded && explorerOpen ? { flex: `0 1 ${sessionPane.size}px`, height: sessionPane.size, minHeight: 90 } : agentsExpanded ? { flex: "1 1 0", minHeight: 90 } : { flex: "0 0 auto" }} onExpandedChange={setAgentsExpanded} onNewAgent={onNewAgent} onOpenCodexSession={actions.openCodexChat} onNewCodexChat={actions.newCodexChat} onOpenClaudeChat={actions.openClaudeChat} onNewClaudeChat={actions.newClaudeChat} onForkClaudeChat={actions.forkClaudeChat} onOpenTerminal={actions.openTerminal} onTerminalRemoved={onAgentTerminalRemoved} onCodexSessionChanged={onCodexSessionChanged} active={activeAgent} reveal={agentRevealRequest} onRevealHandled={onAgentRevealHandled} />
       </>}
 
       {/* Shared file explorer — remains mounted below either Pi or Agents. */}

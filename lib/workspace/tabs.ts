@@ -72,3 +72,12 @@ export const fileTabId = (filePath: string) => `file:${filePath}`;
 export const terminalTabId = (terminalId: string) => `terminal:${terminalId}`;
 export const codexChatTabId = (id: string) => `codex-chat:${id}`;
 export const claudeChatTabId = (id: string) => `claude-chat:${id}`;
+
+/** The Agents list entry behind a tab: a chat's session, or a terminal (also a terminal-backed Codex chat). */
+export function tabAgent(tab: Tab): { provider: TerminalProvider; sessionId: string | null; terminalId: string | null } | null {
+  // A terminal's `sourceSessionId` can be the session it forked from.
+  if (tab.kind === "terminal") return tab.terminalId ? { provider: tab.terminalProvider ?? "shell", sessionId: null, terminalId: tab.terminalId } : null;
+  if (tab.kind === "codex-chat") return tab.terminalId || tab.sourceSessionId ? { provider: "codex", sessionId: tab.sourceSessionId ?? null, terminalId: tab.terminalId ?? null } : null;
+  if (tab.kind === "claude-chat") return tab.sourceSessionId ? { provider: "claude", sessionId: tab.sourceSessionId, terminalId: null } : null;
+  return null;
+}

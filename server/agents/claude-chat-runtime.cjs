@@ -7,6 +7,7 @@ const workspaceStatus = require("../workspace-status.cjs");
 const notifications = require("../notifications.cjs");
 const catalog = require("./claude-sessions.cjs");
 const { attachProjectRoot } = require("./project-root.cjs");
+const { isValidModel } = require("./launch-options.cjs");
 
 // One entry per session with a Claude Chat open or a Claude process running.
 // The process starts on the first message, not when the chat opens: reading
@@ -27,7 +28,6 @@ function configure(options) { runtimeOptions = options ? { ...DEFAULT_RUNTIME_OP
 const probes = new Set();
 if (!global.__piWebClaudeChatCleanup) { global.__piWebClaudeChatCleanup = true; process.once("exit", () => { for (const state of sessions.values()) state.child?.kill(); for (const child of probes) child.kill(); }); }
 
-const MODELS = new Set(["", "sonnet", "opus", "haiku"]);
 const PERMISSION_MODES = new Set(["default", "acceptEdits", "plan", "bypassPermissions"]);
 const EVENTS_MAX = 2_000;
 // Sub-agent progress, shown on the Agent tool call that started it.
@@ -60,12 +60,27 @@ function commandList(raw) {
       ...(names(command.aliases).length ? { aliases: names(command.aliases).slice(0, 10) } : {}),
     }));
 }
-function rememberCommands(cwd, raw, ttl = COMMANDS_TTL) {
-  const commands = commandList(raw);
+// The models Claude offers (its `/model` menu): `{ id, label, resolved }`,
+// where `resolved` is the model ID an alias currently points to. The
+// `default` entry is not a model to pick; it names what "no model" runs.
+function modelList(raw) {
+  if (!Array.isArray(raw)) return { models: [], defaultModel: null };
+  const text = (value, max) => typeof value === "string" && value ? value.slice(0, max) : "";
+  const models = raw.filter((model) => typeof model?.value === "string" && model.value !== "default" && isValidModel(model.value))
+    .slice(0, 50)
+    .map((model) => ({ id: model.value, label: text(model.displayName, 80) || model.value, resolved: text(model.resolvedModel, 120) || model.value, description: text(model.description, 200) }));
+  return { models, defaultModel: text(raw.find((model) => model?.value === "default")?.resolvedModel, 120) || null };
+}
+// What `initialize` lists for `cwd`, cached; a list the answer lacks keeps
+// the cached one.
+function remember(cwd, response, ttl = COMMANDS_TTL) {
+  const cached = commandCache.get(cwd);
+  const models = Array.isArray(response?.models) ? modelList(response.models) : { models: cached?.models ?? [], defaultModel: cached?.defaultModel ?? null };
+  const entry = { until: Date.now() + ttl, commands: commandList(response?.commands), ...models };
   commandCache.delete(cwd);
-  commandCache.set(cwd, { until: Date.now() + ttl, commands });
+  commandCache.set(cwd, entry);
   while (commandCache.size > 50) commandCache.delete(commandCache.keys().next().value);
-  return commands;
+  return entry;
 }
 // A `claude` that answers `initialize` and is stopped: it starts no session
 // and makes no model request.
@@ -98,7 +113,7 @@ function probeCommands(cwd) {
         let record;
         try { record = JSON.parse(line); } catch { continue; }
         if (record?.type !== "control_response" || record.response?.request_id !== "pi-web-commands") continue;
-        if (record.response.subtype === "success") finish(null, record.response.response?.commands);
+        if (record.response.subtype === "success") finish(null, record.response.response ?? {});
         else finish(fail("rpc_error", record.response.error || "Claude did not list its commands"));
       }
     });
@@ -106,21 +121,25 @@ function probeCommands(cwd) {
   });
 }
 /**
- * Claude's slash commands for `cwd`: `{ name, description, argumentHint, aliases? }[]`;
+ * What Claude offers in `cwd`: `commands` (`{ name, description, argumentHint, aliases? }[]`),
+ * `models` (`{ id, label, resolved, description }[]`) and `defaultModel`;
  * empty (for a minute) when Claude cannot list them.
  */
-function commandsFor(cwd) {
+async function catalogFor(cwd) {
   const cached = commandCache.get(cwd);
-  if (cached && Date.now() < cached.until) return Promise.resolve(cached.commands);
-  let probe = commandProbes.get(cwd);
-  if (!probe) {
-    probe = probeCommands(cwd).then((raw) => rememberCommands(cwd, raw), (error) => {
-      console.warn(`[pi-web] Unable to list Claude's slash commands in ${cwd}: ${error.message}`);
-      return rememberCommands(cwd, [], COMMANDS_FAILED_TTL);
-    }).finally(() => commandProbes.delete(cwd));
-    commandProbes.set(cwd, probe);
+  let entry = cached && Date.now() < cached.until ? cached : null;
+  if (!entry) {
+    let probe = commandProbes.get(cwd);
+    if (!probe) {
+      probe = probeCommands(cwd).then((response) => remember(cwd, response), (error) => {
+        console.warn(`[pi-web] Unable to list Claude's slash commands in ${cwd}: ${error.message}`);
+        return remember(cwd, {}, COMMANDS_FAILED_TTL);
+      }).finally(() => commandProbes.delete(cwd));
+      commandProbes.set(cwd, probe);
+    }
+    entry = await probe;
   }
-  return probe;
+  return { commands: entry.commands, models: entry.models, defaultModel: entry.defaultModel };
 }
 // `starting` covers a send that is still restarting the process.
 function isBusy(state) { return Boolean(state.running || state.starting || state.incoming.size); }
@@ -369,7 +388,9 @@ function spawnChild(state, { model, permissionMode }) {
   // Sent before the first message, as the Agent SDK does. Older Claude
   // versions without it keep the probe's list.
   control(state, { subtype: "initialize" }).then((response) => {
-    if (state.child === child && Array.isArray(response.commands)) emit(state, { type: "pi/commands", commands: rememberCommands(state.cwd, response.commands) });
+    if (state.child !== child || !Array.isArray(response.commands)) return;
+    const { commands, models, defaultModel } = remember(state.cwd, response);
+    emit(state, { type: "pi/commands", commands, models, defaultModel });
   }, () => undefined);
   workspaceStatus.notify("claude_runtimes");
 }
@@ -381,7 +402,8 @@ function spawnChild(state, { model, permissionMode }) {
  */
 async function send(state, { text = "", images = [], uuid, model = "", permissionMode = "default" }) {
   if (typeof text !== "string" || !Array.isArray(images) || (!text.trim() && !images.length)) throw fail("invalid_request", "A message is required");
-  if (!MODELS.has(model)) throw fail("invalid_request", "Unsupported model");
+  // "" is Claude's default; otherwise an alias ("opus") or a full model ID ("claude-opus-5").
+  if (typeof model !== "string" || (model && !isValidModel(model))) throw fail("invalid_request", "Unsupported model");
   if (!PERMISSION_MODES.has(permissionMode)) throw fail("invalid_request", "Unsupported permission mode");
   if (CLEAR_COMMANDS.has(/^\/(\S+)/.exec(text.trim())?.[1])) throw fail("invalid_request", "/clear would move this chat to a new Claude session. Start a new chat instead.");
   if (isBusy(state)) throw fail("session_busy", "Claude is still working on the previous message");
@@ -416,6 +438,26 @@ function control(state, request, timeoutMs = 10_000) {
     state.controls.set(requestId, { resolve, reject, timer });
     try { write(state, { type: "control_request", request_id: requestId, request }); } catch (error) { clearTimeout(timer); state.controls.delete(requestId); reject(error); }
   });
+}
+
+/**
+ * Switches a live Claude's permission mode now, mid-turn included (what
+ * Shift+Tab does in the CLI). Resolves `true` when it applied; `false`
+ * without a process, or when Claude refuses (bypass needs a process launched
+ * with it): the next message then restarts Claude in that mode.
+ */
+async function setPermissionMode(state, permissionMode) {
+  if (!PERMISSION_MODES.has(permissionMode)) throw fail("invalid_request", "Unsupported permission mode");
+  if (!state.child) return false;
+  if (state.permissionMode === permissionMode) return true;
+  try { await control(state, { subtype: "set_permission_mode", mode: permissionMode }); } catch { return false; }
+  // Claude's own status record for the switch then matches and is dropped.
+  if (state.permissionMode !== permissionMode) {
+    state.permissionMode = permissionMode;
+    workspaceStatus.notify("claude_runtimes");
+    emit(state, { type: "system", subtype: "status", compacting: state.compacting, permissionMode });
+  }
+  return true;
 }
 
 /** Stops the running turn; Claude ends it with a `result` and keeps the process. */
@@ -505,6 +547,6 @@ function describe(state) {
   return { runtimeId: state.runtimeId, running: state.running, compacting: state.compacting, model: state.model, launchModel: state.launchModel, permissionMode: state.permissionMode, process: Boolean(state.child), requests: pendingRequests(state) };
 }
 
-module.exports = { configure, commandsFor, open, get, send, interrupt, respond, stopAndWait, shutdownRuntimes, subscribe, runtimeForSession, isBusySession, listRuntimes, describe, handleRecord };
+module.exports = { configure, catalogFor, open, get, send, setPermissionMode, interrupt, respond, stopAndWait, shutdownRuntimes, subscribe, runtimeForSession, isBusySession, listRuntimes, describe, handleRecord };
 
 workspaceStatus.registerProvider("claude_runtimes", () => ({ runtimes: listRuntimes() }));

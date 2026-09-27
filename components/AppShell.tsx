@@ -12,7 +12,8 @@ import { NewAgentDialog } from "./agents/NewAgentDialog";
 import { dialogOverlayStyle } from "./agents/ConfirmDialog";
 import { useDialogEscape } from "./agents/use-dialog-escape";
 import { TabBar } from "./TabBar";
-import { claudeChatTabId, codexChatTabId, fileTabId, terminalTabId, GIT_REVIEW_TAB_ID, type CenterTab, type ClaudeChatTab, type ClaudePermissionMode, type CodexChatTab, type TabStatus, type TerminalTab } from "@/lib/workspace/tabs";
+import { claudeChatTabId, codexChatTabId, fileTabId, tabAgent, terminalTabId, GIT_REVIEW_TAB_ID, type CenterTab, type ClaudeChatTab, type ClaudePermissionMode, type CodexChatTab, type Tab, type TabStatus, type TerminalTab } from "@/lib/workspace/tabs";
+import type { AgentRevealRequest } from "./agents/AgentsPanel";
 import { centerReducer, sideReducer, initialCenterState, initialSideState, type TerminalSplit } from "@/lib/workspace/panel-state";
 import { loadCenterState, saveCenterState, loadSideState, saveSideState, type SideSnapshotCache } from "@/lib/workspace/panel-storage";
 import { getMissingSplitTerminalTabs } from "@/lib/terminal-restore";
@@ -113,6 +114,7 @@ export function AppShell() {
   const [mobileSidebarModule, setMobileSidebarModule] = useState<"sessions" | "agents" | "explorer">("sessions");
   const [mobileExplorerRevealKey, setMobileExplorerRevealKey] = useState(0);
   const [explorerRevealRequest, setExplorerRevealRequest] = useState<{ path: string; key: number } | null>(null);
+  const [agentRevealRequest, setAgentRevealRequest] = useState<AgentRevealRequest | null>(null);
   // On mobile the sidebar is an overlay drawer; hide it by default so the chat
   // is visible on load. Runs once the breakpoint resolves after hydration.
   useEffect(() => {
@@ -202,6 +204,10 @@ export function AppShell() {
   const sideCacheRef = useRef<SideSnapshotCache>(new Map());
   const { tabs: workspaceTabs, activeId: activeWorkspaceTabId, split: terminalSplit } = center;
   const { tabs: fileTabs, activeId: activeFileTabId, open: rightPanelOpen } = side;
+  const activeAgent = useMemo(() => {
+    const tab = workspaceTabs.find((candidate) => candidate.id === activeWorkspaceTabId);
+    return (tab && tabAgent(tab)) ?? undefined;
+  }, [workspaceTabs, activeWorkspaceTabId]);
   // File tabs in the side panel are not kept mounted the way center-workspace
   // tabs are (see workspace/SidePanel.tsx) — switching away from, or closing,
   // a dirty file tab would otherwise discard its draft silently. FileTabView
@@ -727,6 +733,19 @@ export function AppShell() {
     if (isMobile) {
       prepareMobileOverlayHistory();
       setMobileSidebarModule("explorer");
+      setRightPanelOpen(false);
+    }
+  }, [isMobile, prepareMobileOverlayHistory, setRightPanelOpen]);
+
+  const clearAgentRevealRequest = useCallback(() => setAgentRevealRequest(null), []);
+  const handleRevealAgent = useCallback((tab: Tab) => {
+    const agent = tabAgent(tab);
+    if (!agent) return;
+    setAgentRevealRequest({ ...agent, key: Date.now() });
+    setSidebarOpen(true);
+    if (isMobile) {
+      prepareMobileOverlayHistory();
+      setMobileSidebarModule("agents");
       setRightPanelOpen(false);
     }
   }, [isMobile, prepareMobileOverlayHistory, setRightPanelOpen]);
@@ -1408,6 +1427,9 @@ export function AppShell() {
         onNewAgent={setNewTerminalProvider}
         onAgentTerminalRemoved={handleAgentTerminalRemoved}
         onCodexSessionChanged={handleCodexSessionChanged}
+        activeAgent={activeAgent}
+        agentRevealRequest={agentRevealRequest}
+        onAgentRevealHandled={clearAgentRevealRequest}
         requestedModule={isMobile ? mobileSidebarModule : undefined}
         explorerRevealKey={isMobile ? mobileExplorerRevealKey : undefined}
         explorerRevealRequest={explorerRevealRequest}
@@ -1619,6 +1641,7 @@ export function AppShell() {
               onCloseTab={handleCloseWorkspaceTab}
               onCloseTabs={closeWorkspaceTabsSequentially}
               onReorderTabs={(id, beforeId) => dispatchCenter({ type: "reorder", id, beforeId })}
+              onRevealAgent={handleRevealAgent}
             />
           </div>
           {showWorkspaceTabBar && topRightControls}
