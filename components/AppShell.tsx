@@ -9,6 +9,8 @@ import { SessionSidebar } from "./SessionSidebar";
 import { ProjectRail } from "./ProjectRail";
 import { ChatWindow } from "./ChatWindow";
 import { NewAgentDialog } from "./agents/NewAgentDialog";
+import { dialogOverlayStyle } from "./agents/ConfirmDialog";
+import { useDialogEscape } from "./agents/use-dialog-escape";
 import { TabBar } from "./TabBar";
 import { claudeChatTabId, codexChatTabId, fileTabId, terminalTabId, GIT_REVIEW_TAB_ID, type CenterTab, type ClaudeChatTab, type ClaudePermissionMode, type CodexChatTab, type TabStatus, type TerminalTab } from "@/lib/workspace/tabs";
 import { centerReducer, sideReducer, initialCenterState, initialSideState, type TerminalSplit } from "@/lib/workspace/panel-state";
@@ -911,48 +913,54 @@ export function AppShell() {
     finalizeActiveCloseBatch();
   }, [pendingCloseQueue, classifyBusyTab, openBusyTabConfirmation, removeWorkspaceTab, finalizeActiveCloseBatch]);
 
-  const closeTerminalTab = useCallback(async (stop: boolean) => {
-    const target = pendingTerminalClose;
+  // Resolves the open busy-tab dialog. Keep running just closes the tab (the
+  // terminal process, or the chat's server runtime finishing the turn or
+  // holding the approval with no viewer, carries on). Stop first stops the
+  // terminal, or sends the same interrupt as the chat's Stop button.
+  const closeBusyTab = useCallback(async (kind: "terminal" | "chat", stop: boolean) => {
+    const target = kind === "terminal" ? pendingTerminalClose : pendingChatClose;
     if (!target) return;
-    if (!stop) { setPendingTerminalClose(null); removeWorkspaceTab(target.tabId); advanceCloseQueue(); return; }
-    setTerminalCloseBusy(true);
-    setTerminalCloseError(null);
-    try {
-      const response = await fetch(`/api/terminals/${encodeURIComponent(target.terminal.id)}/stop`, { method: "POST" });
-      const data = await response.json() as { terminal?: TerminalSession; error?: string };
-      if (!response.ok) throw new Error(data.error || "Unable to stop terminal");
-      if (data.terminal) updateTerminals((current) => [...current.filter((item) => item.id !== data.terminal!.id), data.terminal!]);
-      setPendingTerminalClose(null);
+    const finish = () => {
+      if (kind === "terminal") setPendingTerminalClose(null);
+      else setPendingChatClose(null);
       removeWorkspaceTab(target.tabId);
       advanceCloseQueue();
-    } catch (cause) { setTerminalCloseError(cause instanceof Error ? cause.message : "Unable to stop terminal"); }
+    };
+    if (!stop) { finish(); return; }
+    setTerminalCloseBusy(true);
+    setTerminalCloseError(null);
+    const fallbackError = kind === "terminal" ? "Unable to stop terminal" : "Unable to stop the chat";
+    try {
+      if (pendingTerminalClose && kind === "terminal") {
+        const response = await fetch(`/api/terminals/${encodeURIComponent(pendingTerminalClose.terminal.id)}/stop`, { method: "POST" });
+        const data = await response.json() as { terminal?: TerminalSession; error?: string };
+        if (!response.ok) throw new Error(data.error || fallbackError);
+        if (data.terminal) updateTerminals((current) => [...current.filter((item) => item.id !== data.terminal!.id), data.terminal!]);
+      } else if (pendingChatClose && kind === "chat") {
+        const { chat } = pendingChatClose;
+        const response = await fetch(`/api/${chat.kind}/chat/${encodeURIComponent(chat.id)}/interrupt`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(chat.kind === "claude" ? { cwd: chat.cwd } : {}),
+        });
+        const data = await response.json().catch(() => ({})) as { error?: string; code?: string };
+        // The turn ended meanwhile: there is nothing left to stop.
+        if (!response.ok && data.code !== "no_active_turn") throw new Error(data.error || fallbackError);
+      }
+      finish();
+    } catch (cause) { setTerminalCloseError(cause instanceof Error ? cause.message : fallbackError); }
     finally { setTerminalCloseBusy(false); }
-  }, [advanceCloseQueue, pendingTerminalClose, removeWorkspaceTab, updateTerminals]);
+  }, [advanceCloseQueue, pendingChatClose, pendingTerminalClose, removeWorkspaceTab, updateTerminals]);
 
-  // Keep running: the server runtime finishes the turn (or holds the approval)
-  // with no viewer. Stop: the same interrupt as the chat's Stop button.
-  const closeChatTab = useCallback(async (stop: boolean) => {
-    const target = pendingChatClose;
-    if (!target) return;
-    if (!stop) { setPendingChatClose(null); removeWorkspaceTab(target.tabId); advanceCloseQueue(); return; }
-    setTerminalCloseBusy(true);
-    setTerminalCloseError(null);
-    try {
-      const { chat } = target;
-      const response = await fetch(`/api/${chat.kind}/chat/${encodeURIComponent(chat.id)}/interrupt`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(chat.kind === "claude" ? { cwd: chat.cwd } : {}),
-      });
-      const data = await response.json().catch(() => ({})) as { error?: string; code?: string };
-      // The turn ended meanwhile: there is nothing left to stop.
-      if (!response.ok && data.code !== "no_active_turn") throw new Error(data.error || "Unable to stop the chat");
-      setPendingChatClose(null);
-      removeWorkspaceTab(target.tabId);
-      advanceCloseQueue();
-    } catch (cause) { setTerminalCloseError(cause instanceof Error ? cause.message : "Unable to stop the chat"); }
-    finally { setTerminalCloseBusy(false); }
-  }, [advanceCloseQueue, pendingChatClose, removeWorkspaceTab]);
+  // Cancel stops the bulk-close queue outright (see the dialogs below). Only
+  // one of the two pending slots is ever set, so clearing both is safe.
+  const cancelPendingClose = useCallback(() => {
+    if (terminalCloseBusy) return;
+    setPendingTerminalClose(null);
+    setPendingChatClose(null);
+    setPendingCloseQueue([]);
+    finalizeActiveCloseBatch();
+  }, [finalizeActiveCloseBatch, terminalCloseBusy]);
 
   const handleSelectWorkspaceTab = useCallback((tabId: string) => {
     dispatchCenter({ type: "select", id: tabId });
@@ -1862,8 +1870,8 @@ export function AppShell() {
         brief: cancelling keeps the current tab open AND leaves any remaining
         queued busy tabs open too, with no further dialogs) rather than
         advancing to the next queued tab. */}
-    {pendingTerminalClose && <RunningCloseDialog label="Close terminal" title={`Close ${pendingTerminalClose.terminal.provider} terminal?`} description={`The process is still running in ${pendingTerminalClose.terminal.cwd}. You can keep it running and reopen it from Agents, or stop it now.`} busy={terminalCloseBusy} error={terminalCloseError} onCancel={() => { if (!terminalCloseBusy) { setPendingTerminalClose(null); setPendingCloseQueue([]); finalizeActiveCloseBatch(); } }} onKeepRunning={() => void closeTerminalTab(false)} onStop={() => void closeTerminalTab(true)} />}
-    {pendingChatClose && <RunningCloseDialog label="Close chat" {...chatCloseText(pendingChatClose.label, pendingChatClose.chat)} busy={terminalCloseBusy} error={terminalCloseError} onCancel={() => { if (!terminalCloseBusy) { setPendingChatClose(null); setPendingCloseQueue([]); finalizeActiveCloseBatch(); } }} onKeepRunning={() => void closeChatTab(false)} onStop={() => void closeChatTab(true)} />}
+    {pendingTerminalClose && <RunningCloseDialog label="Close terminal" title={`Close ${pendingTerminalClose.terminal.provider} terminal?`} description={`The process is still running in ${pendingTerminalClose.terminal.cwd}. You can keep it running and reopen it from Agents, or stop it now.`} busy={terminalCloseBusy} error={terminalCloseError} onCancel={cancelPendingClose} onKeepRunning={() => void closeBusyTab("terminal", false)} onStop={() => void closeBusyTab("terminal", true)} />}
+    {pendingChatClose && <RunningCloseDialog label="Close chat" {...chatCloseText(pendingChatClose.label, pendingChatClose.chat)} busy={terminalCloseBusy} error={terminalCloseError} onCancel={cancelPendingClose} onKeepRunning={() => void closeBusyTab("chat", false)} onStop={() => void closeBusyTab("chat", true)} />}
     {settingsOpen && <SettingsPanel
       isDark={isDark}
       cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd}
@@ -1878,13 +1886,8 @@ export function AppShell() {
 }
 
 function RunningCloseDialog({ label, title, description, busy, error, onCancel, onKeepRunning, onStop }: { label: string; title: string; description: string; busy: boolean; error: string | null; onCancel: () => void; onKeepRunning: () => void; onStop: () => void }) {
-  useEffect(() => {
-    if (busy) return;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onCancel(); };
-    document.addEventListener("keydown", onKeyDown);
-    return () => document.removeEventListener("keydown", onKeyDown);
-  }, [busy, onCancel]);
-  return <div role="dialog" aria-modal="true" aria-label={label} onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }} style={{ position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 20, background: "rgb(0 0 0 / 55%)" }}><section style={{ width: "min(100%, 420px)", padding: 18, border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 20px 60px rgb(0 0 0 / 45%)" }}><strong>{title}</strong><p style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{description}</p>{error && <p role="alert" style={{ color: "#f87171", fontSize: 12 }}>{error}</p>}<div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginTop: 18 }}><button type="button" disabled={busy} onClick={onCancel} style={terminalCloseButtonStyle}>Cancel</button><button type="button" disabled={busy} onClick={onKeepRunning} style={terminalCloseButtonStyle}>Keep running</button><button type="button" disabled={busy} onClick={onStop} style={{ ...terminalCloseButtonStyle, color: "#ef4444", borderColor: "rgb(239 68 68 / 45%)", background: "rgb(239 68 68 / 10%)" }}>{busy ? "Stopping…" : "Stop and close"}</button></div></section></div>;
+  useDialogEscape(onCancel, busy);
+  return <div role="dialog" aria-modal="true" aria-label={label} onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }} style={dialogOverlayStyle}><section style={{ width: "min(100%, 420px)", padding: 18, border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 20px 60px rgb(0 0 0 / 45%)" }}><strong>{title}</strong><p style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{description}</p>{error && <p role="alert" style={{ color: "#f87171", fontSize: 12 }}>{error}</p>}<div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginTop: 18 }}><button type="button" disabled={busy} onClick={onCancel} style={terminalCloseButtonStyle}>Cancel</button><button type="button" disabled={busy} onClick={onKeepRunning} style={terminalCloseButtonStyle}>Keep running</button><button type="button" disabled={busy} onClick={onStop} style={{ ...terminalCloseButtonStyle, color: "#ef4444", borderColor: "rgb(239 68 68 / 45%)", background: "rgb(239 68 68 / 10%)" }}>{busy ? "Stopping…" : "Stop and close"}</button></div></section></div>;
 }
 
 function chatCloseText(label: string, chat: BusyChat): { title: string; description: string } {

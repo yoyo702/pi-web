@@ -304,13 +304,8 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
       setDiffError(null);
     }
     const params = new URLSearchParams({ cwd: repositoryCwd, path: selected.file.filePath, scope: selected.scope });
-    void fetch(`/api/git/diff?${params}`, { signal: controller.signal })
-      .then(async (res) => {
-        // An error response (e.g. an HTML page from a proxy or an auth
-        // redirect) may not be JSON at all; fall back to the status text
-        // instead of surfacing a raw parse error like "Unexpected token '<'".
-        const next = await res.json().catch(() => ({})) as GitFileDiffResponse & { error?: string };
-        if (!res.ok) throw new Error(next.error ?? `Failed to load diff (${res.status})`);
+    void loadGitFileDiff(`/api/git/diff?${params}`, controller.signal)
+      .then((next) => {
         setDiff(next);
         setDiffError(null);
       })
@@ -1269,6 +1264,16 @@ function CommitFileRow({ file, selected, onSelect }: { file: GitCommitFile; sele
   );
 }
 
+/** Fetches one file's diff. An error response (e.g. an HTML page from a
+ * proxy or an auth redirect) may not be JSON at all; fall back to the status
+ * text instead of surfacing a raw parse error like "Unexpected token '<'". */
+async function loadGitFileDiff(url: string, signal: AbortSignal): Promise<GitFileDiffResponse> {
+  const res = await fetch(url, { signal });
+  const next = await res.json().catch(() => ({})) as GitFileDiffResponse & { error?: string };
+  if (!res.ok) throw new Error(next.error ?? `Failed to load diff (${res.status})`);
+  return next;
+}
+
 function CommitFileDiff({ cwd, hash, path }: { cwd: string; hash: string; path: string }) {
   const [diff, setDiff] = useState<GitFileDiffResponse | null>(null);
   const [diffError, setDiffError] = useState<string | null>(null);
@@ -1280,12 +1285,8 @@ function CommitFileDiff({ cwd, hash, path }: { cwd: string; hash: string; path: 
     setLoading(true);
     setDiff(null);
     setDiffError(null);
-    void fetch(`/api/git/commit?${new URLSearchParams({ cwd, hash, path })}`, { signal: controller.signal })
-      .then(async (res) => {
-        // An error response may not be JSON at all; fall back to the status
-        // text instead of surfacing a raw parse error like "Unexpected token '<'".
-        const next = await res.json().catch(() => ({})) as GitFileDiffResponse & { error?: string };
-        if (!res.ok) throw new Error(next.error ?? `Failed to load diff (${res.status})`);
+    void loadGitFileDiff(`/api/git/commit?${new URLSearchParams({ cwd, hash, path })}`, controller.signal)
+      .then((next) => {
         setDiff(next);
       })
       .catch((cause: unknown) => {
