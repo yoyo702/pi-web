@@ -5,7 +5,7 @@ const crypto = require("node:crypto");
 const workspaceStatus = require("../workspace-status.cjs");
 const requests = require("./codex-requests.cjs");
 const notifications = require("../notifications.cjs");
-const { resolveProjectRoot } = require("./project-root.cjs");
+const { attachProjectRoot } = require("./project-root.cjs");
 const sessions = new Map();
 const modelCatalogCache = global.__piWebCodexModelCatalogCache || new Map();
 global.__piWebCodexModelCatalogCache = modelCatalogCache;
@@ -142,8 +142,7 @@ function spawnRuntime(threadId, cwd) {
   // Event sequence numbers restart with each process; runtimeId lets a
   // reconnecting client tell a new process from the one it last saw.
   const state = { child, threadId, cwd, runtimeId: crypto.randomUUID().slice(0, 8), nextId: 1, nextEventSeq: 1, activeTurnId: null, pending: new Map(), incoming: new Map(), listeners: new Set(), buffer: "", stderrTail: "", failure: null, events: [], idleTimer: null, loaded: false };
-  state.projectRoot = cwd;
-  resolveProjectRoot(cwd).then((root) => { state.projectRoot = root; }).catch(() => {});
+  attachProjectRoot(state, cwd);
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => { state.buffer += chunk; let index; while ((index = state.buffer.indexOf("\n")) >= 0) { const line = state.buffer.slice(0, index); state.buffer = state.buffer.slice(index + 1); try { handleProtocolMessage(state, JSON.parse(line)); } catch {} } });
   child.stderr.setEncoding("utf8");

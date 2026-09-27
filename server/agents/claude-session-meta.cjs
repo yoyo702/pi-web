@@ -26,15 +26,23 @@ function isEntry(value) {
     && (value.archived === undefined || typeof value.archived === "boolean");
 }
 
-function load() {
+/**
+ * Reads the sidecar. `verified` is true only when the file exists and parsed
+ * into the expected shape, so a following `save` has nothing to quarantine.
+ */
+function read() {
   try {
     const parsed = JSON.parse(fs.readFileSync(file(), "utf8"));
-    if (!parsed || typeof parsed.sessions !== "object" || parsed.sessions === null) return {};
-    return Object.fromEntries(Object.entries(parsed.sessions).filter(([, value]) => isEntry(value)));
+    if (!parsed || typeof parsed.sessions !== "object" || parsed.sessions === null) return { sessions: {}, verified: false };
+    return { sessions: Object.fromEntries(Object.entries(parsed.sessions).filter(([, value]) => isEntry(value))), verified: true };
   } catch (error) {
     if (error?.code !== "ENOENT") console.warn(`[pi-web] Ignoring unreadable Claude session metadata file: ${error.message}`);
-    return {};
+    return { sessions: {}, verified: false };
   }
+}
+
+function load() {
+  return read().sessions;
 }
 
 // Before a save would silently overwrite a file `load()` could not parse (bad
@@ -56,12 +64,17 @@ function quarantineIfCorrupt(target) {
   } catch { /* best effort; a concurrent save may have already moved or replaced it */ }
 }
 
-function save(sessions) {
+/**
+ * `verified` skips the corrupt-file check when the caller just read the file
+ * successfully in this same synchronous step (see `read`), so it is not
+ * re-read and re-parsed; every other save keeps the protection.
+ */
+function save(sessions, { verified = false } = {}) {
   const target = file();
   const temp = `${target}.${process.pid}.tmp`;
   fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
   fs.rmSync(temp, { force: true });
-  quarantineIfCorrupt(target);
+  if (!verified) quarantineIfCorrupt(target);
   fs.writeFileSync(temp, JSON.stringify({ version: 1, sessions }), { mode: 0o600 });
   fs.renameSync(temp, target);
 }
@@ -85,24 +98,24 @@ function rename(id, name) {
   if (typeof name !== "string" || !name.trim() || name.trim().length > 120) {
     throw new MetaError("invalid_name", "Session name must be between 1 and 120 characters");
   }
-  const all = load();
+  const { sessions: all, verified } = read();
   all[id] = { ...all[id], title: name.trim() };
-  save(all);
+  save(all, { verified });
   return all[id];
 }
 
 function setArchived(id, archived) {
-  const all = load();
+  const { sessions: all, verified } = read();
   all[id] = { ...all[id], archived: Boolean(archived) };
-  save(all);
+  save(all, { verified });
   return all[id];
 }
 
 function remove(id) {
-  const all = load();
+  const { sessions: all, verified } = read();
   if (!(id in all)) return;
   delete all[id];
-  save(all);
+  save(all, { verified });
 }
 
 module.exports = { MetaError, get, getAll, rename, setArchived, remove };

@@ -35,10 +35,24 @@ declare global {
 }
 
 const PROJECT_CACHE_TTL_MS = 60_000;
+// Size bound so a long-running server with many distinct cwds doesn't grow
+// this cache unbounded: at the cap, drop the oldest entry (Map iteration order
+// is insertion order) before adding a new one. Same limit as
+// server/agents/project-root.cjs.
+const CACHE_MAX_ENTRIES = 500;
 
 function getProjectCache(): Map<string, { info: ProjectInfo; expiresAt: number }> {
   if (!globalThis.__piProjectCache) globalThis.__piProjectCache = new Map();
   return globalThis.__piProjectCache;
+}
+
+function setCachedProject(cwd: string, info: ProjectInfo): void {
+  const cache = getProjectCache();
+  if (!cache.has(cwd) && cache.size >= CACHE_MAX_ENTRIES) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey !== undefined) cache.delete(oldestKey);
+  }
+  cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
 }
 
 export function invalidateProjectCache(): void {
@@ -74,7 +88,7 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
   try {
     if (!existsSync(cwd)) {
       info = inferRemovedWorktree(cwd) ?? { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
-      cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
+      setCachedProject(cwd, info);
       return info;
     }
     const out = await git(cwd, [
@@ -103,7 +117,7 @@ export async function resolveProject(cwd: string): Promise<ProjectInfo> {
     info = { projectRoot: cwd, branch: null, isWorktree: false, isTopLevel: false };
   }
 
-  cache.set(cwd, { info, expiresAt: Date.now() + PROJECT_CACHE_TTL_MS });
+  setCachedProject(cwd, info);
   return info;
 }
 

@@ -61,8 +61,17 @@ async function resolveProjectRoot(cwd) {
   return root;
 }
 
+/**
+ * Sets `state.projectRoot` to `cwd` right away, then fire-and-forget resolves
+ * the real project root and stores it on `state` when it arrives.
+ */
+function attachProjectRoot(state, cwd) {
+  state.projectRoot = cwd;
+  resolveProjectRoot(cwd).then((root) => { state.projectRoot = root; }).catch(() => {});
+}
+
 function _resetForTests() {
   cache.clear();
 }
 
-module.exports = { resolveProjectRoot, _resetForTests };
+module.exports = { resolveProjectRoot, attachProjectRoot, _resetForTests };

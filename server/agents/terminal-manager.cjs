@@ -9,7 +9,7 @@ const { ensureNodePtySpawnHelper } = require("./ensure-node-pty-helper.cjs");
 const { PERMISSION_MODES, MAX_PROMPT_LENGTH, isValidModel } = require("./launch-options.cjs");
 const workspaceStatus = require("../workspace-status.cjs");
 const notifications = require("../notifications.cjs");
-const { resolveProjectRoot } = require("./project-root.cjs");
+const { attachProjectRoot } = require("./project-root.cjs");
 
 const MAX_BUFFER_BYTES = 1024 * 1024;
 const MAX_RUNNING_TERMINALS = 20;
@@ -365,8 +365,7 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
     activity: hookToken ? (typeof initialPrompt === "string" && initialPrompt.trim() ? "working" : "waiting") : null, hookToken, titleTail: "",
   };
   state.sessions.set(session.id, session);
-  session.projectRoot = cwd;
-  resolveProjectRoot(cwd).then((root) => { session.projectRoot = root; }).catch(() => {});
+  attachProjectRoot(session, cwd);
   workspaceStatus.notify("terminals");
   terminal.onData((data) => appendOutput(session, data));
   terminal.onExit(({ exitCode, signal }) => {

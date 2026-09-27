@@ -63,3 +63,14 @@ test("resolveProjectRoot caps the cache size, dropping the oldest entry first", 
   assert.equal(cache.has("/nonexistent/pi-web-project-root-cap-4"), false);
   assert.equal(cache.has(`/nonexistent/pi-web-project-root-cap-${limit + 4}`), true);
 });
+
+test("attachProjectRoot sets the cwd immediately, then the resolved root", async () => {
+  _resetForTests();
+  const { attachProjectRoot } = require("./project-root.cjs");
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-project-root-attach-")));
+  const state = {};
+  attachProjectRoot(state, dir);
+  assert.equal(state.projectRoot, dir);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(state.projectRoot, dir);
+});

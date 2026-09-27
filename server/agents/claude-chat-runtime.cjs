@@ -6,7 +6,7 @@ const crypto = require("node:crypto");
 const workspaceStatus = require("../workspace-status.cjs");
 const notifications = require("../notifications.cjs");
 const catalog = require("./claude-sessions.cjs");
-const { resolveProjectRoot } = require("./project-root.cjs");
+const { attachProjectRoot } = require("./project-root.cjs");
 
 // One entry per session with a Claude Chat open or a Claude process running.
 // The process starts on the first message, not when the chat opens: reading
@@ -172,8 +172,7 @@ function open(sessionId, cwd, { title = "", fork = null } = {}) {
     nextEventSeq: 1, droppedThrough: 0, events: [], listeners: new Set(), idleTimer: null,
   };
   sessions.set(sessionId, state);
-  state.projectRoot = cwd;
-  resolveProjectRoot(cwd).then((root) => { state.projectRoot = root; }).catch(() => {});
+  attachProjectRoot(state, cwd);
   scheduleIdleShutdown(state);
   return state;
 }

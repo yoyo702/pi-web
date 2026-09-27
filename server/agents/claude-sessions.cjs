@@ -233,21 +233,21 @@ function remove(id, cwd) {
 
 /**
  * Renames a session via the sidecar overlay (`claude-session-meta.cjs`);
- * Claude's own `.jsonl` file is never modified. `requireSession` runs twice:
- * once to confirm the id belongs to `cwd` before touching the sidecar, and
- * once after to return a fresh session object with the overlay applied,
- * mirroring `remove`'s validate-then-act shape.
+ * Claude's own `.jsonl` file is never modified. `requireSession` confirms the
+ * id belongs to `cwd` before touching the sidecar, mirroring `remove`'s
+ * validate-then-act shape; the updated overlay is then applied to that
+ * same session object.
  */
 function rename(id, cwd, name) {
-  requireSession(id, cwd);
+  const session = requireSession(id, cwd);
   const updated = meta.rename(id, name);
-  return { ...requireSession(id, cwd), title: updated.title, archived: Boolean(updated.archived) };
+  return { ...session, title: updated.title, archived: Boolean(updated.archived) };
 }
 
 function setArchived(id, cwd, archived) {
-  requireSession(id, cwd);
+  const session = requireSession(id, cwd);
   const updated = meta.setArchived(id, Boolean(archived));
-  return { ...requireSession(id, cwd), archived: Boolean(updated.archived) };
+  return { ...session, archived: Boolean(updated.archived) };
 }
 
 // Transcript records for Claude Chat. Tool results, tool inputs and pasted

@@ -91,3 +91,25 @@ test("a corrupt sidecar is moved aside (not silently overwritten) the next time 
   assert.equal(quarantined.length, 1);
   assert.equal(fs.readFileSync(path.join(path.dirname(target), quarantined[0]), "utf8"), "{ not json, definitely-not-recoverable-garbage");
 });
+
+test("valid JSON in an unexpected shape is still moved aside before a save", (t) => {
+  const meta = withMetaFile(t);
+  const target = process.env.PI_WEB_CLAUDE_SESSION_META_FILE;
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, JSON.stringify({ sessions: null }));
+  meta.setArchived("s1", true);
+  assert.equal(meta.get("s1").archived, true);
+  const quarantined = fs.readdirSync(path.dirname(target)).filter((name) => name.startsWith(`${path.basename(target)}.corrupt-`));
+  assert.equal(quarantined.length, 1);
+});
+
+test("saving over a sidecar that was just read successfully keeps its entries and quarantines nothing", (t) => {
+  const meta = withMetaFile(t);
+  const target = process.env.PI_WEB_CLAUDE_SESSION_META_FILE;
+  meta.rename("s1", "First");
+  meta.setArchived("s2", true);
+  meta.remove("s1");
+  assert.deepEqual(meta.getAll(), { s2: { archived: true } });
+  const quarantined = fs.readdirSync(path.dirname(target)).filter((name) => name.startsWith(`${path.basename(target)}.corrupt-`));
+  assert.equal(quarantined.length, 0);
+});
