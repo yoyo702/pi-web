@@ -1,6 +1,7 @@
 "use client";
 
 import { forwardRef, useState, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import { getFileIcon, FolderIcon } from "./FileIcons";
 import {
   encodeFilePathForApi,
@@ -1283,11 +1284,12 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         {contextMenu.node && !contextMenu.node.isDir && <a href={`/api/files/${encodeFilePathForApi(contextMenu.node.fullPath)}?type=download`} download onClick={() => setContextMenu(null)} role="menuitem" style={{ ...menuButtonStyle, textDecoration: "none" }}>Download</a>}
       </div>}
 
-      {deleteNode && <div data-explorer-overlay role="alertdialog" aria-modal="true" aria-label="Confirm deletion" style={confirmStyle}>
+      {/* Portaled so ancestor stacking contexts (e.g. panel resize handles) cannot cover it. */}
+      {deleteNode && createPortal(<div data-explorer-overlay role="alertdialog" aria-modal="true" aria-label="Confirm deletion" style={confirmStyle}>
         <strong style={{ color: "var(--text)", fontSize: 12 }}>Delete {deleteNode.name}?</strong>
         <span style={{ color: "var(--text-dim)", fontSize: 10 }}>This cannot be undone.</span>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 6 }}><button type="button" disabled={mutationBusy} onClick={() => setDeleteNode(null)} style={secondaryButtonStyle}>Cancel</button><button type="button" disabled={mutationBusy} onClick={() => void confirmDelete()} style={dangerButtonStyle}>{mutationBusy ? "Deleting…" : "Delete"}</button></div>
-      </div>}
+      </div>, document.body)}
     </div>
   );
 });

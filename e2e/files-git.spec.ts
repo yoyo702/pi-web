@@ -228,9 +228,7 @@ test("deleting a file with unsaved edits from the Explorer closes its tab with a
   page.on("dialog", (dialog) => { dialogShown = true; void dialog.dismiss(); });
   await row.click({ button: "right" });
   await page.getByRole("menuitem", { name: "Delete…" }).click();
-  // Keyboard-activate: with the side panel open, its resize handle overlaps
-  // the centred confirm dialog and would intercept a pointer click.
-  await page.getByRole("alertdialog", { name: "Confirm deletion" }).getByRole("button", { name: "Delete" }).press("Enter");
+  await page.getByRole("alertdialog", { name: "Confirm deletion" }).getByRole("button", { name: "Delete" }).click();
 
   await expect(page.getByTestId("discarded-draft-notice")).toContainText("README.md was deleted. Unsaved changes were discarded.");
   await expect(page.getByRole("tab", { name: "README.md" })).toHaveCount(0);
