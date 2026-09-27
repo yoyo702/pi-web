@@ -43,11 +43,14 @@ import { useMobileOverlayHistory } from "@/hooks/useMobileOverlayHistory";
 import { useProjectWorkspaces } from "@/hooks/useProjectWorkspaces";
 import { useWorkspaceActivity } from "@/hooks/useWorkspaceActivity";
 import { useWorkspaceStatusSelector } from "@/hooks/useWorkspaceStatus";
+import { busyChatForTab, type BusyChat } from "@/lib/chat-tab-close";
+import { claudeReopenSettings, codexReopenSettings } from "@/lib/chat-reopen";
 import { activityTotals } from "@/lib/activity-center";
-import { markNotificationsRead, notificationTarget, notificationWorkspace } from "@/lib/activity-notifications";
+import { markNotificationsRead, notificationOpenWorkspace, notificationTarget } from "@/lib/activity-notifications";
 import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PanelsTopLeft, Plus, TerminalSquare } from "lucide-react";
 import { projectLabel, upsertProjectWorkspace, type ProjectWorkspace } from "@/lib/project-workspaces";
 import { getProductStatus } from "@/lib/product-status";
+import { windowTitle } from "@/lib/window-title";
 import type { ActivityTarget } from "@/lib/rail-activity";
 
 const rightPanelHeaderButtonStyle: React.CSSProperties = { width: 36, height: 36, display: "grid", placeItems: "center", padding: 0, border: 0, borderLeft: "1px solid var(--border)", background: "transparent", color: "var(--text-muted)", cursor: "pointer" };
@@ -232,6 +235,9 @@ export function AppShell() {
   const [pendingTerminalClose, setPendingTerminalClose] = useState<{ tabId: string; terminal: TerminalSession } | null>(null);
   const [terminalCloseBusy, setTerminalCloseBusy] = useState(false);
   const [terminalCloseError, setTerminalCloseError] = useState<string | null>(null);
+  const codexRuntimes = useWorkspaceStatusSelector((snapshot) => snapshot.codexRuntimes);
+  const claudeRuntimes = useWorkspaceStatusSelector((snapshot) => snapshot.claudeRuntimes);
+  const [pendingChatClose, setPendingChatClose] = useState<{ tabId: string; label: string; chat: BusyChat } | null>(null);
   const [terminalRestartingId, setTerminalRestartingId] = useState<string | null>(null);
   const [terminalRestartError, setTerminalRestartError] = useState<string | null>(null);
   const terminalRestoreInFlightRef = useRef(new Set<string>());
@@ -666,8 +672,14 @@ export function AppShell() {
       setPendingTerminalClose({ tabId, terminal });
       return;
     }
+    const chat = tab ? busyChatForTab(tab, codexRuntimes ?? [], claudeRuntimes ?? []) : null;
+    if (tab && chat) {
+      setTerminalCloseError(null);
+      setPendingChatClose({ tabId, label: tab.label, chat });
+      return;
+    }
     removeWorkspaceTab(tabId);
-  }, [removeWorkspaceTab, terminals, workspaceTabs]);
+  }, [claudeRuntimes, codexRuntimes, removeWorkspaceTab, terminals, workspaceTabs]);
 
   const closeTerminalTab = useCallback(async (stop: boolean) => {
     const target = pendingTerminalClose;
@@ -685,6 +697,30 @@ export function AppShell() {
     } catch (cause) { setTerminalCloseError(cause instanceof Error ? cause.message : "Unable to stop terminal"); }
     finally { setTerminalCloseBusy(false); }
   }, [pendingTerminalClose, removeWorkspaceTab, updateTerminals]);
+
+  // Keep running: the server runtime finishes the turn (or holds the approval)
+  // with no viewer. Stop: the same interrupt as the chat's Stop button.
+  const closeChatTab = useCallback(async (stop: boolean) => {
+    const target = pendingChatClose;
+    if (!target) return;
+    if (!stop) { setPendingChatClose(null); removeWorkspaceTab(target.tabId); return; }
+    setTerminalCloseBusy(true);
+    setTerminalCloseError(null);
+    try {
+      const { chat } = target;
+      const response = await fetch(`/api/${chat.kind}/chat/${encodeURIComponent(chat.id)}/interrupt`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(chat.kind === "claude" ? { cwd: chat.cwd } : {}),
+      });
+      const data = await response.json().catch(() => ({})) as { error?: string; code?: string };
+      // The turn ended meanwhile: there is nothing left to stop.
+      if (!response.ok && data.code !== "no_active_turn") throw new Error(data.error || "Unable to stop the chat");
+      setPendingChatClose(null);
+      removeWorkspaceTab(target.tabId);
+    } catch (cause) { setTerminalCloseError(cause instanceof Error ? cause.message : "Unable to stop the chat"); }
+    finally { setTerminalCloseBusy(false); }
+  }, [pendingChatClose, removeWorkspaceTab]);
 
   const handleSelectWorkspaceTab = useCallback((tabId: string) => {
     dispatchCenter({ type: "select", id: tabId });
@@ -867,6 +903,14 @@ export function AppShell() {
     }
   }, [activeCwd, centerHydratedCwd, restartUnavailableTerminal, terminalList, terminalSplit, terminalsLoaded, workspaceTabs]);
 
+  const workspaceActivity = useWorkspaceActivity(projectWorkspaces);
+  const { refreshSessionLabels } = workspaceActivity;
+  const openActivityCenter = useCallback(() => {
+    refreshSessionLabels();
+    setActivityCenterOpen(true);
+  }, [refreshSessionLabels]);
+  const closeActivityCenter = useCallback(() => setActivityCenterOpen(false), []);
+
   // Rail activity items open a specific session/terminal/Codex chat, possibly
   // in another project. The open waits until that project's center panel state
   // is hydrated (and, for terminals, its terminal list is loaded): the project
@@ -894,13 +938,18 @@ export function AppShell() {
       return;
     }
     setActivityOpenIntent({ seq, item, token: null, cwd: null });
+    let activated = false;
     void activateProjectWorkspace(targetCwd ? { ...workspace, cwd: targetCwd } : workspace, ({ token, cwd }) => {
+      activated = true;
       setActivityOpenIntent((current) => current?.seq === seq ? { ...current, token, cwd } : current);
     }).finally(() => {
-      // Activation failed (e.g. the path is no longer authorized).
-      setActivityOpenIntent((current) => current?.seq === seq && current.token === null ? null : current);
+      if (activated) return;
+      // Activation failed (e.g. the path is no longer authorized): fall back
+      // to the activity center instead of leaving the click with no effect.
+      setActivityOpenIntent((current) => current?.seq === seq ? null : current);
+      if (activityOpenSeqRef.current === seq) openActivityCenter();
     });
-  }, [activateProjectWorkspace, activeCwd, activeProjectId]);
+  }, [activateProjectWorkspace, activeCwd, activeProjectId, openActivityCenter]);
 
   // An intent that cannot run soon (e.g. the terminal list never loads) is
   // dropped rather than popping a tab open much later.
@@ -949,24 +998,18 @@ export function AppShell() {
     } else if (item.kind === "claude") {
       const existing = workspaceTabs.find((tab) => tab.kind === "claude-chat" && (tab.id === claudeChatTabId(item.id) || tab.sourceSessionId === item.id));
       if (existing) activateWorkspaceTab(existing.id);
-      else handleOpenClaudeSessionChat({ sessionId: item.id, sessionName: "", cwd: item.cwd });
+      // No tab: take the model and permission its process runs with.
+      else handleOpenClaudeSessionChat({ sessionId: item.id, sessionName: "", cwd: item.cwd, ...claudeReopenSettings(claudeRuntimes?.find((runtime) => runtime.sessionId === item.id)) });
     } else {
       const threadId = item.id;
       const existing = workspaceTabs.find((tab) => tab.kind === "codex-chat" && (tab.id === codexChatTabId(threadId) || tab.sourceSessionId === threadId));
       if (existing) activateWorkspaceTab(existing.id);
-      // A running runtime was started from a chat tab; reopen it with the chat
-      // defaults. No session name, so the panel shows the thread's own name.
-      else handleOpenCodexSessionChat({ sessionId: threadId, sessionName: "", cwd: item.cwd, approvalPolicy: "untrusted" });
+      // A running runtime was started from a chat tab; reopen it with the
+      // settings that runtime uses (new-chat defaults if it has gone). No
+      // session name, so the panel shows the thread's own name.
+      else handleOpenCodexSessionChat({ sessionId: threadId, sessionName: "", cwd: item.cwd, ...codexReopenSettings(codexRuntimes?.find((runtime) => runtime.threadId === threadId)) });
     }
-  }, [activateWorkspaceTab, activeCwd, activityOpenIntent, centerHydratedCwd, closeMobileOverlays, handleOpenClaudeSessionChat, handleOpenCodexSessionChat, handleSelectSession, isMobile, openTerminalTab, terminals, terminalsLoaded, workspaceTabs]);
-
-  const workspaceActivity = useWorkspaceActivity(projectWorkspaces);
-  const { refreshSessionLabels } = workspaceActivity;
-  const openActivityCenter = useCallback(() => {
-    refreshSessionLabels();
-    setActivityCenterOpen(true);
-  }, [refreshSessionLabels]);
-  const closeActivityCenter = useCallback(() => setActivityCenterOpen(false), []);
+  }, [activateWorkspaceTab, activeCwd, activityOpenIntent, centerHydratedCwd, claudeRuntimes, closeMobileOverlays, codexRuntimes, handleOpenClaudeSessionChat, handleOpenCodexSessionChat, handleSelectSession, isMobile, openTerminalTab, terminals, terminalsLoaded, workspaceTabs]);
 
   // A clicked system notification (public/sw.js) opens its entry: in this
   // window through a service worker message, or in a new one through
@@ -998,11 +1041,11 @@ export function AppShell() {
     setPendingNotificationId(null);
     closeActivityCenter();
     const notification = notificationLog.find((entry) => entry.id === pendingNotificationId);
-    const workspace = notification ? notificationWorkspace(notification, projectWorkspaces) : null;
     if (notification && !notification.read) void markNotificationsRead({ ids: [notification.id] });
-    // Pruned, or its project is not open here: the activity center lists it (or what is left).
-    if (!notification || !workspace) { openActivityCenter(); return; }
-    handleOpenActivityItem(workspace, notificationTarget(notification));
+    // Pruned from the log: the activity center lists what is left.
+    if (!notification) { openActivityCenter(); return; }
+    // A closed project is reopened (activation adds it back to the rail).
+    handleOpenActivityItem(notificationOpenWorkspace(notification, projectWorkspaces).workspace, notificationTarget(notification));
   }, [activeCwd, activeProjectId, closeActivityCenter, handleOpenActivityItem, notificationLog, openActivityCenter, pendingNotificationId, projectWorkspaces, projectWorkspacesHydrated]);
 
   // The context value is ref-backed so its identity never changes. Consumers
@@ -1062,18 +1105,19 @@ export function AppShell() {
     {activityControl}
   </div>;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
-  const windowTitle = activeCwdName ? `${activeCwdName} - TianForge pi` : "TianForge pi";
+  const unreadNotifications = useWorkspaceStatusSelector((snapshot) => snapshot.unreadNotifications);
+  const documentTitle = windowTitle({ cwdName: activeCwdName, approvals: approvalCount, unread: unreadNotifications });
 
   useEffect(() => {
     const syncWindowTitle = () => {
-      if (document.title !== windowTitle) document.title = windowTitle;
+      if (document.title !== documentTitle) document.title = documentTitle;
     };
 
     syncWindowTitle();
     const observer = new MutationObserver(syncWindowTitle);
     observer.observe(document.head, { childList: true, subtree: true, characterData: true });
     return () => observer.disconnect();
-  }, [windowTitle]);
+  }, [documentTitle]);
 
   const sidebarContent = (
     <>
@@ -1550,7 +1594,8 @@ export function AppShell() {
         onCreated={handleTerminalCreated}
       />
     )}
-    {pendingTerminalClose && <TerminalCloseDialog terminal={pendingTerminalClose.terminal} busy={terminalCloseBusy} error={terminalCloseError} onCancel={() => { if (!terminalCloseBusy) setPendingTerminalClose(null); }} onKeepRunning={() => void closeTerminalTab(false)} onStop={() => void closeTerminalTab(true)} />}
+    {pendingTerminalClose && <RunningCloseDialog label="Close terminal" title={`Close ${pendingTerminalClose.terminal.provider} terminal?`} description={`The process is still running in ${pendingTerminalClose.terminal.cwd}. You can keep it running and reopen it from Agents, or stop it now.`} busy={terminalCloseBusy} error={terminalCloseError} onCancel={() => { if (!terminalCloseBusy) setPendingTerminalClose(null); }} onKeepRunning={() => void closeTerminalTab(false)} onStop={() => void closeTerminalTab(true)} />}
+    {pendingChatClose && <RunningCloseDialog label="Close chat" {...chatCloseText(pendingChatClose.label, pendingChatClose.chat)} busy={terminalCloseBusy} error={terminalCloseError} onCancel={() => { if (!terminalCloseBusy) setPendingChatClose(null); }} onKeepRunning={() => void closeChatTab(false)} onStop={() => void closeChatTab(true)} />}
     {settingsOpen && <SettingsPanel
       isDark={isDark}
       cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd}
@@ -1564,14 +1609,21 @@ export function AppShell() {
   );
 }
 
-function TerminalCloseDialog({ terminal, busy, error, onCancel, onKeepRunning, onStop }: { terminal: TerminalSession; busy: boolean; error: string | null; onCancel: () => void; onKeepRunning: () => void; onStop: () => void }) {
+function RunningCloseDialog({ label, title, description, busy, error, onCancel, onKeepRunning, onStop }: { label: string; title: string; description: string; busy: boolean; error: string | null; onCancel: () => void; onKeepRunning: () => void; onStop: () => void }) {
   useEffect(() => {
     if (busy) return;
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onCancel(); };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [busy, onCancel]);
-  return <div role="dialog" aria-modal="true" aria-label="Close terminal" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }} style={{ position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 20, background: "rgb(0 0 0 / 55%)" }}><section style={{ width: "min(100%, 420px)", padding: 18, border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 20px 60px rgb(0 0 0 / 45%)" }}><strong>Close {terminal.provider} terminal?</strong><p style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>The process is still running in {terminal.cwd}. You can keep it running and reopen it from Agents, or stop it now.</p>{error && <p role="alert" style={{ color: "#f87171", fontSize: 12 }}>{error}</p>}<div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginTop: 18 }}><button type="button" disabled={busy} onClick={onCancel} style={terminalCloseButtonStyle}>Cancel</button><button type="button" disabled={busy} onClick={onKeepRunning} style={terminalCloseButtonStyle}>Keep running</button><button type="button" disabled={busy} onClick={onStop} style={{ ...terminalCloseButtonStyle, color: "#ef4444", borderColor: "rgb(239 68 68 / 45%)", background: "rgb(239 68 68 / 10%)" }}>{busy ? "Stopping…" : "Stop and close"}</button></div></section></div>;
+  return <div role="dialog" aria-modal="true" aria-label={label} onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }} style={{ position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 20, background: "rgb(0 0 0 / 55%)" }}><section style={{ width: "min(100%, 420px)", padding: 18, border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 20px 60px rgb(0 0 0 / 45%)" }}><strong>{title}</strong><p style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{description}</p>{error && <p role="alert" style={{ color: "#f87171", fontSize: 12 }}>{error}</p>}<div style={{ display: "flex", justifyContent: "flex-end", flexWrap: "wrap", gap: 8, marginTop: 18 }}><button type="button" disabled={busy} onClick={onCancel} style={terminalCloseButtonStyle}>Cancel</button><button type="button" disabled={busy} onClick={onKeepRunning} style={terminalCloseButtonStyle}>Keep running</button><button type="button" disabled={busy} onClick={onStop} style={{ ...terminalCloseButtonStyle, color: "#ef4444", borderColor: "rgb(239 68 68 / 45%)", background: "rgb(239 68 68 / 10%)" }}>{busy ? "Stopping…" : "Stop and close"}</button></div></section></div>;
+}
+
+function chatCloseText(label: string, chat: BusyChat): { title: string; description: string } {
+  const provider = chat.kind === "codex" ? "Codex" : "Claude";
+  return chat.state === "approval"
+    ? { title: `Close ${provider} chat?`, description: `“${label}” is waiting for your approval in ${chat.cwd}. If you keep it running, the request stays open until you answer it from the chat, which you can reopen from Workspace activity. Queued messages are kept but paused until then. Stop cancels the turn.` }
+    : { title: `Close ${provider} chat?`, description: `“${label}” is still working in ${chat.cwd}. If you keep it running, the turn finishes in the background and you can reopen the chat from Workspace activity. Queued messages are kept but paused until then. Stop interrupts the turn now.` };
 }
 
 const terminalCloseButtonStyle: React.CSSProperties = { padding: "7px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text)", cursor: "pointer", font: "12px/1.3 inherit" };

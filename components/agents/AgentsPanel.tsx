@@ -14,6 +14,8 @@ import type { ActivityNotification } from "@/lib/workspace-status-store";
 import type { ClaudeChatTarget, ClaudeForkTarget, CodexChatTarget } from "@/components/workspace/WorkspaceActions";
 import { permissionLabel, permissionOptions, TASK_TEMPLATES_CHANGED_EVENT, TaskTemplateDialog, type TaskTemplate } from "./TaskTemplateDialog";
 import { useDialogEscape } from "./use-dialog-escape";
+import { ConfirmDialog, dialogButtonStyle, dialogOverlayStyle, dialogStyle } from "./ConfirmDialog";
+import { dangerousPermissionWarning } from "@/lib/chat-permissions";
 
 /** Structurally identical to `CodexChatTarget`; kept as a distinct export so AgentsPanel stays usable outside the workspace-actions context. */
 export type CodexSessionTarget = CodexChatTarget;
@@ -843,22 +845,13 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
 }
 
 function AgentActionDialog({ action, renameValue, busy, onRenameChange, onCancel, onConfirm }: { action: PendingAction; renameValue: string; busy: boolean; onRenameChange: (value: string) => void; onCancel: () => void; onConfirm: () => void }) {
-  useDialogEscape(onCancel, busy);
   const rename = action.kind === "session" && action.action === "rename";
   const destructive = action.kind === "session" && action.action === "delete" || action.kind === "claude-session" || action.kind === "terminal" || action.kind === "clear" || action.kind === "template";
   const { title, description, confirmLabel } = actionDialogText(action);
   const confirmDisabled = busy || rename && (!renameValue.trim() || renameValue.trim() === action.session.name);
-  return <div role="dialog" aria-modal="true" aria-label={title} style={dialogOverlayStyle} onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
-    <section style={{ ...dialogStyle, width: "min(100%, 400px)" }}>
-      <strong style={{ display: "block", fontSize: 14 }}>{title}</strong>
-      <p style={{ margin: "8px 0 0", color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>{description}</p>
-      {rename && <input autoFocus value={renameValue} maxLength={120} onChange={(event) => onRenameChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !confirmDisabled) onConfirm(); }} style={{ ...inputStyle, marginTop: 14 }} />}
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
-        <button type="button" disabled={busy} onClick={onCancel} style={dialogButtonStyle}>Cancel</button>
-        <button type="button" disabled={confirmDisabled} onClick={onConfirm} style={{ ...dialogButtonStyle, borderColor: destructive ? "rgb(239 68 68 / 45%)" : "var(--accent)", background: destructive ? "rgb(239 68 68 / 10%)" : "var(--accent)", color: destructive ? "#ef4444" : "white", opacity: confirmDisabled ? .5 : 1 }}>{busy ? "Working…" : confirmLabel}</button>
-      </div>
-    </section>
-  </div>;
+  return <ConfirmDialog title={title} description={description} confirmLabel={confirmLabel} destructive={destructive} busy={busy} confirmDisabled={confirmDisabled} onCancel={onCancel} onConfirm={onConfirm}>
+    {rename && <input autoFocus value={renameValue} maxLength={120} onChange={(event) => onRenameChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !confirmDisabled) onConfirm(); }} style={{ ...inputStyle, marginTop: 14 }} />}
+  </ConfirmDialog>;
 }
 
 function actionDialogText(action: PendingAction): { title: string; description: string; confirmLabel: string } {
@@ -878,7 +871,7 @@ function actionDialogText(action: PendingAction): { title: string; description: 
         : { title: `Remove ${action.terminal.provider} terminal`, description: "This removes the ended terminal record from the workspace.", confirmLabel: "Remove" };
     case "template":
       return action.action === "run"
-        ? { title: `Run “${action.template.name}” with dangerous bypass`, description: `${action.template.provider === "codex" ? "Codex skips all approval and sandboxing" : "Claude skips its permission confirmations"} in this terminal, so it may edit files and run commands without asking.`, confirmLabel: "Run anyway" }
+        ? { title: `Run “${action.template.name}” with dangerous bypass`, description: dangerousPermissionWarning(action.template.provider === "codex" ? "codex" : "claude", "terminal"), confirmLabel: "Run anyway" }
         : { title: "Delete template", description: `“${action.template.name}” will be deleted. Terminals it started keep running.`, confirmLabel: "Delete" };
     case "clear":
       return { title: `Clear ended ${action.provider ? `${action.provider} ` : ""}terminals`, description: `${action.count} ended terminal record${action.count === 1 ? "" : "s"} will be removed from this workspace.`, confirmLabel: "Remove" };
@@ -1149,8 +1142,6 @@ const menuTriggerOpenStyle: CSSProperties = { color: "var(--text)" };
 const menuStyle: CSSProperties = { position: "fixed", zIndex: 1100, width: 184, maxHeight: "calc(100vh - 16px)", overflowY: "auto", boxSizing: "border-box", padding: 6, border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", boxShadow: "0 16px 42px rgb(0 0 0 / 38%), 0 2px 8px rgb(0 0 0 / 18%)" };
 const menuButtonStyle: CSSProperties = { display: "flex", alignItems: "center", width: "100%", minHeight: 31, padding: "7px 10px", border: 0, borderRadius: 6, background: "transparent", cursor: "pointer", textAlign: "left", font: "12px/1.35 inherit", whiteSpace: "nowrap" };
 const menuDividerStyle: CSSProperties = { display: "block", height: 1, margin: "4px 5px", background: "var(--border)" };
-const dialogOverlayStyle: CSSProperties = { position: "fixed", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", padding: 20, background: "rgb(0 0 0 / 55%)" };
-const dialogStyle: CSSProperties = { width: "min(100%, 460px)", maxHeight: "min(720px, 90vh)", overflowY: "auto", padding: 18, border: "1px solid var(--border)", borderRadius: 10, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 20px 60px rgb(0 0 0 / 45%)" };
 const dialogGridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 9, marginTop: 14 };
 const fieldStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 5, marginTop: 11, color: "var(--text-muted)", fontSize: 11.5 };
 const inputStyle: CSSProperties = { width: "100%", boxSizing: "border-box", padding: "7px 8px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--text)", font: "12px/1.35 inherit" };
@@ -1158,4 +1149,3 @@ const hintStyle: CSSProperties = { color: "var(--text-dim)", fontSize: 10.5, lin
 const modelDescriptionStyle: CSSProperties = { marginTop: 6, padding: "6px 8px", borderRadius: 6, background: "var(--bg)", color: "var(--text-dim)", fontSize: 10.5, lineHeight: 1.4 };
 const checkStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 7, marginTop: 12, color: "var(--text-muted)", fontSize: 11.5 };
 const dangerStyle: CSSProperties = { marginTop: 11, padding: "7px 8px", borderRadius: 6, background: "rgb(239 68 68 / 10%)", color: "#f87171", fontSize: 11, lineHeight: 1.4 };
-const dialogButtonStyle: CSSProperties = { padding: "6px 9px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text)", cursor: "pointer", font: "11.5px/1.3 inherit" };

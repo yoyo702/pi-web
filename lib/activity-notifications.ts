@@ -1,4 +1,4 @@
-import type { ProjectWorkspace } from "./project-workspaces";
+import { projectLabel, type ProjectWorkspace } from "./project-workspaces";
 import type { ActivityTarget } from "./rail-activity";
 import type { ActivityNotification } from "./workspace-status-store";
 
@@ -10,6 +10,18 @@ export function notificationWorkspace(notification: Pick<ActivityNotification, "
     if (match) return match;
   }
   return null;
+}
+
+/**
+ * Where a notification opens: its workspace when the project is open, else a
+ * workspace for its closed project. Activating that workspace adds the
+ * project back to the rail (as when it was first opened).
+ */
+export function notificationOpenWorkspace(notification: Pick<ActivityNotification, "cwd" | "projectRoot">, workspaces: ProjectWorkspace[]): { workspace: ProjectWorkspace; closed: boolean } {
+  const open = notificationWorkspace(notification, workspaces);
+  if (open) return { workspace: open, closed: false };
+  const root = notification.projectRoot || notification.cwd;
+  return { workspace: { id: root, projectRoot: root, cwd: notification.cwd, label: projectLabel(root), sessionId: null, lastActive: Date.now() }, closed: true };
 }
 
 export function notificationTarget(notification: ActivityNotification): ActivityTarget {

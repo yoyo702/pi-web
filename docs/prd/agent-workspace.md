@@ -85,9 +85,11 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 
 ## Codex 聊天运行时
 
-- 每个会话一个 `codex app-server` 运行时进程（`server/agents/codex-app-server.cjs`），所有浏览器共用。没有页面在看、也没有进行中的一轮和未决审批时，30 秒后关闭；有进行中的一轮或等待审批时一直保留，一轮结束（或审批回复）后再开始空闲计时。因此在手机上发起一轮后锁屏或关闭标签，这一轮会继续跑完，在电脑上打开同一会话可继续看到。
+- 每个会话一个 `codex app-server` 运行时进程（`server/agents/codex-app-server.cjs`），所有浏览器共用。没有页面在看、也没有进行中的一轮和未决审批时，30 秒后关闭；有进行中的一轮或等待审批时一直保留，一轮结束（或审批回复）后再开始空闲计时。因此在手机上发起一轮后锁屏或关闭标签，这一轮会继续跑完，在电脑上打开同一会话可继续看到。关闭运行中或等待审批的聊天标签时先确认（对话框 “Close chat”）：Cancel 保留标签；Keep running 只关标签，这一轮在后台继续，审批保持等待并让运行时一直保留，可从活动中心、通知或 Agents 重新打开聊天来回复，一轮结束后无人查看时 30 秒关闭运行时；Stop and close 先中断这一轮（与聊天里的 Stop 相同，已没有进行中的一轮也算成功）再关标签，之后运行时空闲 30 秒关闭。排队中的消息不会丢失，但在标签重新打开前保持暂停（见下文排队规则）。是否运行按状态流中的运行时判断，不看标签状态。
+- 状态流 `codex_runtimes` 的每个运行时带 `settings`（`model`、`reasoningEffort`、`serviceTier`、`approvalPolicy`：启动或新建时的设置，之后每轮非空的设置覆盖）。
 - 运行时每次启动有新的 `runtimeId`；SSE 事件 id 为 `runtimeId:seq`。运行时重启后，浏览器按新运行时从头重放事件，不会因序号重置而漏事件。运行时退出时推送 `codex/closed`，聊天显示 “Reconnecting”；事件流在运行时就绪（`thread/resume` 成功）后才建立；新运行时无法恢复会话（如 `writer_conflict`）时直接返回 JSON 错误，浏览器不再反复重连，显示 “Codex chat disconnected: <原因>” 与 “Reconnect” 按钮。浏览器的 EventSource 读不到被拒绝时的响应，所以聊天会用普通请求再访问一次同一个事件地址，读出 JSON 错误作为原因（这次请求本身也会尝试恢复一次；此时已能连上或服务器不可达时，只显示 “Codex chat disconnected.”）。原因是终端占用（`terminal_owns_session`）时同时显示终端占用提示。
 - 新建聊天：Agents 面板 Codex 行的聊天按钮（“New Codex chat”）在当前项目打开空白聊天标签（标题 “Codex Chat · New chat”），此时不启动 Codex、不建会话。第一条消息调用 `POST /api/codex/chat`（`{cwd, text, images, model, effort, serviceTier, approvalPolicy}`，目录须是已授权的项目，否则 403），服务端启动运行时、`thread/start` 建会话并发出这条消息，返回 201 `{threadId, turn}`；之后与打开已有会话相同。标签名改为第一条消息（前 60 字），默认审批策略 `untrusted`。建会话或第一轮失败时不留运行时，消息留在输入框，重试会新建会话。建会话期间切换项目，切回后标签已指向新会话。第一条消息之前不能用 `/compact`、`/review`、Fork。
+- 聊天设置（输入框下方 “Chat configuration” 菜单，“Next turn settings”）的权限：Restricted（`untrusted`）/ Ask when needed（`on-request`）/ Full access（`never`），作用于下一轮。选 Full access 前弹出与危险模板运行相同的确认框（“Switch to Full access?”，说明 “Codex stops asking for approval in this chat, so it may edit files and run commands without asking.”，确认按钮 “Switch anyway”）；取消则保持原设置。
   - 新会话刚建好时 Codex 列表可能还没有它：只要它的运行时在，打开聊天仍可用（历史为空）。
   - 之后从 Agents 面板再次打开同一会话，复用这个标签，不另开；会话还没有名字时保留标签原名（第一条消息），不改回 “Codex Chat”。
 - 只发图片（无文字）也可以发送。
@@ -117,7 +119,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 
 - 每个会话一个 `claude --print --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio --allow-dangerously-skip-permissions` 进程（`server/agents/claude-chat-runtime.cjs`，接口 `claude-chat-api.cjs`），所有浏览器共用。
   - 打开聊天只读会话文件，不启动进程；第一条消息才启动（已有会话用 `--resume <id>`，新聊天用 `--session-id <新 id>`，Fork 见下）。
-  - 没有页面在看、也没有进行中的一轮和未决审批时，30 秒后关闭进程；一轮进行中或有审批时一直保留。因此发起一轮后关掉页面，这一轮会跑完。
+  - 没有页面在看、也没有进行中的一轮和未决审批时，30 秒后关闭进程；一轮进行中或有审批时一直保留。因此发起一轮后关掉页面，这一轮会跑完。关闭运行中或等待审批的 Claude 聊天标签时与 Codex 聊天相同，先确认 Keep running / Stop and close。
   - `--permission-prompt-tool stdio` 让权限请求走 `control_request can_use_tool`，由浏览器回答；不加这个参数，权限请求会被自动拒绝。`--allow-dangerously-skip-permissions` 只是允许之后切到 `bypassPermissions`，不会直接开启它。
 - 接口（所有 POST 请求体都带 `cwd`；cwd 须是已授权目录，会话须属于该目录）：
   - `GET /api/claude/chat/:id?cwd=&before=`：返回 `{session, history, cursor, events, runtime, terminal}`。`history` 是会话文件末尾约 512 KiB 的记录（带 `before` 时取更早的一页，只返回 `history`/`cursor`；`cursor` 为 null 表示已到文件开头）。一行超过窗口时窗口扩大；超过 32 MiB 的行跳过。`events` 是运行时缓冲的事件（最多 2000 条），`runtime` 包含 `runtimeId`、是否运行、模型、权限模式、未决请求。`terminal` 非空表示有 `resume` 终端正在写该会话。
@@ -133,7 +135,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - 发送时浏览器生成消息 uuid，先显示为待发送，收到同一 uuid 的记录后替换，不重复显示。
   - Claude 在跑时不能插话：输入框提示 “Queue a message for the next turn…”，消息排队，这一轮结束后发送。服务端对进行中的会话再次发送返回 409 `session_busy`。
   - Esc 或停止按钮中断这一轮（`interrupt` 控制请求）；Claude 以 `result` 结束这一轮，进程保留。有对话框（如 Settings）打开时，Esc 只关闭该对话框，不中断这一轮。
-  - 模型：Default / Sonnet / Opus / Haiku；权限模式：Ask before edits（`default`）/ Accept edits / Plan mode / Bypass permissions。都作用于下一条消息：与运行中进程的启动参数不同时，服务端先停止进程再用新参数启动（比较的是启动时请求的模型别名 `launchModel`，不是 Claude 回报的完整模型名，所以同一模型不会每次重启）。
+  - 模型：Default / Sonnet / Opus / Haiku；权限模式：Ask before edits（`default`）/ Accept edits / Plan mode / Bypass permissions。都作用于下一条消息：与运行中进程的启动参数不同时，服务端先停止进程再用新参数启动（比较的是启动时请求的模型别名 `launchModel`，不是 Claude 回报的完整模型名，所以同一模型不会每次重启）。选 Bypass permissions 前同样先确认（“Switch to Bypass permissions?”，说明 Claude 在此聊天中跳过权限确认）。
   - “Allow for session” 可能让 Claude 切换权限模式（如接受编辑），`system` 记录回报新模式后，界面和标签配置随之更新。
   - 工具显示：Bash 显示为命令和输出；Edit / MultiEdit / Write 显示为差异；其他工具显示名称、输入和结果。
   - 任务列表：`TaskCreate` / `TaskUpdate`（Claude Code 2.x 的任务工具）和旧的 `TodoWrite` 不显示为工具调用，而是合成一张 “Tasks” 卡片，放在最近一次改动的位置。新任务的编号取自 `TaskCreate` 的结果（“Task #N created …”），`TaskUpdate` 只更新已知编号（`deleted` 删除）；创建在未加载的更早历史里的任务，其更新被忽略。斜杠命令按输入显示，命令输出显示为提示；“[Request interrupted by user]” 显示为 “Interrupted”。`result` 带 `is_error` 时显示错误提示。
@@ -151,8 +153,8 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - `ExitPlanMode`：显示计划，按钮 “Approve plan” / “Keep planning”。
   - `AskUserQuestion`（“Claude has a question”）：每个问题选项或填写 “Other answer”，全部回答后 Submit，答案按问题文本放进 `updatedInput.answers`（多选用 “, ” 连接）；Skip 为拒绝。
   - Claude 取消请求（`control_cancel_request`）或请求已不存在时，卡片消失；回答已过期的请求返回 409 `approval_expired`。
-- 入口：Agents 面板 Claude 分组中点击会话，或菜单 “Open in Chat”；分组的聊天按钮（“New Claude chat”）打开空白聊天，第一条消息创建会话，标签名改为第一条消息（前 60 字）。项目栏和通知中的 Claude 聊天条目打开对应标签。
-- 状态：运行时状态通过工作区状态 SSE 的 `claude_runtimes` 推送（`idle` / `running` / `approval`），用于项目栏活动、通知（kind `claude`）和 Agents 面板的状态点。
+- 入口：Agents 面板 Claude 分组中点击会话，或菜单 “Open in Chat”；分组的聊天按钮（“New Claude chat”）打开空白聊天，第一条消息创建会话，标签名改为第一条消息（前 60 字）。项目栏、活动中心和通知中的 Claude/Codex 聊天条目打开对应标签；没有标签时新开的标签沿用运行时当前的模型和权限（Codex 为模型、推理、服务等级和审批策略），运行时已结束时用新聊天的默认值（Codex `untrusted`，Claude `default`）。
+- 状态：运行时状态通过工作区状态 SSE 的 `claude_runtimes` 推送（`idle` / `running` / `approval`），并带进程启动时的模型别名 `model`（默认模型为 null）和当前权限模式 `permissionMode`（Claude 回报权限模式变化时也推送），用于项目栏活动、通知（kind `claude`）和 Agents 面板的状态点。
 - 接口错误码：400 参数错误（含不支持的模型、权限模式），403 目录未授权，404 会话不存在；409 `session_busy`、`terminal_owns_session`、`approval_expired`、`no_active_turn`；503 进程不可用或控制请求超时（10 秒）；其余 500。
 
 ## 任务模板
@@ -181,8 +183,8 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - 顺序：当前项目在最前（标 “Current”，空闲时显示 “Nothing running”），然后 “Other workspaces”：其他有运行、等待、失败或刚完成条目的项目（按项目栏顺序，空闲的不列出），每个项目下列出条目；最后是 “Recent” 通知列表和 “Notify this device” 开关。
   - 点击项目名切换到该项目，点击条目切换项目并打开对应的会话、终端或聊天；打开任何东西都会关闭面板。Esc、点击面板外或关闭按钮关闭。
   - 手机上（宽度 ≤ 640px）是贴底的全宽面板（最高 82% 屏幕高度），电脑上是居中弹窗。
-  - 铃铛角标为未读数；有等待审批的任务时角标为审批颜色，鼠标悬停显示未读数和等待数。工具栏按钮显示所有项目中运行中（含等待）的条目数、审批圆点和未读数。
-  - “Recent” 列表：未读加粗，显示项目、类型、事件、时间，失败时附原因；点击后标为已读，并切换到所在项目打开对应的聊天、会话或终端（项目未打开时只标已读；终端记录只在内存中，服务端重启或 “Clear ended” 之后点击终端通知只切换到所在项目）。没有通知时显示 “No notifications in the last 7 days”。
+  - 铃铛角标为未读数；有等待审批的任务时角标为审批颜色，鼠标悬停显示未读数和等待数。工具栏按钮显示所有项目中运行中（含等待）的条目数、审批圆点和未读数。浏览器标签标题：有等待审批的任务时为 “(N waiting) <项目> - TianForge pi”（N 为所有已打开项目的等待数），否则有未读通知时为 “(N) <项目> - TianForge pi”，都没有时为 “<项目> - TianForge pi”。
+  - “Recent” 列表：未读加粗，显示项目、类型、事件、时间，失败时附原因；点击后标为已读，并切换到所在项目打开对应的聊天、会话或终端（项目已关闭时重新打开该项目（加回项目栏）再打开目标；终端记录只在内存中，服务端重启或 “Clear ended” 之后点击终端通知只切换到所在项目）。没有通知时显示 “No notifications in the last 7 days”。
 - Agents 面板的任务完成提示（右下角 toast，8 秒自动消失）由新到的通知触发：本项目的 “Task: <脚本>” 终端有新的未读通知（完成或失败）时显示，内容附终端最后几行输出；点击 toast 打开终端并把该通知标为已读。为此，项目任务终端（标题以 “Task: ” 开头，与 Agents 面板的任务分组规则相同）正常退出也记为完成（普通 shell 正常退出仍不记录）。用户点 Stop 停止的任务不记录，所以也不再提示。页面打开前已有的通知不提示。
 - 系统推送（Web Push，`server/web-push.cjs`）：每条新通知同时发到开启了 “Notify this device” 且选了该事件的设备，锁屏的手机也能收到。
   - 按设备选择事件：开关打开后下面有 “Notify for” 三个勾选项：Needs input（`approval`）、Failed（`failed`）、Finished（`completed`），默认全选。至少保留一项（剩最后一项时它不能取消，想全部停止就关掉开关）。选择存在该设备的订阅里（`events`，按 approval、failed、completed 顺序）；浏览器重新上报同一订阅时保留原选择；关掉开关再打开会恢复全选。旧版本保存的订阅没有 `events`，按全选处理。只影响系统推送，活动中心和页面内提示仍显示所有事件。
@@ -194,7 +196,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
     - 有已打开的 TianForge 窗口时，优先选当前聚焦的、其次可见的窗口，聚焦它并发消息给页面；该窗口停在其他页面（如登录页）时改为在其中加载 `/?notification=<id>`（不能加载时新开窗口）。没有窗口时新开 `/?notification=<id>`。
     - 窗口还在加载、没收到消息时：Service Worker 记住这条（30 秒内），页面加载完成后发 `pi-web:ready`，再发一次；页面收到后回 `pi-web:notification-received`。
     - 需要登录时，登录页保留 `notification` 参数，登录后打开它。
-    - 页面等项目恢复完成后关闭活动中心、把该通知标为已读，并像点击 “Recent” 条目一样打开目标；找不到通知或项目未打开时打开活动中心。
+    - 页面等项目恢复完成后关闭活动中心、把该通知标为已读，并像点击 “Recent” 条目一样打开目标；项目已关闭时重新打开该项目再打开目标；通知已被清理（找不到）时打开活动中心。
   - 开关（活动中心底部 “Notify this device”，`components/PushNotificationsToggle.tsx`）：打开时请求通知权限、等 Service Worker 激活（`navigator.serviceWorker.ready`）后用服务端公钥订阅并上报；关闭只取消本设备。订阅所用的公钥与服务端不同（`push.json` 被重置过）时先取消旧订阅再重新订阅。不能开启时显示原因（`lib/push-support.ts`）：
     - 非安全来源（HTTP 局域网地址）：浏览器只允许在可信 HTTPS 下推送，需通过 `*.ts.net` 地址（Tailscale Serve，见 README）或 localhost 打开。
     - iPhone / iPad：需 iOS 16.4 以上，并把 TianForge 添加到主屏幕、从主屏幕打开。

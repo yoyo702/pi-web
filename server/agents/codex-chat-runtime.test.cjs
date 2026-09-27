@@ -124,6 +124,35 @@ test("a new chat starts a thread in the folder and runs under the id Codex gives
   assert.ok(turn.id);
 });
 
+test("the runtime list carries the settings the chat last used", async (t) => {
+  const { dir } = useFakeRuntime(t);
+  const runtime = appServer.start({ threadId: ID, cwd: dir, model: "gpt-a", approvalPolicy: "on-request" });
+  await runtime.ready;
+  assert.deepEqual(appServer.listRuntimes().find((entry) => entry.threadId === ID).settings, { model: "gpt-a", reasoningEffort: null, serviceTier: null, approvalPolicy: "on-request" });
+  // A turn's non-empty settings replace them; empty ones keep the last value.
+  await appServer.prompt(runtime, "long task", "gpt-b", "never", [], null, "high", null);
+  assert.deepEqual(appServer.listRuntimes().find((entry) => entry.threadId === ID).settings, { model: "gpt-b", reasoningEffort: "high", serviceTier: null, approvalPolicy: "never" });
+  // Reading again with other settings does not change a running runtime.
+  appServer.start({ threadId: ID, cwd: dir, approvalPolicy: "untrusted" });
+  assert.equal(appServer.listRuntimes().find((entry) => entry.threadId === ID).settings.approvalPolicy, "never");
+  await appServer.interrupt(runtime);
+});
+
+test("a turn Codex rejects does not report settings that never took effect", async (t) => {
+  const { dir } = useFakeRuntime(t);
+  const runtime = appServer.start({ threadId: ID, cwd: dir, model: "gpt-a", approvalPolicy: "on-request" });
+  await runtime.ready;
+  await assert.rejects(appServer.prompt(runtime, "reject turn", "gpt-b", "never", [], null, "high", null));
+  assert.deepEqual(appServer.listRuntimes().find((entry) => entry.threadId === ID).settings, { model: "gpt-a", reasoningEffort: null, serviceTier: null, approvalPolicy: "on-request" });
+});
+
+test("a new chat's runtime lists the settings it was created with", async (t) => {
+  const { dir } = useFakeRuntime(t);
+  const runtime = await appServer.create({ cwd: dir, model: "gpt-test", serviceTier: "flex", approvalPolicy: "never" });
+  t.after(() => appServer.stopAndWait(runtime.threadId));
+  assert.deepEqual(appServer.listRuntimes().find((entry) => entry.threadId === runtime.threadId).settings, { model: "gpt-test", reasoningEffort: null, serviceTier: "flex", approvalPolicy: "never" });
+});
+
 test("a new chat that Codex cannot start leaves no runtime behind", async (t) => {
   const { dir } = useFakeRuntime(t);
   appServer.configure({ command: process.execPath, args: [FAKE_SERVER], env: { ...process.env, FAKE_CODEX_STATE: path.join(dir, "state.json"), FAKE_CODEX_INIT_ERROR: "1" }, idleMs: IDLE_MS });

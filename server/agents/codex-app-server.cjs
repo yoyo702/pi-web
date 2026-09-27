@@ -157,6 +157,8 @@ function start({ threadId, cwd, model, serviceTier, approvalPolicy = "untrusted"
   if (sessions.has(threadId)) { const existing = sessions.get(threadId); if (existing.loaded) { cancelIdleShutdown(existing); scheduleIdleShutdown(existing); } return existing; }
   if (removing.has(threadId)) throw Object.assign(new Error("This Codex session is being archived or deleted"), { code: "session_busy" });
   const state = spawnRuntime(threadId, cwd);
+  // What a chat reopened without its tab should show (listed on codex_runtimes).
+  state.settings = { model: model || null, reasoningEffort: null, serviceTier: serviceTier || null, approvalPolicy };
   sessions.set(threadId, state); workspaceStatus.notify("codex_runtimes");
   state.ready = state.request("initialize", INITIALIZE).then(() => state.request("thread/resume", { threadId, cwd, model: model || null, serviceTier: serviceTier || null, approvalPolicy })).then((result) => { state.title = state.title || result?.thread?.name || result?.thread?.preview || ""; return result; });
   // A runtime that never resumed is useless; drop it so the next request retries.
@@ -167,6 +169,7 @@ function start({ threadId, cwd, model, serviceTier, approvalPolicy = "untrusted"
 /** Starts a new thread in `cwd`; its runtime is registered under the id Codex gives it. */
 async function create({ cwd, model, serviceTier, approvalPolicy = "untrusted" }) {
   const state = spawnRuntime(null, cwd);
+  state.settings = { model: model || null, reasoningEffort: null, serviceTier: serviceTier || null, approvalPolicy };
   try {
     await state.request("initialize", INITIALIZE);
     const result = await state.request("thread/start", { cwd, model: model || null, serviceTier: serviceTier || null, approvalPolicy });
@@ -182,7 +185,7 @@ async function create({ cwd, model, serviceTier, approvalPolicy = "untrusted" })
   scheduleIdleShutdown(state);
   return state;
 }
-async function prompt(state, text, model = null, approvalPolicy = null, images = [], clientUserMessageId = null, effort = null, serviceTier = null) { await state.ready; if (!state.title && text) state.title = text; const result = await state.request("turn/start", { threadId: state.threadId, cwd: state.cwd, input: [...(text ? [{ type: "text", text }] : []), ...images.map((url) => ({ type: "image", url }))], clientUserMessageId, approvalPolicy, model, effort, serviceTier, summary: "auto" }); state.activeTurnId = result?.turn?.id || result?.id || state.activeTurnId; if (state.activeTurnId) cancelIdleShutdown(state); workspaceStatus.notify("codex_runtimes"); return result; }
+async function prompt(state, text, model = null, approvalPolicy = null, images = [], clientUserMessageId = null, effort = null, serviceTier = null) { await state.ready; if (!state.title && text) state.title = text; const result = await state.request("turn/start", { threadId: state.threadId, cwd: state.cwd, input: [...(text ? [{ type: "text", text }] : []), ...images.map((url) => ({ type: "image", url }))], clientUserMessageId, approvalPolicy, model, effort, serviceTier, summary: "auto" }); if (state.settings) { if (model) state.settings.model = model; if (effort) state.settings.reasoningEffort = effort; if (serviceTier) state.settings.serviceTier = serviceTier; if (approvalPolicy) state.settings.approvalPolicy = approvalPolicy; } state.activeTurnId = result?.turn?.id || result?.id || state.activeTurnId; if (state.activeTurnId) cancelIdleShutdown(state); workspaceStatus.notify("codex_runtimes"); return result; }
 // Adds input to the running turn. Codex refuses it if that turn has already ended.
 async function steer(state, text, images = [], clientUserMessageId = null) {
   await state.ready;
@@ -253,6 +256,7 @@ function listRuntimes() {
   return [...sessions.entries()].map(([threadId, state]) => ({
     threadId,
     cwd: state.cwd,
+    settings: state.settings ?? null,
     ...runtimeForSession(threadId),
   }));
 }

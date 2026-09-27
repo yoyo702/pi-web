@@ -3,12 +3,15 @@
 
 import { AssistantRuntimeProvider, MessagePrimitive, ThreadPrimitive, useAuiState, useExternalStoreRuntime, useMessagePartText, type AppendMessage, type ThreadMessage } from "@assistant-ui/react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { CodexConversationItem } from "@/lib/agents/codex-conversation";
 import { claimChatQueueSend, EMPTY_CHAT_QUEUE, finishChatQueueSend, getChatQueue, moveChatQueue, pauseStaleChatQueue, subscribeChatQueues, updateChatQueue } from "@/lib/chat-queue-store";
 import { clearDraft, getDraft, setDraft, type ChatDraftImage } from "@/lib/draft-store";
 import type { AgentMessage, AssistantMessage, BashExecutionMessage, ToolResultMessage, UserMessage } from "@/lib/types";
+import { CODEX_CHAT_PERMISSION_OPTIONS, type PermissionOption } from "@/lib/chat-permissions";
 import { MarkdownBody } from "../../MarkdownBody";
 import { MessageView } from "../../MessageView";
+import { ConfirmDialog } from "../ConfirmDialog";
 import { CodexRequestCard, type CodexRequestAnswer, type CodexServerRequest } from "./CodexRequestCard";
 
 const messageDates = new Map<string, Date>();
@@ -125,8 +128,7 @@ function slashEntries(commands: SlashCommand[]): SlashEntry[] {
   });
 }
 const NO_FORK_TARGETS = new Map<string, string>();
-export type PermissionOption = { value: string; label: string };
-const CODEX_PERMISSION_OPTIONS: PermissionOption[] = [{ value: "untrusted", label: "Restricted" }, { value: "on-request", label: "Ask when needed" }, { value: "never", label: "Full access" }];
+export type { PermissionOption };
 function DraftComposer({ draftKey, maxImageBytes, running, canSteer, slashCommands, permissionOptions, sentHistory, modelLabel, modelValue, modelOptions, modelMenuRequest, reasoningEffort, serviceTier, approvalPolicy, approvalLabel, statusLabel, activityLabel, noticeLabel, contextLabel, expandDetails, forkDisabled, onModelToggle, onModelChange, onReasoningEffortChange, onServiceTierChange, onApprovalPolicyChange, onExpandDetails, onFork, onSend, onSteer, onQueue, onStop }: { draftKey: string; maxImageBytes: number; running: boolean; canSteer: boolean; slashCommands: SlashCommand[]; permissionOptions: PermissionOption[]; sentHistory: string[]; modelLabel: string; modelValue: string; modelOptions: ModelOption[]; modelMenuRequest: number; reasoningEffort: string; serviceTier: string; approvalPolicy: string; approvalLabel: string; statusLabel: string; activityLabel?: string; noticeLabel?: string; contextLabel?: string; expandDetails: boolean; forkDisabled: boolean; onModelToggle: () => void; onModelChange: (model: string) => void; onReasoningEffortChange: (effort: string) => void; onServiceTierChange: (tier: string) => void; onApprovalPolicyChange: (policy: string) => void; onExpandDetails: () => void; onFork?: () => void; onSend: (text: string, images?: ChatDraftImage[]) => Promise<boolean>; onSteer: (text: string, images: ChatDraftImage[]) => Promise<"steered" | "queue" | "failed">; onQueue: (message: { text: string; images: ChatDraftImage[] }) => void; onStop: () => Promise<void> }) {
   const initialDraft = getDraft(draftKey);
   const [value, setValue] = useState(() => initialDraft?.value ?? "");
@@ -136,6 +138,14 @@ function DraftComposer({ draftKey, maxImageBytes, running, canSteer, slashComman
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [configMenuOpen, setConfigMenuOpen] = useState(false);
+  // A dangerous permission waits here until confirmed; the select stays on the current value.
+  const [pendingPermission, setPendingPermission] = useState<PermissionOption | null>(null);
+  const choosePermission = (value: string) => {
+    const option = permissionOptions.find((candidate) => candidate.value === value);
+    if (!option?.danger) { onApprovalPolicyChange(value); return; }
+    setConfigMenuOpen(false);
+    setPendingPermission(option);
+  };
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const configMenuRef = useRef<HTMLDivElement>(null);
   useEffect(() => { const draft = getDraft(draftKey); setValue(draft?.value ?? ""); setImages(draft?.images ?? []); }, [draftKey]);
@@ -203,7 +213,7 @@ function DraftComposer({ draftKey, maxImageBytes, running, canSteer, slashComman
         <button type="button" className="codex-aui-compose-status" title="Chat configuration" aria-haspopup="dialog" aria-expanded={configMenuOpen} onClick={() => setConfigMenuOpen((open) => !open)}>{approvalLabel}</button>
         {configMenuOpen && <div className="codex-aui-config-menu">
           <strong>Next turn settings</strong>
-          <label>Permissions<select value={approvalPolicy} disabled={running} onChange={(event) => onApprovalPolicyChange(event.target.value)}>{permissionOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+          <label>Permissions<select value={approvalPolicy} disabled={running} onChange={(event) => choosePermission(event.target.value)}>{permissionOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
           {(modelOptions.find((option) => option.id === modelValue)?.reasoningEfforts?.length ?? 0) > 0 && <label>Reasoning<select value={reasoningEffort} disabled={running} onChange={(event) => onReasoningEffortChange(event.target.value)}>{modelOptions.find((option) => option.id === modelValue)?.reasoningEfforts?.map((option) => <option key={option.id} value={option.id}>{option.id}</option>)}</select></label>}
           {(modelOptions.find((option) => option.id === modelValue)?.serviceTiers?.length ?? 0) > 0 && <label>Service tier<select value={serviceTier} disabled={running} onChange={(event) => onServiceTierChange(event.target.value)}><option value="">Standard</option>{modelOptions.find((option) => option.id === modelValue)?.serviceTiers?.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select></label>}
           {running && <small>Settings can be changed when the current turn finishes.</small>}
@@ -214,9 +224,17 @@ function DraftComposer({ draftKey, maxImageBytes, running, canSteer, slashComman
       {onFork && <details className="codex-aui-more"><summary>More</summary><div><button type="button" className="codex-aui-view-toggle" disabled={forkDisabled} onClick={onFork}>Fork chat</button></div></details>}
       {running && <button type="button" className="codex-aui-stop" onClick={() => void onStop()}><span aria-hidden="true">■</span> Stop</button>}
     </div>
+    {pendingPermission && createPortal(<ConfirmDialog
+      title={`Switch to ${pendingPermission.label}?`}
+      description={pendingPermission.danger ?? ""}
+      confirmLabel="Switch anyway"
+      destructive
+      onCancel={() => setPendingPermission(null)}
+      onConfirm={() => { onApprovalPolicyChange(pendingPermission.value); setPendingPermission(null); }}
+    />, document.body)}
   </form>;
 }
-export function CodexAssistantThread({ items, maxImageBytes = 5 * 1024 * 1024, running, approvals, requestCards, canSteer = true, slashCommands = CODEX_SLASH_COMMANDS, permissionOptions = CODEX_PERMISSION_OPTIONS, cwd, draftKey, modelLabel, modelValue, modelOptions, modelMenuRequest, reasoningEffort, serviceTier, approvalPolicy, approvalLabel, statusLabel, activityLabel, noticeLabel, contextLabel, forkDisabled, turnOrder, forkPoints, toolDetail, onModelToggle, onModelChange, onReasoningEffortChange, onServiceTierChange, onApprovalPolicyChange, onFork, onForkFrom, onSend, onSteer, onStop, onApproval, onOpenFile }: { items: CodexConversationItem[]; /** Largest image file the composer attaches. */ maxImageBytes?: number; running: boolean; approvals?: CodexServerRequest[]; /** Rendered after the messages, like `approvals`. */ requestCards?: ReactNode; canSteer?: boolean; slashCommands?: SlashCommand[]; permissionOptions?: PermissionOption[]; cwd?: string; draftKey: string; modelLabel: string; modelValue: string; modelOptions: ModelOption[]; modelMenuRequest: number; reasoningEffort: string; serviceTier: string; approvalPolicy: string; approvalLabel: string; statusLabel: string; activityLabel?: string; noticeLabel?: string; contextLabel?: string; forkDisabled: boolean; /** The thread's turn ids in order; a user message that starts a later turn can be forked from. */ turnOrder?: string[]; /** Instead of `turnOrder`: the user messages that can be forked from, by item id, and their fork targets. */ forkPoints?: Map<string, string>; /** Shown under a tool call (Claude's sub-agent steps). */ toolDetail?: (item: CodexConversationItem) => ReactNode; onModelToggle: () => void; onModelChange: (model: string) => void; onReasoningEffortChange: (effort: string) => void; onServiceTierChange: (tier: string) => void; onApprovalPolicyChange: (policy: string) => void; onFork?: () => void; /** Forks the turns through `lastTurnId` (or a `forkPoints` target); `text` is the message forked from. */ onForkFrom?: (lastTurnId: string, text: string) => void; onSend: (text: string, images?: ChatDraftImage[]) => Promise<boolean>; onSteer: (text: string, images: ChatDraftImage[]) => Promise<"steered" | "queue" | "failed">; onStop: () => Promise<void>; onApproval?: (requestId: string, answer: CodexRequestAnswer) => void; onOpenFile?: (path: string) => void }) {
+export function CodexAssistantThread({ items, maxImageBytes = 5 * 1024 * 1024, running, approvals, requestCards, canSteer = true, slashCommands = CODEX_SLASH_COMMANDS, permissionOptions = CODEX_CHAT_PERMISSION_OPTIONS, cwd, draftKey, modelLabel, modelValue, modelOptions, modelMenuRequest, reasoningEffort, serviceTier, approvalPolicy, approvalLabel, statusLabel, activityLabel, noticeLabel, contextLabel, forkDisabled, turnOrder, forkPoints, toolDetail, onModelToggle, onModelChange, onReasoningEffortChange, onServiceTierChange, onApprovalPolicyChange, onFork, onForkFrom, onSend, onSteer, onStop, onApproval, onOpenFile }: { items: CodexConversationItem[]; /** Largest image file the composer attaches. */ maxImageBytes?: number; running: boolean; approvals?: CodexServerRequest[]; /** Rendered after the messages, like `approvals`. */ requestCards?: ReactNode; canSteer?: boolean; slashCommands?: SlashCommand[]; permissionOptions?: PermissionOption[]; cwd?: string; draftKey: string; modelLabel: string; modelValue: string; modelOptions: ModelOption[]; modelMenuRequest: number; reasoningEffort: string; serviceTier: string; approvalPolicy: string; approvalLabel: string; statusLabel: string; activityLabel?: string; noticeLabel?: string; contextLabel?: string; forkDisabled: boolean; /** The thread's turn ids in order; a user message that starts a later turn can be forked from. */ turnOrder?: string[]; /** Instead of `turnOrder`: the user messages that can be forked from, by item id, and their fork targets. */ forkPoints?: Map<string, string>; /** Shown under a tool call (Claude's sub-agent steps). */ toolDetail?: (item: CodexConversationItem) => ReactNode; onModelToggle: () => void; onModelChange: (model: string) => void; onReasoningEffortChange: (effort: string) => void; onServiceTierChange: (tier: string) => void; onApprovalPolicyChange: (policy: string) => void; onFork?: () => void; /** Forks the turns through `lastTurnId` (or a `forkPoints` target); `text` is the message forked from. */ onForkFrom?: (lastTurnId: string, text: string) => void; onSend: (text: string, images?: ChatDraftImage[]) => Promise<boolean>; onSteer: (text: string, images: ChatDraftImage[]) => Promise<"steered" | "queue" | "failed">; onStop: () => Promise<void>; onApproval?: (requestId: string, answer: CodexRequestAnswer) => void; onOpenFile?: (path: string) => void }) {
   const [visibleCount, setVisibleCount] = useState(300);
   const [expandDetails, setExpandDetails] = useState(false);
   const [detailOverrides, setDetailOverrides] = useState<Record<string, boolean>>({});

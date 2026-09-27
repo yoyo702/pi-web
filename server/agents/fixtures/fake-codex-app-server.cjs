@@ -9,7 +9,9 @@
 // Runtime: `thread/start` adds a thread to the state file (reading its turns fails until its first `turn/start`, as in Codex); `turn/start` starts a turn that runs until `turn/interrupt`; a
 // prompt containing "approve" also asks for an approval, "question" asks the
 // user a question, and answering either ends the turn. "tool call" sends an
-// `item/tool/call` request (which pi-web refuses). `turn/steer` checks
+// `item/tool/call` request (which pi-web refuses). "reject turn" makes
+// `turn/start` itself fail (e.g. a validation error), starting no turn.
+// `turn/steer` checks
 // `expectedTurnId`, and refuses a turn whose prompt contains "review".
 // `thread/fork` copies a thread under a new id, keeping its `turns` through
 // `lastTurnId`; `thread/read` with `includeTurns` returns a thread's `turns`.
@@ -64,11 +66,12 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       if (thread.writer) return fail(id, `thread ${params.threadId} already has an active writer`);
       return reply(id, { thread: publicThread(thread) });
     case "turn/start": {
+      const text = params.input.filter((part) => part.type === "text").map((part) => part.text).join(" ");
+      if (text.includes("reject turn")) return fail(id, "turn rejected");
       if (thread?.unmaterialized) { delete thread.unmaterialized; save(state); }
       activeTurn = `turn-${Date.now()}`;
       reply(id, { turn: { id: activeTurn } });
       notify("turn/started", { turn: { id: activeTurn } });
-      const text = params.input.filter((part) => part.type === "text").map((part) => part.text).join(" ");
       reviewTurn = text.includes("review");
       if (text.includes("approve")) notify("item/commandExecution/requestApproval", { command: "npm test", proposedExecpolicyAmendment: ["npm", "test"] }, 900);
       if (text.includes("tool call")) notify("item/tool/call", { tool: "lookup" }, 901);

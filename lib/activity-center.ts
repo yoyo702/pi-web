@@ -52,3 +52,23 @@ export function newNotifications(notifications: ActivityNotification[], seen: Re
   if (!seen) return [];
   return notifications.filter((notification) => !seen.has(notification.id)).reverse();
 }
+
+const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ? "" : "s"}`;
+
+/**
+ * The confirmation shown before closing a workspace, or null when nothing in
+ * it is running or waiting. Closing never stops anything, so it lists what
+ * keeps running: terminals, Codex/Claude chats and Pi sessions, in the
+ * project root and in its worktrees.
+ */
+export function workspaceCloseWarning(label: string, activity: Pick<WorkspaceActivity, "items"> | undefined): string | null {
+  const busy = (activity?.items ?? []).filter((item) => item.state === "working" || item.state === "approval");
+  if (busy.length === 0) return null;
+  const terminals = busy.filter((item) => item.kind === "terminal").length;
+  const chats = busy.filter((item) => item.kind === "codex" || item.kind === "claude").length;
+  const sessions = busy.filter((item) => item.kind === "pi").length;
+  const waiting = busy.filter((item) => item.state === "approval").length;
+  const parts = [terminals && plural(terminals, "terminal"), chats && plural(chats, "chat"), sessions && plural(sessions, "Pi session")].filter((part): part is string => Boolean(part));
+  const list = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0];
+  return `${list} ${busy.length === 1 ? "is" : "are"} still running in ${label}${waiting ? ` (${waiting} waiting for approval)` : ""}. Close the workspace tab and keep ${busy.length === 1 ? "it" : "them"} running?`;
+}

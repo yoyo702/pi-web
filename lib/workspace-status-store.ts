@@ -6,6 +6,8 @@ export interface CodexRuntimeStatus {
   owner?: string;
   state: "idle" | "running" | "approval";
   connected?: boolean;
+  /** The settings the chat last ran with; missing from older servers. */
+  settings?: { model: string | null; reasoningEffort: string | null; serviceTier: string | null; approvalPolicy: string } | null;
 }
 
 /** A Claude Chat process (server/agents/claude-chat-runtime.cjs). */
@@ -16,6 +18,9 @@ export interface ClaudeRuntimeStatus {
   owner?: "chat";
   state: "idle" | "running" | "approval";
   connected?: boolean;
+  /** The model alias the process was launched with; null = default. */
+  model?: string | null;
+  permissionMode?: string | null;
 }
 
 /** One entry of the server's activity notification log (server/notifications.cjs). */

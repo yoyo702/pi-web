@@ -7,9 +7,10 @@ import { streamFailure } from "@/lib/agents/stream-failure";
 import type { ClaudePermissionMode } from "@/lib/workspace/tabs";
 import type { ClaudeForkTarget } from "../../workspace/WorkspaceActions";
 import type { CodexConversationItem } from "@/lib/agents/codex-conversation";
-import { CodexAssistantThread, type PermissionOption, type SlashCommand } from "../codex/CodexAssistantThread";
+import { CodexAssistantThread, type SlashCommand } from "../codex/CodexAssistantThread";
 import { ClaudeAgentContext, ClaudeAgentSteps, isAgentTool, type ClaudeAgentProgress } from "./ClaudeAgentSteps";
 import { ClaudePermissionCard, type ClaudePermissionAnswer, type ClaudePermissionRequest } from "./ClaudePermissionCard";
+import { CLAUDE_CHAT_PERMISSION_OPTIONS } from "@/lib/chat-permissions";
 
 type ClaudeEvent = ClaudeRecord & { piRuntime?: string; runtimeId?: string; request_id?: string; request?: ClaudePermissionRequest["request"]; requestId?: string; permissionMode?: string; model?: string; interrupted?: boolean; error?: string; code?: string; compacting?: boolean; commands?: SlashCommand[]; tool_use_id?: string; description?: string; last_tool_name?: string; status?: string; usage?: { tool_uses?: number } };
 type Runtime = { runtimeId: string; running: boolean; compacting?: boolean; model: string | null; permissionMode: string | null; process: boolean; requests: ClaudePermissionRequest[] };
@@ -17,7 +18,7 @@ type ChatRead = { session?: { id: string; title: string | null; created?: boolea
 type ApiError = { error?: string; code?: string };
 
 const MODEL_OPTIONS = [{ id: "sonnet", label: "Sonnet" }, { id: "opus", label: "Opus" }, { id: "haiku", label: "Haiku" }];
-const PERMISSION_OPTIONS: PermissionOption[] = [{ value: "default", label: "Ask before edits" }, { value: "acceptEdits", label: "Accept edits" }, { value: "plan", label: "Plan mode" }, { value: "bypassPermissions", label: "Bypass permissions" }];
+const PERMISSION_OPTIONS = CLAUDE_CHAT_PERMISSION_OPTIONS;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isPermissionMode = (value: unknown): value is ClaudePermissionMode => PERMISSION_OPTIONS.some((option) => option.value === value);
 const post = (url: string, body: unknown) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });

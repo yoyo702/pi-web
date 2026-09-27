@@ -236,7 +236,18 @@ test("the status stream lists chat processes", async (t) => {
   assert.deepEqual(workspaceStatus.snapshot("claude_runtimes"), { type: "claude_runtimes", runtimes: [] });
   await chat.send(state, { text: "hello" });
   await waitFor(() => events.some((event) => event.type === "result"));
-  assert.deepEqual(workspaceStatus.snapshot("claude_runtimes"), { type: "claude_runtimes", runtimes: [{ sessionId: ID, cwd, title: "hello", owner: "chat", state: "idle", connected: true }] });
+  assert.deepEqual(workspaceStatus.snapshot("claude_runtimes"), { type: "claude_runtimes", runtimes: [{ sessionId: ID, cwd, title: "hello", owner: "chat", state: "idle", connected: true, model: null, permissionMode: "default" }] });
+});
+
+test("the status stream lists the model and permission a chat runs with", async (t) => {
+  const { cwd } = useFakeClaude(t);
+  const state = chat.open(ID, cwd);
+  const { events, off } = collect(state);
+  t.after(off);
+  await chat.send(state, { text: "hello", model: "haiku", permissionMode: "plan" });
+  await waitFor(() => events.some((event) => event.type === "result"));
+  const [runtime] = workspaceStatus.snapshot("claude_runtimes").runtimes;
+  assert.deepEqual([runtime.model, runtime.permissionMode], ["haiku", "plan"]);
 });
 
 test("the API creates a chat, reads its history and answers events", async (t) => {

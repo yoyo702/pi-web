@@ -12,7 +12,7 @@ const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringif
 export interface WorkspaceActivityResult {
   /** Activity per workspace id (every workspace has an entry once computed). */
   activityById: Record<string, WorkspaceActivity>;
-  /** Running terminals per cwd, for the close-workspace confirmation. */
+  /** Running terminals per cwd, for the mobile project badge. */
   runningByCwd: Record<string, number>;
   /**
    * Pi item labels come from the session list fetched when a session first

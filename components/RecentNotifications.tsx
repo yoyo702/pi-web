@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { Bot, TerminalSquare } from "lucide-react";
 import { ProductStatusDot } from "./ProductStatus";
 import { useWorkspaceStatus } from "@/hooks/useWorkspaceStatus";
-import { markNotificationsRead, notificationAge, notificationEventLabel, notificationKindLabel, notificationTarget, notificationWorkspace } from "@/lib/activity-notifications";
+import { markNotificationsRead, notificationAge, notificationEventLabel, notificationKindLabel, notificationOpenWorkspace, notificationTarget } from "@/lib/activity-notifications";
 import type { ProjectWorkspace } from "@/lib/project-workspaces";
 import type { ActivityTarget } from "@/lib/rail-activity";
 import type { ActivityNotification } from "@/lib/workspace-status-store";
@@ -18,7 +18,7 @@ const EVENT_STATUS = { completed: "completed", failed: "failed", approval: "appr
  */
 export function RecentNotifications({ workspaces, onOpen }: {
   workspaces: ProjectWorkspace[];
-  /** Opens the entry's session, terminal or Codex chat in its workspace. */
+  /** Opens the entry's session, terminal or Codex chat in its workspace, reopening a closed project first. */
   onOpen: (workspace: ProjectWorkspace, target: ActivityTarget) => void;
 }) {
   const { notifications, unreadNotifications } = useWorkspaceStatus();
@@ -31,8 +31,8 @@ export function RecentNotifications({ workspaces, onOpen }: {
 
   const open = (notification: ActivityNotification) => {
     if (!notification.read) void markNotificationsRead({ ids: [notification.id] });
-    const workspace = notificationWorkspace(notification, workspaces);
-    if (workspace) onOpen(workspace, notificationTarget(notification));
+    // A closed project is opened again, then the entry's target in it.
+    onOpen(notificationOpenWorkspace(notification, workspaces).workspace, notificationTarget(notification));
   };
 
   return <section aria-label="Recent notifications" style={{ display: "grid", gap: 1 }}>
@@ -41,15 +41,15 @@ export function RecentNotifications({ workspaces, onOpen }: {
       {unreadNotifications > 0 && <button type="button" onClick={() => void markNotificationsRead({ all: true })} style={{ padding: "3px 6px", border: 0, borderRadius: 5, background: "transparent", color: "var(--accent)", cursor: "pointer", font: "600 10px/1 inherit" }}>Mark all read</button>}
     </header>
     {entries.map((notification) => {
-      const workspace = notificationWorkspace(notification, workspaces);
+      const { workspace, closed } = notificationOpenWorkspace(notification, workspaces);
       const Icon = notification.kind === "terminal" ? TerminalSquare : Bot;
-      const meta = [workspace?.label, notificationKindLabel(notification), notificationEventLabel(notification), notificationAge(notification.createdAt, now)].filter(Boolean).join(" · ");
+      const meta = [workspace.label, notificationKindLabel(notification), notificationEventLabel(notification), notificationAge(notification.createdAt, now)].filter(Boolean).join(" · ");
       return <button
         key={notification.id}
         type="button"
         data-unread={notification.read ? undefined : "true"}
         aria-label={`${notification.title} · ${notificationKindLabel(notification)} · ${notificationEventLabel(notification)}${notification.read ? "" : " · unread"}`}
-        title={`${notification.title}${notification.detail ? `\n${notification.detail}` : ""}\n${notification.cwd}${workspace ? "" : "\nThis project is not open."}`}
+        title={`${notification.title}${notification.detail ? `\n${notification.detail}` : ""}\n${notification.cwd}${closed ? "\nThis project is closed. Opening this entry reopens it." : ""}`}
         onClick={() => open(notification)}
         style={{ width: "100%", minHeight: 40, display: "flex", alignItems: "center", gap: 8, padding: "5px 7px", border: 0, borderRadius: 6, background: "transparent", color: notification.read ? "var(--text-muted)" : "var(--text)", cursor: "pointer", textAlign: "left", font: "11px/1.3 inherit" }}
       >

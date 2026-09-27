@@ -231,7 +231,7 @@ function handleRecord(state, record) {
       const mode = record.permissionMode && record.permissionMode !== state.permissionMode ? record.permissionMode : undefined;
       if (!mode && compacting === state.compacting) return;
       state.compacting = compacting;
-      if (mode) state.permissionMode = mode;
+      if (mode) { state.permissionMode = mode; workspaceStatus.notify("claude_runtimes"); }
       emit(state, { type: "system", subtype: "status", compacting, ...(mode ? { permissionMode: mode } : {}) });
     } else if (record.subtype === "compact_boundary") {
       const compact = catalog.compactRecord(record);
@@ -496,7 +496,8 @@ function runtimeForSession(sessionId) {
 }
 function isBusySession(sessionId) { const state = sessions.get(sessionId); return Boolean(state && isBusy(state)); }
 function listRuntimes() {
-  return [...sessions.values()].filter((state) => state.child).map((state) => ({ sessionId: state.sessionId, cwd: state.cwd, title: state.title || null, ...runtimeForSession(state.sessionId) }));
+  // model: the alias the process was launched with (null = default), so a chat reopened without its tab keeps it.
+  return [...sessions.values()].filter((state) => state.child).map((state) => ({ sessionId: state.sessionId, cwd: state.cwd, title: state.title || null, ...runtimeForSession(state.sessionId), model: state.launchModel || null, permissionMode: state.permissionMode || null }));
 }
 function describe(state) {
   return { runtimeId: state.runtimeId, running: state.running, compacting: state.compacting, model: state.model, launchModel: state.launchModel, permissionMode: state.permissionMode, process: Boolean(state.child), requests: pendingRequests(state) };

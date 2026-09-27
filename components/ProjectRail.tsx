@@ -10,7 +10,7 @@ import type { ProjectWorkspace } from "@/lib/project-workspaces";
 import type { GitStatusResponse } from "@/lib/git-types";
 import { getProductStatus } from "@/lib/product-status";
 import { activityTarget, type ActivityTarget, type RailActivityItem, type WorkspaceActivity } from "@/lib/rail-activity";
-import { activitySummary, activityTotals } from "@/lib/activity-center";
+import { activitySummary, activityTotals, workspaceCloseWarning } from "@/lib/activity-center";
 import { useWorkspaceStatusSelector } from "@/hooks/useWorkspaceStatus";
 
 interface ProjectStatus {
@@ -186,8 +186,9 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
   }, [onRestore, recentlyClosed]);
 
   const closeWorkspace = (workspace: ProjectWorkspace) => {
-    const running = runningByCwd[workspace.cwd] ?? 0;
-    if (running > 0 && !window.confirm(`${running} process${running === 1 ? " is" : "es are"} still running in ${workspace.label}. Close the workspace tab and keep them running?`)) return;
+    // Counted like the rail badges: the project root and its worktrees, every kind of run.
+    const warning = workspaceCloseWarning(workspace.label, activityById[workspace.id]);
+    if (warning && !window.confirm(warning)) return;
     onClose(workspace);
     setRecentlyClosed(workspace);
   };
