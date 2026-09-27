@@ -19,6 +19,7 @@ import {
   restoreScrollTop,
 } from "@/lib/chat-lazy-load";
 import { ProductBrand } from "./ProductBrand";
+import { isComposingKeyEvent } from "@/lib/keyboard";
 
 interface Props {
   session: SessionInfo | null;
@@ -1240,7 +1241,7 @@ function ExtensionDialog({
                 }}
                 onKeyDown={(e) => {
                   const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
-                  const isComposing = composingRef.current || e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
+                  const isComposing = composingRef.current || isComposingKeyEvent(e);
                   if (e.key === "Enter") {
                     if (isComposing) return;
                     e.preventDefault();
@@ -1405,7 +1406,7 @@ function ExtensionCustomPanel({
           spellCheck={false}
           onKeyDown={(event) => {
             const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
-            const isComposing = composingRef.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229;
+            const isComposing = composingRef.current || isComposingKeyEvent(event);
             if (isComposing) return;
             if (event.key === "Enter" && recentlyComposed) {
               event.preventDefault();

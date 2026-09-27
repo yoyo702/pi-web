@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { isComposingKeyEvent } from "@/lib/keyboard";
 
 /** Escape cancels the dialog; captured first so a dialog underneath does not also close. */
 export function useDialogEscape(onCancel: () => void, disabled: boolean) {
@@ -10,7 +11,7 @@ export function useDialogEscape(onCancel: () => void, disabled: boolean) {
       if (event.key !== "Escape") return;
       // An IME committing composed text with Escape (e.g. cancelling a
       // candidate window) must not also close the dialog underneath it.
-      if (event.isComposing || event.keyCode === 229) return;
+      if (isComposingKeyEvent(event)) return;
       event.preventDefault();
       event.stopPropagation();
       onCancel();

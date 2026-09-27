@@ -14,6 +14,7 @@ import {
 } from "@/lib/file-fuzzy";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { isComposingKeyEvent } from "@/lib/keyboard";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -782,10 +783,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
       const nativeEvent = e.nativeEvent;
       const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
-      const isComposing =
-        isComposingRef.current ||
-        nativeEvent.isComposing ||
-        nativeEvent.keyCode === 229;
+      const isComposing = isComposingRef.current || isComposingKeyEvent(nativeEvent);
 
       if (e.key === "Enter" && !e.shiftKey && (isComposing || recentlyComposed)) {
         if (recentlyComposed) e.preventDefault();

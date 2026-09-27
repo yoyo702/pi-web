@@ -5,6 +5,7 @@ import type { SessionInfo } from "@/lib/types";
 import type { ProjectWorkspace } from "@/lib/project-workspaces";
 import { filterSessionsByQuery, getSessionDisplayTitle } from "@/lib/session-list";
 import { useDialogEscape } from "./agents/use-dialog-escape";
+import { isComposingKeyEvent } from "@/lib/keyboard";
 
 interface QuickSwitcherProps {
   open: boolean;
@@ -116,7 +117,7 @@ export function QuickSwitcher({ open, onClose, projects, activeProjectId, onSele
             else if (event.key === "Enter") {
               // Mirrors ChatInput's IME guard: an Enter that commits IME
               // composition must not also select/close the switcher.
-              if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+              if (isComposingKeyEvent(event)) return;
               event.preventDefault();
               const entry = entries[activeIndex];
               if (entry) select(entry);
