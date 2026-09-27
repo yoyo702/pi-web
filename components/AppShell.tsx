@@ -51,7 +51,7 @@ import { busyChatForTab, type BusyChat } from "@/lib/chat-tab-close";
 import { claudeReopenSettings, codexReopenSettings } from "@/lib/chat-reopen";
 import { activityTotals } from "@/lib/activity-center";
 import { markNotificationsRead, notificationOpenWorkspace, notificationTarget } from "@/lib/activity-notifications";
-import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PanelsTopLeft, Plus, TerminalSquare } from "lucide-react";
+import { Activity, ArrowLeft, Bot, Files, GitBranch, Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PanelsTopLeft, Plus, TerminalSquare, X } from "lucide-react";
 import { projectLabel, upsertProjectWorkspace, type ProjectWorkspace } from "@/lib/project-workspaces";
 import { getProductStatus } from "@/lib/product-status";
 import { windowTitle } from "@/lib/window-title";
@@ -744,9 +744,26 @@ export function AppShell() {
     dispatchSide({ type: "pathRenamed", oldPath, newPath, isDir });
   }, [side.tabs]);
 
+  // Deleting from the Explorer has already removed the file on disk, so a
+  // dirty tab's draft can't be saved anymore: close it (pathDeleted) and say
+  // so with a non-blocking notice instead of letting the edits vanish silently.
+  const [discardedDraftNotice, setDiscardedDraftNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!discardedDraftNotice) return;
+    const timer = window.setTimeout(() => setDiscardedDraftNotice(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [discardedDraftNotice]);
   const handleExplorerPathDeleted = useCallback((deletedPath: string, isDir: boolean) => {
+    const isUnder = (value: string) => value === deletedPath || (isDir && value.startsWith(`${deletedPath}/`));
+    const dirtyTabs = side.tabs.filter((tab) => tab.kind === "file" && isUnder(tab.filePath) && dirtyFileTabsRef.current.has(tab.id));
+    for (const tab of dirtyTabs) dirtyFileTabsRef.current.delete(tab.id);
+    if (dirtyTabs.length > 0) {
+      setDiscardedDraftNotice(dirtyTabs.length === 1
+        ? `${dirtyTabs[0].label} was deleted. Unsaved changes were discarded.`
+        : `${dirtyTabs.length} open files were deleted. Unsaved changes were discarded.`);
+    }
     dispatchSide({ type: "pathDeleted", path: deletedPath, isDir });
-  }, []);
+  }, [side.tabs]);
 
   const handleCloseFileTabs = useCallback((tabIds: string[]) => {
     const ids = tabIds.filter((id) => confirmDiscardFileTab(id));
@@ -1881,6 +1898,7 @@ export function AppShell() {
       onModelsChanged={() => setModelsRefreshKey((key) => key + 1)}
       onPluginsReloaded={() => setSessionKey((key) => key + 1)}
     />}
+    {discardedDraftNotice && <div role="status" aria-live="polite" data-testid="discarded-draft-notice" style={{ position: "fixed", right: 14, bottom: 14, zIndex: 1400, maxWidth: "min(420px,calc(100vw - 28px))", minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: "8px 9px 8px 13px", border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 16px 44px rgba(0,0,0,.36)", fontSize: 12 }}><span style={{ minWidth: 0, flex: 1, overflowWrap: "anywhere" }}>{discardedDraftNotice}</span><button type="button" aria-label="Dismiss notice" onClick={() => setDiscardedDraftNotice(null)} style={{ width: 28, height: 28, display: "grid", placeItems: "center", padding: 0, border: 0, borderRadius: 5, background: "transparent", color: "var(--text-dim)", cursor: "pointer" }}><X size={13} /></button></div>}
     </WorkspaceActionsProvider>
   );
 }

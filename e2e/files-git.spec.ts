@@ -203,6 +203,40 @@ test("switching file tabs while editing prompts to discard, and cancelling keeps
   await expect(textarea).toHaveValue("file a, edited\n");
 });
 
+test("deleting a file with unsaved edits from the Explorer closes its tab with a notice", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name.startsWith("mobile"), "desktop file-tab test");
+  const workspace = mkdtempSync(join(tmpdir(), `pi-web-e2e-deleted-dirty-${testInfo.project.name}-`));
+  writeFileSync(join(workspace, "README.md"), "# readme\n");
+  await page.request.post("/api/cwd/validate", { data: { cwd: workspace } });
+  await page.route("**/api/sessions", async (route) => route.fulfill({ json: { sessions: [{
+    id: "pi-session", path: "/tmp/pi-web-e2e/session.jsonl", cwd: workspace, projectRoot: workspace,
+    created: "2026-08-03T00:00:00.000Z", modified: "2026-08-03T00:00:00.000Z", messageCount: 1, firstMessage: "test",
+  }], runningSessionIds: [] } }));
+
+  await page.goto("/");
+  await expect(page.getByRole("searchbox", { name: "Search Pi sessions" })).toBeVisible();
+  await page.getByRole("button", { name: "Show file panel" }).click();
+
+  const row = page.locator(`[data-file-path="${join(workspace, "README.md")}"]`);
+  await expect(row).toBeVisible();
+  await row.click();
+  await page.getByRole("button", { name: "Edit file" }).click();
+  const textarea = page.getByRole("textbox", { name: "Edit README.md" });
+  await textarea.fill("# readme, edited\n");
+
+  let dialogShown = false;
+  page.on("dialog", (dialog) => { dialogShown = true; void dialog.dismiss(); });
+  await row.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Delete…" }).click();
+  // Keyboard-activate: with the side panel open, its resize handle overlaps
+  // the centred confirm dialog and would intercept a pointer click.
+  await page.getByRole("alertdialog", { name: "Confirm deletion" }).getByRole("button", { name: "Delete" }).press("Enter");
+
+  await expect(page.getByTestId("discarded-draft-notice")).toContainText("README.md was deleted. Unsaved changes were discarded.");
+  await expect(page.getByRole("tab", { name: "README.md" })).toHaveCount(0);
+  expect(dialogShown).toBe(false);
+});
+
 test("switching projects while editing prompts to discard, and cancelling keeps the draft and the project", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name.startsWith("mobile"), "desktop project-rail test");
   const projectA = mkdtempSync(join(tmpdir(), `pi-web-e2e-proj-a-${testInfo.project.name}-`));
