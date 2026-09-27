@@ -11,6 +11,7 @@ import type { AgentMessage, AssistantMessage, BashExecutionMessage, ToolResultMe
 import { CODEX_CHAT_PERMISSION_OPTIONS, type PermissionOption } from "@/lib/chat-permissions";
 import { MarkdownBody } from "../../MarkdownBody";
 import { MessageView } from "../../MessageView";
+import { useCoarsePointer } from "@/hooks/useIsMobile";
 import { ConfirmDialog } from "../ConfirmDialog";
 import { CodexRequestCard, type CodexRequestAnswer, type CodexServerRequest } from "./CodexRequestCard";
 
@@ -56,11 +57,12 @@ function StyledText() {
   const role = useAuiState((state) => state.message.role);
   const custom = useAuiState((state) => state.message.metadata.custom) as { codexItem?: CodexConversationItem };
   const part = useMessagePartText();
+  const isCoarsePointer = useCoarsePointer();
   const item = custom.codexItem;
   const { cwd, expandDetails, detailOverrides, onToggleDetail, onEdit, onOpenFile, forkTargets, onForkFrom, toolDetail } = useContext(ChatActionsContext);
   if (item?.kind === "command") {
     const message: BashExecutionMessage = { role: "bashExecution", command: item.command, output: item.output ?? "", exitCode: item.exitCode ?? undefined, cancelled: item.status === "cancelled" };
-    return <div className="codex-aui-pi-message"><MessageView message={message} cwd={cwd} onOpenFile={onOpenFile} /></div>;
+    return <div className="codex-aui-pi-message"><MessageView isCoarsePointer={isCoarsePointer} message={message} cwd={cwd} onOpenFile={onOpenFile} /></div>;
   }
   if (item?.kind === "reasoning") {
     const thinking = item.summary || item.content;
@@ -70,17 +72,17 @@ function StyledText() {
   }
   if (item?.kind === "plan" || item?.kind === "review") {
     const message: AssistantMessage = { role: "assistant", content: [{ type: "text", text: item.text }], model: "", provider: "" };
-    return <div className="codex-aui-pi-message"><MessageView message={message} isStreaming={item.kind === "plan" && item.streaming} cwd={cwd} onOpenFile={onOpenFile} /></div>;
+    return <div className="codex-aui-pi-message"><MessageView isCoarsePointer={isCoarsePointer} message={message} isStreaming={item.kind === "plan" && item.streaming} cwd={cwd} onOpenFile={onOpenFile} /></div>;
   }
   if (item?.kind === "tool") {
     const message: AssistantMessage = { role: "assistant", content: [{ type: "toolCall", toolCallId: item.id, toolName: item.title || "tool", input: {} }], model: "", provider: "" };
     const result: ToolResultMessage = { role: "toolResult", toolCallId: item.id, toolName: item.title || "tool", content: [{ type: "text", text: item.output ?? (item.done ? "(no output)" : "Running…") }] };
-    return <div className="codex-aui-pi-message"><MessageView message={message} isStreaming={!item.done} toolResults={new Map([[item.id, result]])} cwd={cwd} onOpenFile={onOpenFile} /></div>;
+    return <div className="codex-aui-pi-message"><MessageView isCoarsePointer={isCoarsePointer} message={message} isStreaming={!item.done} toolResults={new Map([[item.id, result]])} cwd={cwd} onOpenFile={onOpenFile} /></div>;
   }
   if (item?.kind === "toolCall") {
     const message: AssistantMessage = { role: "assistant", content: [{ type: "toolCall", toolCallId: item.id, toolName: item.toolName, input: item.input }], model: "", provider: "" };
     const result = { role: "toolResult", toolCallId: item.id, toolName: item.toolName, isError: item.isError, content: [{ type: "text", text: item.output || "(no output)" }], ...(item.diff ? { details: { diff: item.diff } } : {}) } as ToolResultMessage;
-    return <div className="codex-aui-pi-message"><MessageView message={message} isStreaming={!item.done} toolResults={item.done ? new Map([[item.id, result]]) : undefined} cwd={cwd} onOpenFile={onOpenFile} />{toolDetail?.(item)}</div>;
+    return <div className="codex-aui-pi-message"><MessageView isCoarsePointer={isCoarsePointer} message={message} isStreaming={!item.done} toolResults={item.done ? new Map([[item.id, result]]) : undefined} cwd={cwd} onOpenFile={onOpenFile} />{toolDetail?.(item)}</div>;
   }
   if (item?.kind === "todo") return <TodoList item={item} />;
   if (item?.kind === "notice") return <div className={`codex-aui-item-notice${item.tone === "error" ? " is-error" : ""}`} role={item.tone === "error" ? "alert" : undefined}>{item.text}</div>;
@@ -88,7 +90,7 @@ function StyledText() {
     const path = item.files.length === 1 ? item.files[0] : `${item.files.length} files`;
     const message: AssistantMessage = { role: "assistant", content: [{ type: "toolCall", toolCallId: item.id, toolName: "edit", input: { path } }], model: "", provider: "" };
     const result = { role: "toolResult", toolCallId: item.id, toolName: "edit", content: [{ type: "text", text: item.files.length ? item.files.join("\n") : "(no files reported)" }], ...(item.diff ? { details: { diff: item.diff } } : {}) } as ToolResultMessage;
-    return <div className="codex-aui-pi-message"><MessageView message={message} isStreaming={!item.done} toolResults={item.done ? new Map([[item.id, result]]) : undefined} cwd={cwd} onOpenFile={onOpenFile} />{expandDetails && item.files.length > 0 && <div className="codex-aui-file-links">{item.files.map((file) => <button type="button" key={file} onClick={() => onOpenFile?.(file)}>{file}</button>)}</div>}</div>;
+    return <div className="codex-aui-pi-message"><MessageView isCoarsePointer={isCoarsePointer} message={message} isStreaming={!item.done} toolResults={item.done ? new Map([[item.id, result]]) : undefined} cwd={cwd} onOpenFile={onOpenFile} />{expandDetails && item.files.length > 0 && <div className="codex-aui-file-links">{item.files.map((file) => <button type="button" key={file} onClick={() => onOpenFile?.(file)}>{file}</button>)}</div>}</div>;
   }
   if (item && item.kind !== "message") return null;
   if (!part.text.trim()) return null;
@@ -97,7 +99,7 @@ function StyledText() {
     : { role: "assistant", content: [{ type: "text", text: part.text }], model: "", provider: "" } satisfies AssistantMessage;
   // Forking from a user message keeps the turns before it; the fork's entry id is this item's id.
   const canFork = role === "user" && item && forkTargets?.has(item.id) && onForkFrom;
-  return <div className="codex-aui-pi-message"><MessageView message={message} isStreaming={item?.kind === "message" && item.streaming} cwd={cwd} onOpenFile={onOpenFile} onEditContent={role === "user" ? onEdit : undefined} entryId={canFork ? item?.id : undefined} onFork={canFork ? onForkFrom : undefined} /></div>;
+  return <div className="codex-aui-pi-message"><MessageView isCoarsePointer={isCoarsePointer} message={message} isStreaming={item?.kind === "message" && item.streaming} cwd={cwd} onOpenFile={onOpenFile} onEditContent={role === "user" ? onEdit : undefined} entryId={canFork ? item?.id : undefined} onFork={canFork ? onForkFrom : undefined} /></div>;
 }
 const TODO_MARKS = { pending: "○", inProgress: "◐", completed: "●" } as const;
 const TODO_LABELS = { pending: "pending", inProgress: "in progress", completed: "done" } as const;

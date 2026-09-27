@@ -869,9 +869,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
 
 function AgentActionDialog({ action, renameValue, busy, onRenameChange, onCancel, onConfirm }: { action: PendingAction; renameValue: string; busy: boolean; onRenameChange: (value: string) => void; onCancel: () => void; onConfirm: () => void }) {
   const rename = (action.kind === "session" || action.kind === "claude-session") && action.action === "rename";
-  const destructive = action.kind === "session" ? action.action === "delete"
-    : action.kind === "claude-session" ? action.action === "delete"
-      : action.kind === "terminal" || action.kind === "clear" || action.kind === "template";
+  const destructive = action.kind === "session" || action.kind === "claude-session" ? action.action === "delete" : true;
   const { title, description, confirmLabel } = actionDialogText(action);
   const currentName = action.kind === "session" ? action.session.name : action.kind === "claude-session" ? action.session.title : "";
   const confirmDisabled = busy || rename && (!renameValue.trim() || renameValue.trim() === currentName);

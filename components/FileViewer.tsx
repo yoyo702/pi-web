@@ -44,6 +44,11 @@ function normalizeLineEndings(text: string): string {
   return text.replace(/\r\n/g, "\n");
 }
 
+/** The line ending to write back on save: CRLF if the file uses it anywhere. */
+function detectLineEnding(text: string): "\r\n" | "\n" {
+  return text.includes("\r\n") ? "\r\n" : "\n";
+}
+
 interface FileData {
   content: string;
   language: string;
@@ -890,7 +895,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     if (!data || data.binary || data.truncated || data.editable === false) return;
     // Preview and Diff don't show the editor; editing always happens in Source.
     setDisplayMode("source");
-    originalLineEndingRef.current = data.content.includes("\r\n") ? "\r\n" : "\n";
+    originalLineEndingRef.current = detectLineEnding(data.content);
     setDraftContent(normalizeLineEndings(data.content));
     setSaveError(null);
     setExternalChangeWhileEditing(false);
@@ -1341,7 +1346,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
                 setExternalChangeWhileEditing(false);
                 void fetchContent(filePath).then((d) => {
                   if (!d) return;
-                  originalLineEndingRef.current = d.content.includes("\r\n") ? "\r\n" : "\n";
+                  originalLineEndingRef.current = detectLineEnding(d.content);
                   setDraftContent(normalizeLineEndings(d.content));
                 });
               }}

@@ -12,7 +12,7 @@ import { useWorkspaceActions } from "./workspace/WorkspaceActions";
 import { useAgentSession, type ActiveToolProgress, type AgentPhase, type AttachedImage, type NoticeItem } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
-import { useIsMobile } from "@/hooks/useIsMobile";
+import { useCoarsePointer, useIsMobile } from "@/hooks/useIsMobile";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import {
   captureScrollDistance,
@@ -280,6 +280,8 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, children }: { messag
 export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange }: Props) {
   const { soundEnabled, playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
+  // Read once here and passed to every MessageView row, instead of each row subscribing.
+  const isCoarsePointer = useCoarsePointer();
   const actions = useWorkspaceActions();
   const handleOpenFile = useCallback((filePath: string) => {
     actions.openFile(filePath, { sourceSessionId: session?.id ?? null });
@@ -657,6 +659,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
       const view = (
         <MessageView
+          isCoarsePointer={isCoarsePointer}
           key={`${keyPrefix}-view-${stableKey}`}
           message={msg}
           toolResults={toolResultsMap}
@@ -808,7 +811,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     messages, entryIds, streamState.isStreaming, sessionBusy, isNew, forkingEntryId, handleFork, handleNavigate,
     handleEditContent, messageCwd, modelNames, session?.id, hasOlderMessages, loadingOlderMessages, handleOpenFile,
     canRegenerate, regenerating, handleRegenerate, loadOlderFailed, handleRetryLoadOlder, sentinelRef, messageRefs,
-    lastUserMsgRef, sessionIdRef,
+    lastUserMsgRef, sessionIdRef, isCoarsePointer,
   ]);
 
   if (loading) {
@@ -942,7 +945,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
             {renderedMessages}
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={handleOpenFile} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={handleOpenFile} isCoarsePointer={isCoarsePointer} />
             )}
 
             {agentRunning && !streamState.streamingMessage && agentPhase?.kind === "running_tools" && (
@@ -963,6 +966,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
             {pendingBash && (
               <MessageView
+                isCoarsePointer={isCoarsePointer}
                 message={{
                   role: "bashExecution",
                   command: pendingBash.command,
