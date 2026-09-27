@@ -23,6 +23,8 @@ TianForge pi、终端 Pi、Codex Chat 和 Agent Terminal 可能同时观察同�
 - 后台会话只接收运行状态、工具转换和完整消息等有界事件；过大的消息改为磁盘刷新提示。
 - 最近会话使用有数量和消息上限的内存/IndexedDB 快照，项目切换时先恢复缓存再校准。
 - 长会话按页加载上下文，桌面首屏 80 条、移动端 40 条，向上滚动继续加载。
+- 插话（Steer）或排队跟进（Follow-up）发送失败时，输入框内容原样保留（不清空、不重试），上方显示 “Not sent: <原因>”；再次点击 Steer/Follow-up 或按 Enter 才会重新发送。
+- 重命名或删除 Session 失败时，该 Session 保留在列表中，并在原有的时间/消息数一行改为显示失败原因（如 “Delete failed: …”），几秒后自动消失。
 
 ### Codex 与 Terminal
 

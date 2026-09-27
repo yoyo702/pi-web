@@ -19,7 +19,11 @@ function writeModelsJson(data: Record<string, unknown>): void {
 }
 
 export async function GET() {
-  return NextResponse.json(redactModelsConfig(readModelsJson()), { headers: { "Cache-Control": "no-store" } });
+  try {
+    return NextResponse.json(redactModelsConfig(readModelsJson()), { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
 
 export async function PUT(req: Request) {

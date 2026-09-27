@@ -30,9 +30,9 @@ interface ModelOption {
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
   onAbort: () => void;
-  onSteer?: (message: string, images?: AttachedImage[]) => void;
-  onFollowUp?: (message: string, images?: AttachedImage[]) => void;
-  onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => void;
+  onSteer?: (message: string, images?: AttachedImage[]) => Promise<string | null>;
+  onFollowUp?: (message: string, images?: AttachedImage[]) => Promise<string | null>;
+  onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => Promise<string | null>;
   isStreaming: boolean;
   model?: { provider: string; modelId: string } | null;
   isAutoModelSelection?: boolean;
@@ -268,6 +268,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
+  const [queueSending, setQueueSending] = useState(false);
+  const [queueError, setQueueError] = useState<string | null>(null);
+  useEffect(() => { setQueueError(null); }, [value]);
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
@@ -527,7 +530,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     ? (slashQuery ? "1 match" : "1 command")
     : `${filteredSlashCommands.length} ${slashQuery ? "matches" : "commands"}`;
   const hasInputText = Boolean(value.trim());
-  const canQueueStreamingMessage = hasInputText && attachedImages.length === 0;
+  const canQueueStreamingMessage = hasInputText && attachedImages.length === 0 && !queueSending;
 
   // ── @ file autocomplete ──────────────────────────────────────────────────
   // Recomputed from the text before the caret on every change/caret move.
@@ -711,24 +714,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
   }, []);
 
-  const sendQueued = useCallback((mode: "steer" | "followup") => {
+  const sendQueued = useCallback(async (mode: "steer" | "followup") => {
     const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
-    if (attachedImages.length) return;
+    if (!msg || attachedImages.length || queueSending) return;
     onAudioUnlock?.();
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
-    if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
-      onPromptWithStreamingBehavior(msg, streamingBehavior, attachedImages.length ? attachedImages : undefined);
-      clearInput();
+    const send = msg.startsWith("/") && onPromptWithStreamingBehavior
+      ? onPromptWithStreamingBehavior(msg, streamingBehavior)
+      : mode === "steer" ? onSteer?.(msg) : onFollowUp?.(msg);
+    if (!send) return;
+    // Keep the text until the server accepts it, so a failed send loses nothing.
+    setQueueSending(true);
+    const error = await send;
+    setQueueSending(false);
+    if (error) {
+      setQueueError(`Not sent: ${error}`);
       return;
     }
-    if (mode === "steer" && onSteer) {
-      onSteer(msg, attachedImages.length ? attachedImages : undefined);
-    } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg, attachedImages.length ? attachedImages : undefined);
-    }
-    clearInput();
-  }, [value, attachedImages, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock]);
+    // Don't wipe anything typed while the request was in flight.
+    if (textareaRef.current?.value.trim() === msg) clearInput();
+  }, [value, attachedImages, queueSending, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock]);
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = filteredSlashCommands.length - 1;
@@ -888,7 +893,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         e.preventDefault();
         if (isStreaming && (onSteer || onFollowUp)) {
           // Default Enter sends as steer if available, else followup
-          sendQueued(onSteer ? "steer" : "followup");
+          void sendQueued(onSteer ? "steer" : "followup");
         } else {
           handleSend();
         }
@@ -1043,6 +1048,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       />
       <div style={{ maxWidth: 820, margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
+        {queueError && <div role="alert" style={{ margin: "0 0 6px", fontSize: 12, color: "#f87171", overflowWrap: "anywhere" }}>{queueError}</div>}
         {/* Queued steering / follow-up messages (delivered by pi on upcoming turns) */}
         {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
           <div style={{
@@ -1559,7 +1565,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, alignSelf: "flex-end" }}>
               {onSteer && (
                 <button
-                  onClick={() => sendQueued("steer")}
+                  onClick={() => void sendQueued("steer")}
                   disabled={!canQueueStreamingMessage}
                   title={attachedImages.length ? "Image attachments cannot be queued while the agent is running" : "Interrupt the current run and inject this message now"}
                   style={{
@@ -1582,7 +1588,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               )}
               {onFollowUp && (
                 <button
-                  onClick={() => sendQueued("followup")}
+                  onClick={() => void sendQueued("followup")}
                   disabled={!canQueueStreamingMessage}
                   title={attachedImages.length ? "Image attachments cannot be queued while the agent is running" : "Queue this message after the agent finishes"}
                   style={{

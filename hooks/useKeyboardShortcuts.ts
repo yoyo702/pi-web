@@ -2,6 +2,8 @@
 
 import { useEffect } from "react";
 
+import { hasVisibleModal, shouldAbortOnEscape } from "@/lib/escape-abort";
+
 // ---------------------------------------------------------------------------
 // Module-level registry — ChatWindow registers the abort handler here so that
 // the global Esc listener in AppShell can call it without prop-drilling.
@@ -37,7 +39,10 @@ interface UseGlobalKeyboardShortcutsOptions {
  * Note: Esc inside <textarea> or <input> is deliberately NOT handled here.
  * ChatInput manages its own Esc logic (closing slash / @ file menus, stopping
  * the agent when no menu is open) because it needs intimate knowledge of menu
- * state that is local to that component.
+ * state that is local to that component. Esc is also skipped while a modal
+ * (Settings or any other `[aria-modal="true"]` dialog, or a native
+ * `<dialog>` opened with showModal() such as the Mermaid zoom viewer) is
+ * open, so closing it doesn't also abort the agent.
  */
 export function useGlobalKeyboardShortcuts(
   options: UseGlobalKeyboardShortcutsOptions,
@@ -49,10 +54,21 @@ export function useGlobalKeyboardShortcuts(
       // ---- Esc: stop agent ----
       if (e.key === "Escape") {
         if (!globalAbortHandler) return;
-
-        const tag = (e.target as HTMLElement)?.tagName;
-        // Let textarea/input handle Esc internally (ChatInput menus / stop).
-        if (tag === "TEXTAREA" || tag === "INPUT") return;
+        // Text fields handle Esc themselves (ChatInput menus / stop); an open
+        // modal owns Esc to close itself — either an `aria-modal` dialog
+        // (Settings, etc.) or a native `<dialog>` opened via showModal()
+        // (e.g. the Mermaid zoom viewer, which has no aria-modal attribute) —
+        // counting only visible ones, not dialogs in hidden workspace tabs.
+        // defaultPrevented is checked too, but is only a defensive fallback:
+        // this listener runs in the capture phase (see addEventListener
+        // below), so it fires before any bubble-phase handler elsewhere in
+        // the app (e.g. a dialog's own Esc handler) has a chance to call
+        // preventDefault().
+        if (!shouldAbortOnEscape({
+          targetTag: (e.target as HTMLElement | null)?.tagName,
+          defaultPrevented: e.defaultPrevented,
+          modalOpen: hasVisibleModal(document),
+        })) return;
 
         e.preventDefault();
         globalAbortHandler();
@@ -67,7 +83,10 @@ export function useGlobalKeyboardShortcuts(
       }
     };
 
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
+    // Capture phase: run before component-level Esc listeners (e.g. a modal
+    // closing itself on Esc via a bubble-phase document listener), so the
+    // aria-modal check below still sees the modal while it's open.
+    window.addEventListener("keydown", handler, true);
+    return () => window.removeEventListener("keydown", handler, true);
   }, [activeCwd, onNewSession]);
 }

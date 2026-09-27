@@ -1694,7 +1694,14 @@ const SessionItem = memo(function SessionItem({
   const [renameValue, setRenameValue] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!actionError) return;
+    const timer = setTimeout(() => setActionError(null), 6000);
+    return () => clearTimeout(timer);
+  }, [actionError]);
 
   const title = getSessionDisplayTitle(session);
 
@@ -1710,14 +1717,18 @@ const SessionItem = memo(function SessionItem({
     setRenaming(false);
     if (name === (session.name ?? "")) return;
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name }),
       });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
       onRenamed?.();
-    } catch {
-      // ignore
+    } catch (error) {
+      setActionError(`Rename failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [renameValue, session.id, session.name, onRenamed]);
 
@@ -1731,10 +1742,15 @@ const SessionItem = memo(function SessionItem({
     setConfirmDelete(false);
     setDeleting(true);
     try {
-      await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
       onDeleted?.(session.id);
-    } catch {
+    } catch (error) {
       setDeleting(false);
+      setActionError(`Delete failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }, [session.id, onDeleted]);
 
@@ -1865,42 +1881,46 @@ const SessionItem = memo(function SessionItem({
                 {title}
               </span>
             </div>
-            <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: listOrigin ? 6 : 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
-              {listOrigin ? (
-                <>
-                  {isRunning ? <RunningSessionIndicator /> : isUnread ? <UnreadSessionIndicator /> : null}
-                  <span title={listOrigin.title} style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: listOrigin.isFork ? "var(--text-muted)" : "var(--text-dim)" }}>
-                    {listOrigin.label}
+            {actionError ? (
+              <div role="alert" title={actionError} style={{ marginTop: 2, color: "#f87171", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{actionError}</div>
+            ) : (
+              <div style={{ marginTop: 2, display: "flex", alignItems: "center", gap: listOrigin ? 6 : 8, color: "var(--text-dim)", fontSize: 11, minWidth: 0 }}>
+                {listOrigin ? (
+                  <>
+                    {isRunning ? <RunningSessionIndicator /> : isUnread ? <UnreadSessionIndicator /> : null}
+                    <span title={listOrigin.title} style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: listOrigin.isFork ? "var(--text-muted)" : "var(--text-dim)" }}>
+                      {listOrigin.label}
+                    </span>
+                    <span title={`${session.modified} · ${session.messageCount} messages`} style={{ flexShrink: 0 }}>{formatRelativeTime(session.modified)}</span>
+                  </>
+                ) : (
+                  <>
+                    {isRunning ? (
+                      <RunningSessionIndicator />
+                    ) : isUnread ? (
+                      <UnreadSessionIndicator />
+                    ) : (
+                      <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
+                    )}
+                    <span>{session.messageCount} msgs</span>
+                  </>
+                )}
+                {!listOrigin && session.worktreeBranch && (
+                  <span
+                    title={`Worktree: ${session.cwd}`}
+                    style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}
+                  >
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                      <line x1="6" y1="3" x2="6" y2="15" />
+                      <circle cx="18" cy="6" r="3" />
+                      <circle cx="6" cy="18" r="3" />
+                      <path d="M18 9a9 9 0 0 1-9 9" />
+                    </svg>
+                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span>
                   </span>
-                  <span title={`${session.modified} · ${session.messageCount} messages`} style={{ flexShrink: 0 }}>{formatRelativeTime(session.modified)}</span>
-                </>
-              ) : (
-                <>
-                  {isRunning ? (
-                    <RunningSessionIndicator />
-                  ) : isUnread ? (
-                    <UnreadSessionIndicator />
-                  ) : (
-                    <span title={session.modified}>{formatRelativeTime(session.modified)}</span>
-                  )}
-                  <span>{session.messageCount} msgs</span>
-                </>
-              )}
-              {!listOrigin && session.worktreeBranch && (
-                <span
-                  title={`Worktree: ${session.cwd}`}
-                  style={{ display: "flex", alignItems: "center", gap: 3, color: "var(--accent)", minWidth: 0, overflow: "hidden" }}
-                >
-                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                    <line x1="6" y1="3" x2="6" y2="15" />
-                    <circle cx="18" cy="6" r="3" />
-                    <circle cx="6" cy="18" r="3" />
-                    <path d="M18 9a9 9 0 0 1-9 9" />
-                  </svg>
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.worktreeBranch}</span>
-                </span>
-              )}
-            </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Collapse toggle — always visible when has children */}

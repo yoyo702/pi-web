@@ -1673,9 +1673,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // the real user message when pi delivers it (user message_end event). An
   // optimistic chat bubble here would duplicate the queue panel and turn into
   // a ghost message if the queue is recalled.
-  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]): Promise<string | null> => {
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    if (!sid) return "No active session";
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
@@ -1683,8 +1683,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message,
         ...(piImages?.length ? { images: piImages } : {}),
       });
+      return null;
     } catch (e) {
       console.error("Failed to steer:", e);
+      return e instanceof Error ? e.message : String(e);
     }
   }, []);
 
@@ -1692,9 +1694,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     message: string,
     behavior: "steer" | "followUp",
     images?: AttachedImage[],
-  ) => {
+  ): Promise<string | null> => {
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    if (!sid) return "No active session";
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
@@ -1703,14 +1705,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         streamingBehavior: behavior,
         ...(piImages?.length ? { images: piImages } : {}),
       });
+      return null;
     } catch (e) {
       console.error("Failed to queue prompt:", e);
+      return e instanceof Error ? e.message : String(e);
     }
   }, []);
 
-  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]): Promise<string | null> => {
     const sid = sessionIdRef.current;
-    if (!sid) return;
+    if (!sid) return "No active session";
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     try {
       await sendAgentCommand(sid, {
@@ -1718,8 +1722,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         message,
         ...(piImages?.length ? { images: piImages } : {}),
       });
+      return null;
     } catch (e) {
       console.error("Failed to follow up:", e);
+      return e instanceof Error ? e.message : String(e);
     }
   }, []);
 

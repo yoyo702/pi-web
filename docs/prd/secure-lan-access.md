@@ -28,7 +28,9 @@ TianForge pi 会暴露本机项目文件、Session 和 Terminal。局域网访�
 - 登录限流按连接地址计数，不信任客户端可伪造的 `X-Forwarded-For`；认证前的请求体有大小上限。
 - 未登录时只开放 `/_next/static/`；绑定到非本机地址且未启用 TLS 时启动日志给出警告。
 - `/api/models-config` 返回前隐藏 API Key；工作区文件和会话导出页以 CSP sandbox 返回，恶意 SVG/HTML 无法在应用源内执行脚本。
+- `models.json` 加载失败（如文件损坏）时，设置面板的 Models 页展示错误信息并提供 Retry，Save 按钮禁用，避免用空配置覆盖已有文件。
 - Next.js 开发来源使用 `**.ts.net` 匹配 `<设备名>.<tailnet>.ts.net`。`*.ts.net` 只匹配单层子域，不能覆盖实际的两层 Tailscale Serve 主机名。
+- 登录过期后，任何 API 返回 401 都会先向 /api/auth/session 确认，确认已登出后弹出"Signed out"提示；"Sign in"在新标签页打开登录页，原标签页回到前台时自动检测，恢复登录后提示自动消失，草稿不丢失。
 
 ## 安全原则
 

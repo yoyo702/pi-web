@@ -3,7 +3,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
-import { runGit } from "./git-exec";
+import { DISCARD_STASH_MESSAGE } from "./git-discard";
+import { runGit, gitCommandTimeout, gitFailureMessage } from "./git-exec";
 import { buildPartialPatch, parsePatch, selectedAddedContent } from "./git-partial-patch";
 import { conflict, badRequest } from "./http-error";
 import type {
@@ -25,18 +26,15 @@ import {
   type GitPorcelainEntry,
 } from "./git-status";
 
-const GIT_TIMEOUT_MS = 10_000;
 const GIT_STATUS_MAX_BUFFER = 8 * 1024 * 1024;
 const COMMIT_MESSAGE_DIFF_MAX_CHARS = 50_000;
 
 async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFER): Promise<string> {
+  const timeout = gitCommandTimeout(args);
   try {
-    return await runGit(args, { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer });
+    return await runGit(args, { cwd, timeout, maxBuffer });
   } catch (error) {
-    const detail = typeof error === "object" && error !== null && "stderr" in error
-      ? String(error.stderr).trim()
-      : "";
-    throw new Error(detail || (error instanceof Error ? error.message : String(error)));
+    throw new Error(gitFailureMessage(error, args, timeout));
   }
 }
 
@@ -609,31 +607,58 @@ export async function unstageFiles(cwd: string, paths: string[]): Promise<GitSta
   return getGitStatus(cwd);
 }
 
+async function hasHead(repositoryRoot: string): Promise<boolean> {
+  try {
+    await git(repositoryRoot, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Discard changes by stashing them (untracked files included), so a mistaken
+ * discard can be undone from the stash list. Git cannot stash unmerged paths,
+ * so conflicted files are reset to HEAD as before.
+ */
 export async function discardChanges(cwd: string, paths: string[]): Promise<GitStatusResponse> {
   const repositoryRoot = await requireRepositoryRoot(cwd);
   const rel = safeRepoRelPaths(repositoryRoot, paths);
   if (rel.length === 0) return getGitStatus(cwd);
 
   const entries = await readStatusEntries(repositoryRoot);
-  const tracked: string[] = [];
-  const untracked: string[] = [];
+  const conflicted: string[] = [];
+  const stashed: string[] = [];
   for (const relPath of rel) {
     const entry = entries.find((candidate) => candidate.path === relPath);
-    const kind = entry ? classifyGitStatus(entry).status : "modified";
-    if (kind === "untracked") untracked.push(relPath);
-    else tracked.push(relPath);
+    if (!entry) continue; // Already clean.
+    if (classifyGitStatus(entry).status === "conflict") conflicted.push(relPath);
+    else stashed.push(relPath);
   }
 
-  if (tracked.length > 0) {
-    // Reset both the index and the working tree back to HEAD for these files.
-    await git(repositoryRoot, ["restore", "--source=HEAD", "--staged", "--worktree", "--", ...tracked]);
-  }
-  for (const relPath of untracked) {
-    try {
-      fs.rmSync(path.resolve(repositoryRoot, relPath), { force: true });
-    } catch {
-      // Ignore files that vanished between status and discard.
+  if (stashed.length > 0) {
+    if (!(await hasHead(repositoryRoot))) {
+      throw conflict("Discard needs at least one commit: Git cannot save changes before the first commit. Delete new files from the Explorer instead.");
     }
+    // `git stash push` snapshots the whole index, which fails while any path
+    // in the repo is still unmerged. Conflicted paths passed to this same
+    // call are fine: they're restored below before the stash runs.
+    const conflictedHere = new Set(conflicted);
+    const hasOtherConflict = entries.some(
+      (entry) => classifyGitStatus(entry).status === "conflict" && !conflictedHere.has(entry.path),
+    );
+    if (hasOtherConflict) {
+      throw conflict("Resolve or discard the conflicted files first: Git can't save other changes as a stash while a merge conflict is open.");
+    }
+  }
+  if (conflicted.length > 0) {
+    await git(repositoryRoot, ["restore", "--source=HEAD", "--staged", "--worktree", "--", ...conflicted]);
+  }
+  if (stashed.length > 0) {
+    await git(repositoryRoot, [
+      "stash", "push", "--include-untracked", "--message", DISCARD_STASH_MESSAGE,
+      "--", ...stashed.map((relPath) => `:(literal)${relPath}`),
+    ]);
   }
   return getGitStatus(cwd);
 }

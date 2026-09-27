@@ -17,6 +17,7 @@ import type {
   GitStashEntry,
 } from "@/lib/git-types";
 import { getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { discardConfirmMessage } from "@/lib/git-discard";
 import { DiffView } from "./FileViewer";
 import { GitLineDiffView } from "./GitLineDiffView";
 import { PrecommitChecks } from "./PrecommitChecks";
@@ -304,11 +305,10 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
     if (!selected || !diff?.fingerprint) return;
     void runWrite("/api/git/lines", { path: selected.file.filePath, scope: selected.scope, action, fingerprint: diff.fingerprint, lineIds });
   }, [diff, runWrite, selected]);
-  const discard = useCallback((paths: string[]) => {
-    if (!paths.length) return;
-    const label = paths.length === 1 ? "this file" : `${paths.length} files`;
-    if (window.confirm(`Discard changes to ${label}? This cannot be undone.`)) {
-      void runWrite("/api/git/discard", { paths });
+  const discard = useCallback((files: GitFileStatus[]) => {
+    if (!files.length) return;
+    if (window.confirm(discardConfirmMessage(files))) {
+      void runWrite("/api/git/discard", { paths: files.map((file) => file.filePath) });
     }
   }, [runWrite]);
   const commit = useCallback(async () => {
@@ -484,7 +484,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
                         ) : (
                           <>
                             <button type="button" onClick={() => stage(paths)} disabled={busy} title="Stage every file in this group for the next commit" style={writeButtonStyle}>+</button>
-                            <button type="button" onClick={() => discard(paths)} disabled={busy} title="Discard every file in this group — cannot be undone" style={writeButtonStyle}>⨯</button>
+                            <button type="button" onClick={() => discard(files)} disabled={busy} title="Discard every file in this group (saved as a Git stash)" style={writeButtonStyle}>⨯</button>
                           </>
                         )}
                       </span>
@@ -503,7 +503,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
                             ) : (
                               <>
                                 <button type="button" onClick={() => stage([file.filePath])} disabled={busy} title="Add this file to the next commit" style={writeButtonStyle}>+</button>
-                                <button type="button" onClick={() => discard([file.filePath])} disabled={busy} title="Discard this file's changes — cannot be undone" style={writeButtonStyle}>⨯</button>
+                                <button type="button" onClick={() => discard([file])} disabled={busy} title="Discard this file's changes (saved as a Git stash)" style={writeButtonStyle}>⨯</button>
                               </>
                             )}
                           </span>

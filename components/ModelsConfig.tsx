@@ -1298,6 +1298,7 @@ export function ModelsConfig({ onClose, closeLabel = "Cancel", embedded = false 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
   const [selection, setSelection] = useState<Selection | null>(null);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
@@ -1318,20 +1319,31 @@ export function ModelsConfig({ onClose, closeLabel = "Cancel", embedded = false 
       .catch(() => {});
   }, []);
 
-  useEffect(() => {
+  const loadConfig = useCallback(() => {
+    setLoading(true);
+    setLoadError(null);
     fetch("/api/models-config")
-      .then((r) => r.json())
-      .then((d: ModelsJson) => {
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({})) as ModelsJson & { error?: string };
+        if (!r.ok || d.error) throw new Error(d.error ?? `Could not load models.json (HTTP ${r.status})`);
+        return d;
+      })
+      .then((d) => {
         const normalized = d.providers ? d : { ...d, providers: {} };
         setConfig(normalized);
         const keys = Object.keys(normalized.providers ?? {});
         if (keys.length > 0) setSelection({ type: "provider", name: keys[0] });
       })
-      .catch(() => setConfig({ providers: {} }))
+      // Keep whatever was shown before; Save stays disabled until a load succeeds.
+      .catch((e) => setLoadError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    loadConfig();
     loadOAuthProviders();
     loadApiKeyProviders();
-  }, [loadOAuthProviders, loadApiKeyProviders]);
+  }, [loadConfig, loadOAuthProviders, loadApiKeyProviders]);
 
   const addCustomProvider = useCallback(() => {
     let finalName = "new-provider";
@@ -1407,6 +1419,7 @@ export function ModelsConfig({ onClose, closeLabel = "Cancel", embedded = false 
   }, []);
 
   const handleSave = useCallback(async () => {
+    if (loadError) return;
     setSaving(true);
     setSaveError(null);
     setSavedOk(false);
@@ -1424,7 +1437,7 @@ export function ModelsConfig({ onClose, closeLabel = "Cancel", embedded = false 
     } finally {
       setSaving(false);
     }
-  }, [config]);
+  }, [config, loadError]);
 
   const providers = Object.entries(config.providers ?? {});
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
@@ -1627,7 +1640,14 @@ export function ModelsConfig({ onClose, closeLabel = "Cancel", embedded = false 
 
           {/* Right: detail */}
           <div style={{ flex: 1, overflowY: "auto", padding: 20 }}>
-            {loading ? null : detailContent ?? (
+            {loadError ? (
+              <div role="alert" style={{ display: "flex", flexDirection: "column", gap: 10, fontSize: 13, color: "var(--text)" }}>
+                <strong style={{ color: "#f87171" }}>Could not load your model configuration</strong>
+                <span style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: "var(--text-muted)" }}>{loadError}</span>
+                <span style={{ color: "var(--text-muted)" }}>Saving is disabled so your existing models.json is not overwritten.</span>
+                <button type="button" onClick={loadConfig} style={{ alignSelf: "flex-start", padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", cursor: "pointer", fontSize: 13 }}>Retry</button>
+              </div>
+            ) : loading ? null : detailContent ?? (
               <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-dim)", fontSize: 13 }}>
                 Select a provider or model
               </div>
@@ -1641,14 +1661,14 @@ export function ModelsConfig({ onClose, closeLabel = "Cancel", embedded = false 
           {!embedded && <button onClick={onClose} style={{ padding: "6px 14px", background: "none", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text-muted)", cursor: "pointer", fontSize: 13 }}>
             {closeLabel}
           </button>}
-          <button onClick={handleSave} disabled={saving || savedOk} style={{
+          <button onClick={handleSave} disabled={saving || savedOk || loading || loadError !== null} style={{
             position: "relative",
             padding: "6px 16px",
             minWidth: 92,
             background: savedOk ? "#16a34a" : saving ? "var(--bg-panel)" : "var(--accent)",
             border: "none", borderRadius: 6,
             color: savedOk ? "#fff" : saving ? "var(--text-muted)" : "#fff",
-            cursor: (saving || savedOk) ? "default" : "pointer", fontSize: 13, fontWeight: 600,
+            cursor: (saving || savedOk || loading || loadError !== null) ? "default" : "pointer", fontSize: 13, fontWeight: 600,
             display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6,
             transition: "background-color 0.2s ease, color 0.2s ease",
             animation: savedOk ? "saved-pop 0.45s ease" : undefined,
