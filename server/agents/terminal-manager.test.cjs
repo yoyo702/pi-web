@@ -224,3 +224,183 @@ test("Safe Codex terminals ask before untrusted commands, or on request where th
     for (const dir of dirs) fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("stopTerminal force-kills the process group if it ignores SIGTERM", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const modulePath = require.resolve("./terminal-manager.cjs");
+  const previousState = global.__piWebTerminalState;
+  const previousLoad = Module._load;
+  const previousKill = process.kill;
+  const killCalls = [];
+  process.kill = (pid, signal) => { killCalls.push([pid, signal]); };
+  const fakePty = { pid: 4242, onData() {}, onExit() {}, write() {}, resize() {}, kill() {} };
+  global.__piWebTerminalState = { sessions: new Map() };
+  Module._load = function (request, parent, isMain) {
+    if (request === "node-pty") return { spawn() { return fakePty; } };
+    return previousLoad.call(this, request, parent, isMain);
+  };
+  delete require.cache[modulePath];
+  try {
+    const manager = require("./terminal-manager.cjs");
+    const terminal = manager.createTerminal({ provider: "shell", cwd: "/tmp" });
+    manager.stopTerminal(terminal.id);
+    assert.deepEqual(killCalls, [[-4242, "SIGTERM"]]);
+    t.mock.timers.tick(manager.STOP_SIGKILL_DELAY_MS);
+    assert.deepEqual(killCalls, [[-4242, "SIGTERM"], [-4242, "SIGKILL"]]);
+  } finally {
+    Module._load = previousLoad;
+    process.kill = previousKill;
+    delete require.cache[modulePath];
+    if (previousState === undefined) delete global.__piWebTerminalState;
+    else global.__piWebTerminalState = previousState;
+  }
+});
+
+test("stopTerminal cancels the force-kill timer once the process exits and its process group probe reports ESRCH", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const modulePath = require.resolve("./terminal-manager.cjs");
+  const previousState = global.__piWebTerminalState;
+  const previousLoad = Module._load;
+  const previousKill = process.kill;
+  const killCalls = [];
+  // Signal 0 is the exit handler's "is the group still alive?" probe: ESRCH
+  // means nothing is left, so the timer should be canceled.
+  process.kill = (pid, signal) => {
+    if (signal === 0) { const error = new Error("kill ESRCH"); error.code = "ESRCH"; throw error; }
+    killCalls.push([pid, signal]);
+  };
+  let exitHandler;
+  const fakePty = { pid: 4343, onData() {}, onExit(handler) { exitHandler = handler; }, write() {}, resize() {}, kill() {} };
+  global.__piWebTerminalState = { sessions: new Map() };
+  Module._load = function (request, parent, isMain) {
+    if (request === "node-pty") return { spawn() { return fakePty; } };
+    return previousLoad.call(this, request, parent, isMain);
+  };
+  delete require.cache[modulePath];
+  try {
+    const manager = require("./terminal-manager.cjs");
+    const terminal = manager.createTerminal({ provider: "shell", cwd: "/tmp" });
+    manager.stopTerminal(terminal.id);
+    assert.deepEqual(killCalls, [[-4343, "SIGTERM"]]);
+    exitHandler({ exitCode: 0, signal: null });
+    t.mock.timers.tick(manager.STOP_SIGKILL_DELAY_MS);
+    assert.deepEqual(killCalls, [[-4343, "SIGTERM"]]);
+  } finally {
+    Module._load = previousLoad;
+    process.kill = previousKill;
+    delete require.cache[modulePath];
+    if (previousState === undefined) delete global.__piWebTerminalState;
+    else global.__piWebTerminalState = previousState;
+  }
+});
+
+test("stopTerminal's force-kill timer still fires if the pty exits but the process group survives", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const modulePath = require.resolve("./terminal-manager.cjs");
+  const previousState = global.__piWebTerminalState;
+  const previousLoad = Module._load;
+  const previousKill = process.kill;
+  const killCalls = [];
+  // Signal 0 (the group probe) succeeds here: a child the pty spawned is
+  // still holding the process group open even though the main process exited.
+  process.kill = (pid, signal) => {
+    if (signal === 0) return;
+    killCalls.push([pid, signal]);
+  };
+  let exitHandler;
+  const fakePty = { pid: 4444, onData() {}, onExit(handler) { exitHandler = handler; }, write() {}, resize() {}, kill() {} };
+  global.__piWebTerminalState = { sessions: new Map() };
+  Module._load = function (request, parent, isMain) {
+    if (request === "node-pty") return { spawn() { return fakePty; } };
+    return previousLoad.call(this, request, parent, isMain);
+  };
+  delete require.cache[modulePath];
+  try {
+    const manager = require("./terminal-manager.cjs");
+    const terminal = manager.createTerminal({ provider: "shell", cwd: "/tmp" });
+    manager.stopTerminal(terminal.id);
+    assert.deepEqual(killCalls, [[-4444, "SIGTERM"]]);
+    exitHandler({ exitCode: 0, signal: null });
+    t.mock.timers.tick(manager.STOP_SIGKILL_DELAY_MS);
+    assert.deepEqual(killCalls, [[-4444, "SIGTERM"], [-4444, "SIGKILL"]]);
+  } finally {
+    Module._load = previousLoad;
+    process.kill = previousKill;
+    delete require.cache[modulePath];
+    if (previousState === undefined) delete global.__piWebTerminalState;
+    else global.__piWebTerminalState = previousState;
+  }
+});
+
+test("shutdownTerminals resolves as soon as a stopped terminal's process group is confirmed gone", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const modulePath = require.resolve("./terminal-manager.cjs");
+  const previousState = global.__piWebTerminalState;
+  const previousLoad = Module._load;
+  const previousKill = process.kill;
+  const killCalls = [];
+  process.kill = (pid, signal) => {
+    if (signal === 0) { const error = new Error("kill ESRCH"); error.code = "ESRCH"; throw error; }
+    killCalls.push([pid, signal]);
+  };
+  let exitHandler;
+  const fakePty = { pid: 6161, onData() {}, onExit(handler) { exitHandler = handler; }, write() {}, resize() {}, kill() {} };
+  global.__piWebTerminalState = { sessions: new Map() };
+  Module._load = function (request, parent, isMain) {
+    if (request === "node-pty") return { spawn() { return fakePty; } };
+    return previousLoad.call(this, request, parent, isMain);
+  };
+  delete require.cache[modulePath];
+  try {
+    const manager = require("./terminal-manager.cjs");
+    manager.createTerminal({ provider: "shell", cwd: "/tmp" });
+    let resolved = false;
+    const done = manager.shutdownTerminals().then(() => { resolved = true; });
+    assert.deepEqual(killCalls, [[-6161, "SIGTERM"]]);
+    exitHandler({ exitCode: 0, signal: null });
+    await done;
+    assert.equal(resolved, true);
+    // Only the SIGTERM was needed; the group was already confirmed gone.
+    assert.deepEqual(killCalls, [[-6161, "SIGTERM"]]);
+  } finally {
+    Module._load = previousLoad;
+    process.kill = previousKill;
+    delete require.cache[modulePath];
+    if (previousState === undefined) delete global.__piWebTerminalState;
+    else global.__piWebTerminalState = previousState;
+  }
+});
+
+test("shutdownTerminals force-kills and resolves after the grace period if a terminal never reports exiting", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const modulePath = require.resolve("./terminal-manager.cjs");
+  const previousState = global.__piWebTerminalState;
+  const previousLoad = Module._load;
+  const previousKill = process.kill;
+  const killCalls = [];
+  process.kill = (pid, signal) => { killCalls.push([pid, signal]); };
+  const fakePty = { pid: 7171, onData() {}, onExit() {}, write() {}, resize() {}, kill() {} };
+  global.__piWebTerminalState = { sessions: new Map() };
+  Module._load = function (request, parent, isMain) {
+    if (request === "node-pty") return { spawn() { return fakePty; } };
+    return previousLoad.call(this, request, parent, isMain);
+  };
+  delete require.cache[modulePath];
+  try {
+    const manager = require("./terminal-manager.cjs");
+    manager.createTerminal({ provider: "shell", cwd: "/tmp" });
+    let resolved = false;
+    const done = manager.shutdownTerminals().then(() => { resolved = true; });
+    assert.equal(resolved, false);
+    t.mock.timers.tick(manager.STOP_SIGKILL_DELAY_MS);
+    await done;
+    assert.equal(resolved, true);
+    assert.ok(killCalls.some(([pid, signal]) => pid === -7171 && signal === "SIGKILL"));
+  } finally {
+    Module._load = previousLoad;
+    process.kill = previousKill;
+    delete require.cache[modulePath];
+    if (previousState === undefined) delete global.__piWebTerminalState;
+    else global.__piWebTerminalState = previousState;
+  }
+});

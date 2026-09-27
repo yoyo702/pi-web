@@ -1,11 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { isPossibleAuthExpiry } from "@/lib/auth-expiry";
 
 export function AuthExpiredNotice({ open }: { open: boolean }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Hooks must run unconditionally, before the `!open` early return below.
+  useEffect(() => {
+    if (open) dialogRef.current?.focus();
+  }, [open]);
+
   if (!open) return null;
-  return <div role="alertdialog" aria-modal="true" aria-labelledby="auth-expired-title" aria-describedby="auth-expired-detail" style={{ position: "fixed", inset: 0, zIndex: 10000, display: "grid", placeItems: "center", padding: 16, background: "rgba(0,0,0,.45)" }}>
+  return <div ref={dialogRef} tabIndex={-1} role="alertdialog" aria-modal="true" aria-labelledby="auth-expired-title" aria-describedby="auth-expired-detail" style={{ position: "fixed", inset: 0, zIndex: 10000, display: "grid", placeItems: "center", padding: 16, background: "rgba(0,0,0,.45)" }}>
     <div style={{ width: "min(100%, 380px)", padding: 22, borderRadius: 10, border: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 14px 40px rgba(0,0,0,.25)" }}>
       <h2 id="auth-expired-title" style={{ margin: "0 0 8px", fontSize: 16 }}>Signed out</h2>
       <p id="auth-expired-detail" style={{ margin: "0 0 16px", fontSize: 13, lineHeight: 1.5, color: "var(--text-muted)" }}>Your login expired, so TianForge can&apos;t reach the server. Sign in again in a new tab; this tab reconnects when you come back, and your drafts stay here.</p>

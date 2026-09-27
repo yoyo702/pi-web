@@ -15,6 +15,10 @@ const MAX_RUNNING_TERMINALS = 20;
 const MAX_TERMINAL_RECORDS = 100;
 const MAX_COMMAND_HISTORY = 50;
 const MAX_COMMAND_CHARS = 8_000;
+// A CLI (or a child it spawned) that ignores SIGTERM/SIGHUP gets force-killed
+// after this grace period, so stopping a terminal can't leave an orphan
+// process once its record is gone.
+const STOP_SIGKILL_DELAY_MS = 3_000;
 const PROVIDERS = new Set(["shell", "codex", "claude"]);
 const ACTIVITIES = new Set(["working", "waiting", "approval"]);
 const HOOK_SCRIPT = path.join(__dirname, "..", "terminal-hook.cjs");
@@ -362,6 +366,20 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
   workspaceStatus.notify("terminals");
   terminal.onData((data) => appendOutput(session, data));
   terminal.onExit(({ exitCode, signal }) => {
+    if (session.stopKillTimer) {
+      // The pty's main process exited, but a child it spawned can still be
+      // holding the process group open. Probe the group before canceling the
+      // force-kill timer: only ESRCH (nothing left at all) cancels it, so a
+      // surviving group still gets SIGKILL'd once the grace period elapses.
+      let groupGone = true;
+      if (session.state === "stopped" && session.pid > 0) {
+        try { process.kill(-session.pid, 0); groupGone = false; } catch (error) { if (error?.code !== "ESRCH") groupGone = false; }
+      }
+      if (groupGone) {
+        clearTimeout(session.stopKillTimer);
+        session.stopKillTimer = null;
+      }
+    }
     session.state = session.state === "stopped" ? "stopped" : "ended";
     session.exitCode = exitCode;
     session.signal = signal;
@@ -463,10 +481,24 @@ function stopTerminal(id) {
   if (session.state !== "running" || !session.terminal) return publicSession(session);
   session.state = "stopped";
   workspaceStatus.notify("terminals");
+  const pid = session.pid;
   try {
-    if (process.platform !== "win32" && session.pid > 0) process.kill(-session.pid, "SIGTERM");
+    if (process.platform !== "win32" && pid > 0) process.kill(-pid, "SIGTERM");
   } catch { /* pty.kill is the portable fallback */ }
   try { session.terminal.kill(); } catch { /* process already exited */ }
+  // Some CLIs (or a shell child they spawn) ignore SIGTERM/SIGHUP; force the
+  // process group if it's still alive after a grace period, so it can't
+  // outlive its terminal record. `onExit` only clears `stopKillTimer` once a
+  // probe confirms the whole group is gone (ESRCH), so a lingering child
+  // still gets SIGKILL'd here even after the main pty process (and possibly
+  // the terminal record itself) is gone.
+  if (process.platform !== "win32" && pid > 0) {
+    session.stopKillTimer = setTimeout(() => {
+      session.stopKillTimer = null;
+      try { process.kill(-pid, "SIGKILL"); } catch { /* already gone */ }
+    }, STOP_SIGKILL_DELAY_MS);
+    session.stopKillTimer.unref?.();
+  }
   return publicSession(session);
 }
 
@@ -539,12 +571,47 @@ function snapshotAndSubscribeTerminal(id, callback) {
   };
 }
 
+// Stops every running terminal and returns a Promise that resolves once each
+// stopped terminal's process group is confirmed gone, or after
+// STOP_SIGKILL_DELAY_MS — at which point any survivor is force-killed here
+// too, so the server process doesn't exit while an orphan is still starting
+// up its own grace period.
 function shutdownTerminals() {
+  const pending = [];
   for (const session of state.sessions.values()) {
+    const wasRunning = session.state === "running" && Boolean(session.terminal);
     try { stopTerminal(session.id); } catch { /* best effort */ }
+    if (!wasRunning) continue;
+    const pid = session.pid;
+    pending.push(new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        unsubscribe();
+        resolve();
+      };
+      const unsubscribe = subscribeTerminal(session.id, (chunk) => {
+        // Only settle here if the exit handler's own probe already confirmed
+        // the process group is gone; otherwise the backstop below waits for
+        // it (and force-kills it) before resolving.
+        if (chunk === null && !session.stopKillTimer) finish();
+      });
+      // Not unref'd: once the server closes, a surviving process group holds
+      // no Node handle, so an unref'd timer would let the process exit before
+      // the SIGKILL. The server's own forced-exit timer caps the wait.
+      const timer = setTimeout(() => {
+        if (process.platform !== "win32" && pid > 0) {
+          try { process.kill(-pid, "SIGKILL"); } catch { /* already gone */ }
+        }
+        finish();
+      }, STOP_SIGKILL_DELAY_MS);
+    }));
   }
+  return Promise.all(pending).then(() => {});
 }
 
-module.exports = { TerminalError, terminalEnvironment, createTerminal, listTerminals, terminalStats, getTerminal, renameTerminal, getBuffer, runtimeForSession, inputTerminal, resizeTerminal, stopTerminal, removeTerminal, clearEndedTerminals, stopTerminalsForSession, interruptAndStopTerminalsForSession, unknownCodexTerminals, reportHookActivity, subscribeTerminal, snapshotAndSubscribeTerminal, shutdownTerminals };
+module.exports = { TerminalError, terminalEnvironment, createTerminal, listTerminals, terminalStats, getTerminal, renameTerminal, getBuffer, runtimeForSession, inputTerminal, resizeTerminal, stopTerminal, removeTerminal, clearEndedTerminals, stopTerminalsForSession, interruptAndStopTerminalsForSession, unknownCodexTerminals, reportHookActivity, subscribeTerminal, snapshotAndSubscribeTerminal, shutdownTerminals, STOP_SIGKILL_DELAY_MS };
 
 workspaceStatus.registerProvider("terminals", () => ({ terminals: listTerminals(), limits: terminalStats().limits }));

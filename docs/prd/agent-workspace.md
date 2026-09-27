@@ -21,7 +21,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - Codex 支持 Chat 和 Terminal Session；Chat 支持模型、推理、服务等级和审批策略。
 - Claude 支持 Chat 和 Terminal Session；Chat 支持模型、权限模式、权限卡片、图片和 Fork。
 - Session 支持新建、恢复、Fork、重命名、归档和删除确认。
-- Terminal 支持停止、重启、删除记录、清理已结束任务和重连缓冲区。
+- Terminal 支持停止、重启、删除记录、清理已结束任务和重连缓冲区；停止终端先发送 SIGTERM/SIGHUP，进程组若在几秒内未退出则发送 SIGKILL，避免忽略信号的进程在记录被删除后成为孤儿进程；服务器关闭时也会等待所有已停止的终端退出（同样最多几秒），超时后强制杀死仍存活的进程组，再退出进程。
 - Codex Terminal 的权限：Safe 用 `--sandbox workspace-write --ask-for-approval untrusted`（执行不受信任的命令前询问）。Codex 0.155 起 CLI 不再接受 `untrusted`（参数和配置都会报错，终端无法启动），这时 Safe 改用 `on-request`，与 Balanced 相同；是否支持看 `codex --help` 是否列出 `untrusted`（结果按可执行文件缓存到它变化）。Codex Chat 走 app-server，仍可用 `untrusted`。
 - Claude Terminal 的权限：Keep CLI confirmations（不加参数，Claude 在终端里询问）、Plan（`--permission-mode plan`，批准计划前只读）、Accept edits（`--permission-mode acceptEdits`，编辑文件不询问，命令仍需确认）、Dangerous bypass（`--dangerously-skip-permissions`）。新建终端和 Claude 会话的 Resume/Fork to Terminal 都可选。Claude Terminal 也接受模型（`--model`）和第一条消息（最后一个参数，以 “-” 开头时前面加 `--`），规则与 Codex 相同。
 - Chat 支持中断运行及处理审批卡片。
@@ -134,7 +134,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - 标题 “Claude Chat · <会话名> · <目录>”；有更早历史时显示 “Load earlier”。
   - 发送时浏览器生成消息 uuid，先显示为待发送，收到同一 uuid 的记录后替换，不重复显示。
   - Claude 在跑时不能插话：输入框提示 “Queue a message for the next turn…”，消息排队，这一轮结束后发送。服务端对进行中的会话再次发送返回 409 `session_busy`。
-  - Esc 或停止按钮中断这一轮（`interrupt` 控制请求）；Claude 以 `result` 结束这一轮，进程保留。有对话框（如 Settings）打开时，Esc 只关闭该对话框，不中断这一轮。
+  - Esc 或停止按钮中断这一轮（`interrupt` 控制请求）；Claude 以 `result` 结束这一轮，进程保留。有对话框（如 Settings）或下拉/右键菜单打开时，Esc 只关闭它，不中断这一轮。
   - 模型：Default / Sonnet / Opus / Haiku；权限模式：Ask before edits（`default`）/ Accept edits / Plan mode / Bypass permissions。都作用于下一条消息：与运行中进程的启动参数不同时，服务端先停止进程再用新参数启动（比较的是启动时请求的模型别名 `launchModel`，不是 Claude 回报的完整模型名，所以同一模型不会每次重启）。选 Bypass permissions 前同样先确认（“Switch to Bypass permissions?”，说明 Claude 在此聊天中跳过权限确认）。
   - “Allow for session” 可能让 Claude 切换权限模式（如接受编辑），`system` 记录回报新模式后，界面和标签配置随之更新。
   - 工具显示：Bash 显示为命令和输出；Edit / MultiEdit / Write 显示为差异；其他工具显示名称、输入和结果。
@@ -183,7 +183,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - 顺序：当前项目在最前（标 “Current”，空闲时显示 “Nothing running”），然后 “Other workspaces”：其他有运行、等待、失败或刚完成条目的项目（按项目栏顺序，空闲的不列出），每个项目下列出条目；最后是 “Recent” 通知列表和 “Notify this device” 开关。
   - 点击项目名切换到该项目，点击条目切换项目并打开对应的会话、终端或聊天；打开任何东西都会关闭面板。Esc、点击面板外或关闭按钮关闭。
   - 手机上（宽度 ≤ 640px）是贴底的全宽面板（最高 82% 屏幕高度），电脑上是居中弹窗。
-  - 铃铛角标为未读数；有等待审批的任务时角标为审批颜色，鼠标悬停显示未读数和等待数。工具栏按钮显示所有项目中运行中（含等待）的条目数、审批圆点和未读数。浏览器标签标题：有等待审批的任务时为 “(N waiting) <项目> - TianForge pi”（N 为所有已打开项目的等待数），否则有未读通知时为 “(N) <项目> - TianForge pi”，都没有时为 “<项目> - TianForge pi”。
+  - 铃铛角标为未读数；有等待审批的任务时角标为审批颜色，鼠标悬停显示未读数和等待数。工具栏按钮显示所有已打开项目中运行中（含等待）的条目数、审批圆点和未读数。浏览器标签标题：有等待审批的任务时为 “(N waiting) <项目> - TianForge pi”（N 为所有已打开项目的等待数），否则有未读通知时为 “(N) <项目> - TianForge pi”，都没有时为 “<项目> - TianForge pi”。
   - “Recent” 列表：未读加粗，显示项目、类型、事件、时间，失败时附原因；点击后标为已读，并切换到所在项目打开对应的聊天、会话或终端（项目已关闭时重新打开该项目（加回项目栏）再打开目标；终端记录只在内存中，服务端重启或 “Clear ended” 之后点击终端通知只切换到所在项目）。没有通知时显示 “No notifications in the last 7 days”。
 - Agents 面板的任务完成提示（右下角 toast，8 秒自动消失）由新到的通知触发：本项目的 “Task: <脚本>” 终端有新的未读通知（完成或失败）时显示，内容附终端最后几行输出；点击 toast 打开终端并把该通知标为已读。为此，项目任务终端（标题以 “Task: ” 开头，与 Agents 面板的任务分组规则相同）正常退出也记为完成（普通 shell 正常退出仍不记录）。用户点 Stop 停止的任务不记录，所以也不再提示。页面打开前已有的通知不提示。
 - 系统推送（Web Push，`server/web-push.cjs`）：每条新通知同时发到开启了 “Notify this device” 且选了该事件的设备，锁屏的手机也能收到。
@@ -245,6 +245,7 @@ Claude/Codex 终端运行时带 `activity`：`working`（正在跑一轮）、`w
   - Claude Chat 与 `resume` 终端互斥：有 `resume` 终端在写该会话时，聊天显示 “This session is open in a Claude terminal” 和 “Stop terminal”，发送返回 409 `terminal_owns_session`；点击后调用 `claim`（先 Ctrl+C 再停止终端）并重新加载历史。
   - 创建 `resume` 终端时：聊天正在跑一轮或有审批返回 409 `session_busy`；聊天空闲则先停止聊天进程，聊天标签可稍后重新打开。
   - 删除 Claude 会话时，聊天进程存在或正在启动返回 409 `session_busy`（“Close the chat first”）。
+  - 删除成功后，若该 Claude 会话的 Chat 标签仍打开，同时关闭该标签，不留下指向已删除会话的死页面。
   - 已知限制：只识别 pi-web 启动的 `resume` 终端。`new` / `fork` 终端里用 `/resume` 切到该会话、普通 Shell 里运行的 `claude`、pi-web 之外的 Claude 都无法检测；两个进程同时写同一会话文件会导致历史错乱。终端所在目录通过符号链接与聊天目录不同时也不会匹配（不做 realpath）。
 - 只有 `resume` 终端算作其 `sourceSessionId` 会话的写入者；`fork` 终端记录的是父会话 id，但写的是新会话，不会被父会话的聊天停止，父会话也不会因此从列表隐藏。
 

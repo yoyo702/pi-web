@@ -473,12 +473,13 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
       const data = await response.json() as { error?: string };
       if (!response.ok) throw new Error(data.error || "Unable to delete Claude session");
       await reloadClaudeSessions(true);
+      onCodexSessionChanged?.({ id: session.id, action: "delete" });
     } catch (cause) {
       setClaudeError(cause instanceof Error ? cause.message : "Unable to delete Claude session");
     } finally {
       setBusyId(null);
     }
-  }, [cwd, reloadClaudeSessions]);
+  }, [cwd, reloadClaudeSessions, onCodexSessionChanged]);
 
   const stopTerminal = useCallback(async (terminal: TerminalSession) => {
     setActionError(null);

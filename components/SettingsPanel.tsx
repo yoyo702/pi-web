@@ -30,25 +30,34 @@ const sections: Array<{ id: SettingsSection; label: string; projectRequired?: bo
   { id: "status", label: "Status & indicators", icon: CircleHelp },
 ];
 
+const UNSAVED_MODELS_WARNING = "You have unsaved changes to Models. Discard them?";
+
 export function SettingsPanel({ isDark, cwd, sessionId, onClose, onToggleTheme, onModelsChanged, onPluginsReloaded }: Props) {
   const [section, setSection] = useState<SettingsSection>("general");
+  const [modelsDirty, setModelsDirty] = useState(false);
   const { soundEnabled, onSoundToggle } = useAudio();
 
+  const confirmDiscardModels = () => section !== "models" || !modelsDirty || window.confirm(UNSAVED_MODELS_WARNING);
+
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape" && confirmDiscardModels()) onClose(); };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onClose, section, modelsDirty]);
 
   const closeChild = () => setSection("general");
   const embedded = section === "access" || section === "models" || section === "skills" || section === "plugins";
 
-  return <div className="settings-backdrop" role="dialog" aria-modal="true" aria-label="Settings" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+  const requestClose = () => { if (confirmDiscardModels()) onClose(); };
+  const requestSection = (id: SettingsSection) => { if (id !== section && confirmDiscardModels()) setSection(id); };
+
+  return <div className="settings-backdrop" role="dialog" aria-modal="true" aria-label="Settings" onMouseDown={(event) => { if (event.target === event.currentTarget && confirmDiscardModels()) onClose(); }}>
     <section className="settings-panel">
-      <header className="settings-header"><Settings size={16} /><strong>Settings</strong><button type="button" aria-label="Close settings" onClick={onClose}><X size={15} /></button></header>
+      <header className="settings-header"><Settings size={16} /><strong>Settings</strong><button type="button" aria-label="Close settings" onClick={requestClose}><X size={15} /></button></header>
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="Settings sections">
-          {sections.map(({ id, label, projectRequired, icon: Icon }) => <button key={id} type="button" className={section === id ? "is-active" : ""} disabled={projectRequired && !cwd} title={projectRequired && !cwd ? `Open a project to configure ${label.toLowerCase()}` : label} onClick={() => setSection(id)}><Icon size={14} /><span>{label}</span></button>)}
+          {sections.map(({ id, label, projectRequired, icon: Icon }) => <button key={id} type="button" className={section === id ? "is-active" : ""} disabled={projectRequired && !cwd} title={projectRequired && !cwd ? `Open a project to configure ${label.toLowerCase()}` : label} onClick={() => requestSection(id)}><Icon size={14} /><span>{label}</span></button>)}
         </nav>
         <main className={`settings-content${embedded ? " is-embedded" : ""}`}>
           {section === "general" && <>
@@ -57,7 +66,7 @@ export function SettingsPanel({ isDark, cwd, sessionId, onClose, onToggleTheme, 
             <section className="settings-section"><h3>Notifications</h3><button type="button" className="settings-action-row" onClick={onSoundToggle}>{soundEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}<span><strong>Completion sound</strong><small>Play a tone when an agent finishes</small></span><span className="settings-value">{soundEnabled ? "On" : "Off"}</span></button></section>
           </>}
           {section === "access" && <MobileAccessDialog embedded onClose={closeChild} />}
-          {section === "models" && <ModelsConfig embedded onClose={() => { onModelsChanged?.(); closeChild(); }} />}
+          {section === "models" && <ModelsConfig embedded onClose={() => { onModelsChanged?.(); closeChild(); }} onDirtyChange={setModelsDirty} />}
           {section === "skills" && cwd && <SkillsConfig embedded cwd={cwd} onClose={closeChild} />}
           {section === "plugins" && cwd && <PluginsConfig embedded cwd={cwd} sessionId={sessionId} onClose={closeChild} onReloaded={onPluginsReloaded} />}
           {section === "status" && <>

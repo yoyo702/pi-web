@@ -361,10 +361,11 @@ app.prepare().then(() => {
   process.exit(1);
 });
 
-function shutdown() {
+async function shutdown() {
+  let terminalsStopped = Promise.resolve();
   try {
     const { shutdownTerminals } = require("./agents/terminal-manager.cjs");
-    shutdownTerminals();
+    terminalsStopped = shutdownTerminals();
   } catch { /* terminal runtime may not have loaded */ }
   try {
     require("./agents/codex-app-server.cjs").shutdownRuntimes();
@@ -372,11 +373,16 @@ function shutdown() {
   try {
     require("./agents/claude-chat-runtime.cjs").shutdownRuntimes();
   } catch { /* Claude Chat runtime may not have loaded */ }
-  server.close(() => process.exit(0));
+  server.close();
   // SSE streams and terminal WebSockets never end on their own, so close()
   // would otherwise always wait for the forced-exit timeout below.
   server.closeAllConnections();
   setTimeout(() => process.exit(1), 5000).unref();
+  // Wait for stopped terminals' process groups to exit (or be force-killed
+  // after their own grace period) so a CLI that ignored SIGTERM doesn't
+  // outlive the server itself.
+  try { await terminalsStopped; } catch { /* best effort */ }
+  process.exit(0);
 }
 process.once("SIGINT", shutdown);
 process.once("SIGTERM", shutdown);

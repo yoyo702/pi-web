@@ -434,6 +434,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
   const [hasOlderMessages, setHasOlderMessages] = useState(Boolean(initialSnapshot?.data.context.page?.hasMore));
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
+  // Set when the most recent "load older messages" attempt failed, so the
+  // sentinel's IntersectionObserver stops auto-retrying a request that keeps
+  // failing. Cleared on success, or when the sentinel leaves and re-enters
+  // view (the user scrolling away and back is treated as a fresh attempt).
+  const [loadOlderFailed, setLoadOlderFailed] = useState(false);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
@@ -459,10 +464,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const optimisticUserMessageKeyRef = useRef<string | null>(null);
   const contextPageSizeRef = useRef(getContextPageSize());
   const activeLeafIdRef = useRef<string | null>(null);
+  const thinkingLevelRef = useRef<ThinkingLevelOption>("auto");
+  // Bumped on every handleLeafChange/handleThinkingLevelChange call so a
+  // failure handler can tell whether it's still the latest in-flight call
+  // before rolling back (a stale, slower failure must not undo a newer
+  // change that already applied or succeeded).
+  const leafChangeSeqRef = useRef(0);
+  const thinkingLevelChangeSeqRef = useRef(0);
   const entryIdsRef = useRef<string[]>([]);
   const snapshotRef = useRef<SessionSnapshot | null>(initialSnapshot);
 
   activeLeafIdRef.current = activeLeafId;
+  thinkingLevelRef.current = thinkingLevel;
   entryIdsRef.current = entryIds;
   snapshotRef.current = session?.id && data ? {
     sessionId: session.id,
@@ -648,23 +661,43 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const loadContext = useCallback(async (sid: string, leafId: string | null) => {
+  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType }) => {
+    const message = notice.message.trim();
+    if (!message) return;
+    dispatchNotice({
+      type: "add",
+      notice: {
+        id: notice.id ?? createNoticeId(),
+        message,
+        type: notice.type ?? "info",
+      },
+    });
+  }, []);
+
+  const loadContext = useCallback(async (sid: string, leafId: string | null): Promise<boolean> => {
     try {
       const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
       params.set("limit", String(contextPageSizeRef.current));
       if (leafId) params.set("leafId", leafId);
       const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
       const d = await res.json() as { context: SessionData["context"] };
       setMessages(d.context.messages);
       setEntryIds(d.context.entryIds ?? []);
       setHasOlderMessages(Boolean(d.context.page?.hasMore));
       setData((current) => current ? { ...current, context: d.context } : current);
+      setLoadOlderFailed(false);
+      return true;
     } catch (e) {
       console.error("Failed to load context:", e);
+      addNotice({ type: "error", message: e instanceof Error ? `Could not load messages: ${e.message}` : "Could not load messages" });
+      return false;
     }
-  }, []);
+  }, [addNotice]);
 
   const loadOlderMessages = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -680,7 +713,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       if (activeLeafIdRef.current) params.set("leafId", activeLeafIdRef.current);
       const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}/context?${params}`);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
       const d = await res.json() as { context: SessionData["context"] };
       if (sessionIdRef.current !== sid) return;
 
@@ -705,12 +741,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           page: d.context.page,
         },
       } : current);
+      setLoadOlderFailed(false);
     } catch (e) {
       console.error("Failed to load older session messages:", e);
+      addNotice({ type: "error", message: e instanceof Error ? `Could not load earlier messages: ${e.message}` : "Could not load earlier messages" });
+      setLoadOlderFailed(true);
     } finally {
       setLoadingOlderMessages(false);
     }
-  }, [data?.context.page?.beforeEntryId, loadingOlderMessages]);
+  }, [data?.context.page?.beforeEntryId, loadingOlderMessages, addNotice]);
 
   const loadTools = useCallback(async (sid: string) => {
     try {
@@ -890,19 +929,6 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to send extension custom UI input:", e);
     }
-  }, []);
-
-  const addNotice = useCallback((notice: { id?: string; message: string; type?: NoticeType }) => {
-    const message = notice.message.trim();
-    if (!message) return;
-    dispatchNotice({
-      type: "add",
-      notice: {
-        id: notice.id ?? createNoticeId(),
-        message,
-        type: notice.type ?? "info",
-      },
-    });
   }, []);
 
   const handleExtensionUiRequest = useCallback((request: ExtensionUiRequest) => {
@@ -1459,6 +1485,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         await sendAgentCommand(sid, { type: "abort_bash" });
       } catch (e) {
         console.error("Failed to abort bash:", e);
+        addNotice({ type: "error", message: e instanceof Error ? `Could not stop the shell command: ${e.message}` : "Could not stop the shell command" });
       }
       return;
     }
@@ -1466,8 +1493,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "abort" });
     } catch (e) {
       console.error("Failed to abort:", e);
+      addNotice({ type: "error", message: e instanceof Error ? `Could not stop the agent: ${e.message}` : "Could not stop the agent" });
     }
-  }, []);
+  }, [addNotice]);
 
   const handleFork = useCallback(async (entryId: string) => {
     if (bashRunningRef.current) return;
@@ -1485,10 +1513,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
     } catch (e) {
       console.error("Fork failed:", e);
+      addNotice({ type: "error", message: e instanceof Error ? `Could not create a new session: ${e.message}` : "Could not create a new session" });
     } finally {
       setForkingEntryId(null);
     }
-  }, [onSessionForked]);
+  }, [onSessionForked, addNotice]);
 
   const handleNavigate = useCallback(async (entryId: string) => {
     if (bashRunningRef.current) return;
@@ -1502,15 +1531,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleLeafChange = useCallback(async (leafId: string | null) => {
     if (bashRunningRef.current) return;
+    // Only the most recently started call is allowed to roll back on failure;
+    // otherwise a slow, stale failure could clobber a newer branch switch that
+    // already succeeded.
+    const seq = ++leafChangeSeqRef.current;
+    const previousLeafId = activeLeafIdRef.current;
     setActiveLeafId(leafId);
     const sid = sessionIdRef.current;
     if (!sid) return;
     rememberActiveLeafId(sid, leafId);
-    await loadContext(sid, leafId);
-    if (leafId) {
-      sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId }).catch(() => {});
+    const loaded = await loadContext(sid, leafId);
+    if (!loaded) {
+      if (leafChangeSeqRef.current !== seq) return;
+      setActiveLeafId(previousLeafId);
+      rememberActiveLeafId(sid, previousLeafId);
+      await loadContext(sid, previousLeafId);
+      return;
     }
-  }, [loadContext]);
+    if (leafId) {
+      try {
+        await sendAgentCommand(sid, { type: "navigate_tree", targetId: leafId });
+      } catch (e) {
+        console.error("Failed to switch branch:", e);
+        addNotice({ type: "error", message: e instanceof Error ? `Could not switch branch: ${e.message}` : "Could not switch branch" });
+        if (leafChangeSeqRef.current !== seq) return;
+        setActiveLeafId(previousLeafId);
+        rememberActiveLeafId(sid, previousLeafId);
+        await loadContext(sid, previousLeafId);
+      }
+    }
+  }, [loadContext, addNotice]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
     const modelLabel = `${provider}/${modelId}`;
@@ -1758,6 +1808,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [opts.chatInputRef, addNotice]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
+    // Only the most recently started call is allowed to roll back on failure;
+    // otherwise a slow, stale failure could clobber a newer level change that
+    // already succeeded.
+    const seq = ++thinkingLevelChangeSeqRef.current;
+    const previousLevel = thinkingLevelRef.current;
     setThinkingLevel(level);
     if (level === "auto") return; // "auto" leaves pi's current setting untouched
     const sid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
@@ -1766,8 +1821,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await sendAgentCommand(sid, { type: "set_thinking_level", level });
     } catch (e) {
       console.error("Failed to set thinking level:", e);
+      addNotice({ type: "error", message: e instanceof Error ? `Could not change the reasoning level: ${e.message}` : "Could not change the reasoning level" });
+      if (thinkingLevelChangeSeqRef.current !== seq) return;
+      setThinkingLevel(previousLevel);
     }
-  }, []);
+  }, [addNotice]);
 
   const handleToolPresetChange = useCallback(async (preset: "none" | "default" | "full") => {
     const toolNames = getToolNamesForPreset(preset);
@@ -1973,7 +2031,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, activeLeafId, messages, entryIds, streamState,
-    hasOlderMessages, loadingOlderMessages,
+    hasOlderMessages, loadingOlderMessages, loadOlderFailed, setLoadOlderFailed,
     agentRunning, modelNames, modelList, modelError, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,

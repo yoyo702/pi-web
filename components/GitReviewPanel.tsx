@@ -163,6 +163,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
   const [status, setStatus] = useState<GitStatusResponse | null>(null);
   const [selected, setSelected] = useState<SelectedChange | null>(null);
   const [diff, setDiff] = useState<GitFileDiffResponse | null>(null);
+  const [diffError, setDiffError] = useState<string | null>(null);
   // Bumped to load the selected diff again after the repository changed.
   const [diffNonce, setDiffNonce] = useState(0);
   const loadedDiffKey = useRef<string | null>(null);
@@ -242,6 +243,7 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
     if (!repositoryCwd || !selected) {
       loadedDiffKey.current = null;
       setDiff(null);
+      setDiffError(null);
       return;
     }
     const controller = new AbortController();
@@ -251,17 +253,23 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
       loadedDiffKey.current = key;
       setLoadingDiff(true);
       setDiff(null);
+      setDiffError(null);
     }
     const params = new URLSearchParams({ cwd: repositoryCwd, path: selected.file.filePath, scope: selected.scope });
     void fetch(`/api/git/diff?${params}`, { signal: controller.signal })
       .then(async (res) => {
-        const next = await res.json() as GitFileDiffResponse & { error?: string };
+        // An error response (e.g. an HTML page from a proxy or an auth
+        // redirect) may not be JSON at all; fall back to the status text
+        // instead of surfacing a raw parse error like "Unexpected token '<'".
+        const next = await res.json().catch(() => ({})) as GitFileDiffResponse & { error?: string };
         if (!res.ok) throw new Error(next.error ?? `Failed to load diff (${res.status})`);
         setDiff(next);
+        setDiffError(null);
       })
       .catch((cause: unknown) => {
         if (cause instanceof DOMException && cause.name === "AbortError") return;
-        setDiff({ supported: false });
+        setDiff(null);
+        setDiffError(cause instanceof Error ? cause.message : String(cause));
       })
       .finally(() => { if (!controller.signal.aborted) setLoadingDiff(false); });
     return () => controller.abort();
@@ -532,6 +540,14 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
                     <DiffView patch={diff.patch} />
                   )}
                 </div>
+              ) : diffError ? (
+                <EmptyState title="Could not load diff" detail={diffError} action={() => {
+                  // Force the effect to treat this as a fresh load (shows
+                  // "Loading diff…" and clears the stale error) instead of
+                  // silently retrying in the background.
+                  loadedDiffKey.current = null;
+                  setDiffNonce((n) => n + 1);
+                }} />
               ) : (
                 <EmptyState title="Diff unavailable" detail="This file may be binary, too large, or unchanged in this review group." />
               )}
@@ -1134,27 +1150,34 @@ function CommitFileRow({ file, selected, onSelect }: { file: GitCommitFile; sele
 
 function CommitFileDiff({ cwd, hash, path }: { cwd: string; hash: string; path: string }) {
   const [diff, setDiff] = useState<GitFileDiffResponse | null>(null);
+  const [diffError, setDiffError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     setDiff(null);
+    setDiffError(null);
     void fetch(`/api/git/commit?${new URLSearchParams({ cwd, hash, path })}`, { signal: controller.signal })
       .then(async (res) => {
-        const next = await res.json() as GitFileDiffResponse & { error?: string };
-        setDiff(res.ok ? next : { supported: false });
+        // An error response may not be JSON at all; fall back to the status
+        // text instead of surfacing a raw parse error like "Unexpected token '<'".
+        const next = await res.json().catch(() => ({})) as GitFileDiffResponse & { error?: string };
+        if (!res.ok) throw new Error(next.error ?? `Failed to load diff (${res.status})`);
+        setDiff(next);
       })
       .catch((cause: unknown) => {
         if (cause instanceof DOMException && cause.name === "AbortError") return;
-        setDiff({ supported: false });
+        setDiffError(cause instanceof Error ? cause.message : String(cause));
       })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [cwd, hash, path]);
+  }, [cwd, hash, path, nonce]);
 
   if (loading) return <EmptyState title="Loading diff…" />;
   if (diff?.supported && diff.patch) return <DiffView patch={diff.patch} />;
+  if (diffError) return <EmptyState title="Could not load diff" detail={diffError} action={() => setNonce((n) => n + 1)} />;
   return <EmptyState title="Diff unavailable" detail="This file may be binary or too large to display." />;
 }
 

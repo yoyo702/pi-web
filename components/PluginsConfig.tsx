@@ -489,7 +489,7 @@ function PackageDetail({
             {reloadBusy ? "Reloading..." : "Reload session"}
           </button>
           <button
-            onClick={() => onAction("remove", pkg)}
+            onClick={() => { if (window.confirm(`Remove "${pkg.packageName ?? pkg.source}"? This uninstalls the plugin from ${pkg.scope === "project" ? "this project" : "your global config"}.`)) onAction("remove", pkg); }}
             disabled={busy || reloadBusy}
             style={buttonStyle(busy || reloadBusy, true)}
           >

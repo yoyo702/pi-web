@@ -9,10 +9,12 @@ export function shouldAbortOnEscape(input: { targetTag: string | undefined; defa
 }
 
 /**
- * Whether a modal is open on screen: an `aria-modal` dialog or a native
- * `<dialog>` opened via showModal(). Workspace tabs stay mounted while hidden,
- * so a dialog left open in a background tab doesn't count.
+ * Whether a modal or menu is open on screen: an `aria-modal` dialog, a native
+ * `<dialog>` opened via showModal(), or a `role="menu"` dropdown/context menu
+ * (TabBar, ProjectRail, SessionSidebar, FileExplorer, AgentsPanel, etc. all
+ * use this role). Workspace tabs stay mounted while hidden, so a dialog or
+ * menu left open in a background tab doesn't count.
  */
 export function hasVisibleModal(root: Pick<ParentNode, "querySelectorAll">): boolean {
-  return Array.from(root.querySelectorAll('[aria-modal="true"], dialog[open]')).some((element) => element.checkVisibility?.() ?? element.getClientRects().length > 0);
+  return Array.from(root.querySelectorAll('[aria-modal="true"], dialog[open], [role="menu"]')).some((element) => element.checkVisibility?.() ?? element.getClientRects().length > 0);
 }

@@ -1714,8 +1714,7 @@ const SessionItem = memo(function SessionItem({
 
   const commitRename = useCallback(async () => {
     const name = renameValue.trim();
-    setRenaming(false);
-    if (name === (session.name ?? "")) return;
+    if (name === (session.name ?? "")) { setRenaming(false); return; }
     try {
       const res = await fetch(`/api/sessions/${encodeURIComponent(session.id)}`, {
         method: "PATCH",
@@ -1726,6 +1725,8 @@ const SessionItem = memo(function SessionItem({
         const body = await res.json().catch(() => ({})) as { error?: string };
         throw new Error(body.error ?? `HTTP ${res.status}`);
       }
+      setActionError(null);
+      setRenaming(false);
       onRenamed?.();
     } catch (error) {
       setActionError(`Rename failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -1829,28 +1830,30 @@ const SessionItem = memo(function SessionItem({
         </>
       ) : renaming ? (
         /* ── Rename: input fills the same row ── */
-        <input
-          ref={inputRef}
-          value={renameValue}
-          onChange={(e) => setRenameValue(e.target.value)}
-          onBlur={commitRename}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") commitRename();
-            if (e.key === "Escape") setRenaming(false);
-          }}
-          autoFocus
-          style={{
-            flex: 1,
-            fontSize: 12,
-            padding: "5px 8px",
-            border: "1px solid var(--accent)",
-            borderRadius: 5,
-            outline: "none",
-            background: "var(--bg)",
-            color: "var(--text)",
-            height: 30,
-          }}
-        />
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+          <input
+            ref={inputRef}
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitRename();
+              if (e.key === "Escape") { setActionError(null); setRenaming(false); }
+            }}
+            autoFocus
+            style={{
+              fontSize: 12,
+              padding: "5px 8px",
+              border: "1px solid var(--accent)",
+              borderRadius: 5,
+              outline: "none",
+              background: "var(--bg)",
+              color: "var(--text)",
+              height: 30,
+            }}
+          />
+          {actionError && <div role="alert" title={actionError} style={{ color: "#f87171", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{actionError}</div>}
+        </div>
       ) : (
         /* ── Normal view ── */
         <>

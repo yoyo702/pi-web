@@ -285,7 +285,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const {
     loading, error, messages, entryIds, streamState,
-    hasOlderMessages, loadingOlderMessages,
+    hasOlderMessages, loadingOlderMessages, loadOlderFailed, setLoadOlderFailed,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
@@ -358,14 +358,23 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   const prevScrollDistanceRef = useRef<number | null>(null);
 
   // IntersectionObserver on the sentinel div at the top of the message list.
-  // When it becomes visible, load the next page of older messages.
+  // When it becomes visible, load the next page of older messages. After a
+  // failed load, stop auto-retriggering (the sentinel stays in view, so
+  // re-observing it would otherwise refire immediately and loop forever) —
+  // only a fresh crossing (scrolled out, then back in) or the explicit Retry
+  // button tries again.
   useEffect(() => {
     const sentinel = sentinelRef.current;
     const container = scrollContainerRef.current;
     if (!sentinel || !container) return;
     const observer = new IntersectionObserver(
       (entries) => {
-        if (entries[0]?.isIntersecting && hasOlderMessages && !loadingOlderMessages) {
+        const isIntersecting = entries[0]?.isIntersecting ?? false;
+        if (!isIntersecting) {
+          if (loadOlderFailed) setLoadOlderFailed(false);
+          return;
+        }
+        if (hasOlderMessages && !loadingOlderMessages && !loadOlderFailed) {
           // Save distance from top before prepending to restore scroll later
           prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
           void loadOlderMessages();
@@ -375,7 +384,15 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [hasOlderMessages, loadingOlderMessages, loadOlderMessages, messages.length, scrollContainerRef]);
+  }, [hasOlderMessages, loadingOlderMessages, loadOlderFailed, setLoadOlderFailed, loadOlderMessages, messages.length, scrollContainerRef]);
+
+  // Explicit retry for the sentinel's "Could not load earlier messages" state.
+  const handleRetryLoadOlder = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (container) prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+    setLoadOlderFailed(false);
+    void loadOlderMessages();
+  }, [loadOlderMessages, setLoadOlderFailed, scrollContainerRef]);
 
   // After older messages are prepended, restore the
   // scroll position so the viewport doesn't jump.
@@ -795,7 +812,15 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
                 <>
                   {(hasOlderMessages || loadingOlderMessages) && (
                     <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
-                      {loadingOlderMessages ? "Loading earlier messages..." : "Scroll up to load earlier messages"}
+                      {loadingOlderMessages
+                        ? "Loading earlier messages..."
+                        : loadOlderFailed
+                          ? (
+                            <button type="button" onClick={handleRetryLoadOlder} className="underline hover:text-text">
+                              Retry loading earlier messages
+                            </button>
+                          )
+                          : "Scroll up to load earlier messages"}
                     </div>
                   )}
                   {rendered}

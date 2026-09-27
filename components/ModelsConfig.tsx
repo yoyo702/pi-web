@@ -303,7 +303,7 @@ function ProviderDetail({ name, provider, onChange, onRename, onDelete }: {
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <SectionTitle>Provider</SectionTitle>
-        <button onClick={onDelete}
+        <button onClick={() => { if (window.confirm(`Delete provider "${name}"? This removes its base URL and API key settings.`)) onDelete(); }}
           style={{ padding: "3px 8px", background: "none", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 4, color: "#ef4444", cursor: "pointer", fontSize: 11 }}>
           Delete
         </button>
@@ -1078,7 +1078,7 @@ function ApiKeyDetail({ provider, onRefresh }: { provider: ApiKeyProvider; onRef
 
       {provider.configured && (
         <button
-          onClick={handleRemove}
+          onClick={() => { if (window.confirm(`Remove the saved API key for ${provider.displayName}? Models using it will stop working until you add a new key.`)) handleRemove(); }}
           disabled={removing}
           style={{
             alignSelf: "flex-start", padding: "5px 12px",
@@ -1292,9 +1292,10 @@ function AddProviderPicker({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export function ModelsConfig({ onClose, closeLabel = "Cancel", embedded = false }: { onClose: () => void; closeLabel?: string; embedded?: boolean }) {
+export function ModelsConfig({ onClose, closeLabel = "Cancel", embedded = false, onDirtyChange }: { onClose: () => void; closeLabel?: string; embedded?: boolean; onDirtyChange?: (dirty: boolean) => void }) {
   const isMobile = useIsMobile();
   const [config, setConfig] = useState<ModelsJson>({ providers: {} });
+  const savedConfigRef = useRef<ModelsJson>({ providers: {} });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -1331,6 +1332,7 @@ export function ModelsConfig({ onClose, closeLabel = "Cancel", embedded = false 
       .then((d) => {
         const normalized = d.providers ? d : { ...d, providers: {} };
         setConfig(normalized);
+        savedConfigRef.current = normalized;
         const keys = Object.keys(normalized.providers ?? {});
         if (keys.length > 0) setSelection({ type: "provider", name: keys[0] });
       })
@@ -1431,13 +1433,16 @@ export function ModelsConfig({ onClose, closeLabel = "Cancel", embedded = false 
       });
       const d = await res.json() as { success?: boolean; error?: string };
       if (!res.ok || d.error) setSaveError(d.error ?? `HTTP ${res.status}`);
-      else { setSavedOk(true); setTimeout(() => setSavedOk(false), 2000); }
+      else { setSavedOk(true); savedConfigRef.current = config; setTimeout(() => setSavedOk(false), 2000); }
     } catch (e) {
       setSaveError(String(e));
     } finally {
       setSaving(false);
     }
   }, [config, loadError]);
+
+  const dirty = JSON.stringify(config) !== JSON.stringify(savedConfigRef.current);
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
 
   const providers = Object.entries(config.providers ?? {});
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);

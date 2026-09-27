@@ -39,10 +39,11 @@ interface UseGlobalKeyboardShortcutsOptions {
  * Note: Esc inside <textarea> or <input> is deliberately NOT handled here.
  * ChatInput manages its own Esc logic (closing slash / @ file menus, stopping
  * the agent when no menu is open) because it needs intimate knowledge of menu
- * state that is local to that component. Esc is also skipped while a modal
- * (Settings or any other `[aria-modal="true"]` dialog, or a native
- * `<dialog>` opened with showModal() such as the Mermaid zoom viewer) is
- * open, so closing it doesn't also abort the agent.
+ * state that is local to that component. Esc is also skipped while a dialog
+ * or menu is open (Settings or any other `[aria-modal="true"]` dialog, a
+ * native `<dialog>` opened with showModal() such as the Mermaid zoom viewer,
+ * or a `role="menu"` dropdown/context menu such as the TianForge app menu),
+ * so closing it doesn't also abort the agent.
  */
 export function useGlobalKeyboardShortcuts(
   options: UseGlobalKeyboardShortcutsOptions,
@@ -55,10 +56,12 @@ export function useGlobalKeyboardShortcuts(
       if (e.key === "Escape") {
         if (!globalAbortHandler) return;
         // Text fields handle Esc themselves (ChatInput menus / stop); an open
-        // modal owns Esc to close itself — either an `aria-modal` dialog
-        // (Settings, etc.) or a native `<dialog>` opened via showModal()
-        // (e.g. the Mermaid zoom viewer, which has no aria-modal attribute) —
-        // counting only visible ones, not dialogs in hidden workspace tabs.
+        // dialog or menu owns Esc to close itself — either an `aria-modal`
+        // dialog (Settings, etc.), a native `<dialog>` opened via
+        // showModal() (e.g. the Mermaid zoom viewer, which has no
+        // aria-modal attribute), or a `role="menu"` dropdown/context menu
+        // (e.g. the TianForge app menu) — counting only visible ones, not
+        // dialogs or menus in hidden workspace tabs.
         // defaultPrevented is checked too, but is only a defensive fallback:
         // this listener runs in the capture phase (see addEventListener
         // below), so it fires before any bubble-phase handler elsewhere in

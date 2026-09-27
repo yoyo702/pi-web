@@ -59,7 +59,7 @@ const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ?
  * The confirmation shown before closing a workspace, or null when nothing in
  * it is running or waiting. Closing never stops anything, so it lists what
  * keeps running: terminals, Codex/Claude chats and Pi sessions, in the
- * project root and in its worktrees.
+ * project root and in the currently open worktree.
  */
 export function workspaceCloseWarning(label: string, activity: Pick<WorkspaceActivity, "items"> | undefined): string | null {
   const busy = (activity?.items ?? []).filter((item) => item.state === "working" || item.state === "approval");
