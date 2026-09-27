@@ -236,7 +236,7 @@ test("the status stream lists chat processes", async (t) => {
   assert.deepEqual(workspaceStatus.snapshot("claude_runtimes"), { type: "claude_runtimes", runtimes: [] });
   await chat.send(state, { text: "hello" });
   await waitFor(() => events.some((event) => event.type === "result"));
-  assert.deepEqual(workspaceStatus.snapshot("claude_runtimes"), { type: "claude_runtimes", runtimes: [{ sessionId: ID, cwd, title: "hello", owner: "chat", state: "idle", connected: true, model: null, permissionMode: "default" }] });
+  assert.deepEqual(workspaceStatus.snapshot("claude_runtimes"), { type: "claude_runtimes", runtimes: [{ sessionId: ID, cwd, title: "hello", owner: "chat", state: "idle", connected: true, model: null, permissionMode: "default", projectRoot: cwd }] });
 });
 
 test("the status stream lists the model and permission a chat runs with", async (t) => {

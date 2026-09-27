@@ -14,6 +14,7 @@ interface Props {
   onCloseTab: (id: string) => void;
   onCloseTabs?: (ids: string[]) => void;
   onToggleTabLocked?: (id: string) => void;
+  onReorderTabs?: (id: string, beforeId: string | null) => void;
   onRevealFile?: (filePath: string) => void;
   ariaLabel?: string;
 }
@@ -54,15 +55,17 @@ function isTabClosable(tab: Tab): boolean {
   return tab.closable !== false && !tab.locked;
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs, onToggleTabLocked, onRevealFile, ariaLabel = "Open tabs" }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs, onToggleTabLocked, onReorderTabs, onRevealFile, ariaLabel = "Open tabs" }: Props) {
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<TabContextMenu | null>(null);
   const [copiedFilePath, setCopiedFilePath] = useState<string | null>(null);
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dropBeforeId, setDropBeforeId] = useState<string | null | undefined>(undefined);
   const scrollRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<string, HTMLDivElement>());
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const supportsTabManagement = Boolean(onCloseTabs && onToggleTabLocked);
+  const supportsTabManagement = Boolean(onCloseTabs);
 
   useEffect(() => {
     tabRefs.current.get(activeTabId)?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -193,6 +196,27 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
                 event.stopPropagation();
                 onCloseTab(tab.id);
               }}
+              draggable={Boolean(onReorderTabs) && tab.closable !== false}
+              onDragStart={(event) => {
+                if (!onReorderTabs) return;
+                setDraggedId(tab.id);
+                event.dataTransfer.effectAllowed = "move";
+              }}
+              onDragEnd={() => { setDraggedId(null); setDropBeforeId(undefined); }}
+              onDragOver={(event) => {
+                if (!onReorderTabs || !draggedId || draggedId === tab.id) return;
+                event.preventDefault();
+                const rect = event.currentTarget.getBoundingClientRect();
+                const before = event.clientX < rect.left + rect.width / 2;
+                setDropBeforeId(before ? tab.id : (tabs[tabs.findIndex((t) => t.id === tab.id) + 1]?.id ?? null));
+              }}
+              onDrop={(event) => {
+                if (!onReorderTabs || !draggedId) return;
+                event.preventDefault();
+                if (dropBeforeId !== undefined) onReorderTabs(draggedId, dropBeforeId);
+                setDraggedId(null);
+                setDropBeforeId(undefined);
+              }}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -201,6 +225,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
                 paddingLeft: 12,
                 paddingRight: 6,
                 borderRight: "1px solid var(--border)",
+                borderLeft: dropBeforeId === tab.id ? "2px solid var(--accent)" : "2px solid transparent",
                 background: isActive ? "var(--bg)" : "var(--bg-panel)",
                 cursor: "pointer",
                 fontSize: 12,
@@ -269,7 +294,7 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
           );
         })}
       </div>
-      {contextMenu && contextTab && onCloseTabs && onToggleTabLocked && createPortal(
+      {contextMenu && contextTab && onCloseTabs && createPortal(
         <div
           ref={menuRef}
           role="menu"
@@ -283,8 +308,8 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, onCloseTabs
           {contextTab.kind === "file" && contextTab.filePath && onRevealFile && menuItem("Reveal in File Explorer", false, () => onRevealFile(contextTab.filePath))}
           {contextTab.kind === "file" && contextTab.filePath && menuItem(copiedFilePath === contextTab.filePath ? "File Path Copied" : "Copy File Path", false, () => { void copyFilePath(contextTab.filePath); }, false)}
           {contextTab.kind === "file" && contextTab.filePath && <div role="separator" style={{ height: 1, margin: "4px 3px", background: "var(--border)" }} />}
-          {menuItem(contextTab.locked ? "Unlock Tab" : "Lock Tab", false, () => onToggleTabLocked(contextTab.id))}
-          <div role="separator" style={{ height: 1, margin: "4px 3px", background: "var(--border)" }} />
+          {onToggleTabLocked && menuItem(contextTab.locked ? "Unlock Tab" : "Lock Tab", false, () => onToggleTabLocked(contextTab.id))}
+          {onToggleTabLocked && <div role="separator" style={{ height: 1, margin: "4px 3px", background: "var(--border)" }} />}
           {menuItem("Close Tab", !isTabClosable(contextTab), () => onCloseTabs([contextTab.id]))}
           {menuItem("Close Tabs to the Left", leftIds.length === 0, () => onCloseTabs(leftIds))}
           {menuItem("Close Tabs to the Right", rightIds.length === 0, () => onCloseTabs(rightIds))}

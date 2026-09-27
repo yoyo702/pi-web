@@ -9,6 +9,7 @@ const { ensureNodePtySpawnHelper } = require("./ensure-node-pty-helper.cjs");
 const { PERMISSION_MODES, MAX_PROMPT_LENGTH, isValidModel } = require("./launch-options.cjs");
 const workspaceStatus = require("../workspace-status.cjs");
 const notifications = require("../notifications.cjs");
+const { resolveProjectRoot } = require("./project-root.cjs");
 
 const MAX_BUFFER_BYTES = 1024 * 1024;
 const MAX_RUNNING_TERMINALS = 20;
@@ -125,7 +126,7 @@ function setActivity(session, next, { detail, quiet = false } = {}) {
   session.activity = next;
   workspaceStatus.notify("terminals");
   if (quiet) return;
-  const base = { kind: "terminal", targetId: session.id, cwd: session.cwd, title: session.title };
+  const base = { kind: "terminal", targetId: session.id, cwd: session.cwd, title: session.title, projectRoot: session.projectRoot };
   if (next === "approval") notifications.add({ ...base, event: "approval", detail: detail || "Waiting for your approval" });
   else if (next === "waiting" && (previous === "working" || previous === "approval")) notifications.add({ ...base, event: "completed", detail: detail || "Waiting for your next message" });
 }
@@ -262,6 +263,7 @@ function publicSession(session) {
     bufferTruncated: session.truncated,
     history: [...(session.history || [])],
     activity: session.activity ?? null,
+    projectRoot: session.projectRoot,
   };
 }
 
@@ -363,6 +365,8 @@ function createTerminal({ provider, cwd, title, cols = 100, rows = 30, permissio
     activity: hookToken ? (typeof initialPrompt === "string" && initialPrompt.trim() ? "working" : "waiting") : null, hookToken, titleTail: "",
   };
   state.sessions.set(session.id, session);
+  session.projectRoot = cwd;
+  resolveProjectRoot(cwd).then((root) => { session.projectRoot = root; }).catch(() => {});
   workspaceStatus.notify("terminals");
   terminal.onData((data) => appendOutput(session, data));
   terminal.onExit(({ exitCode, signal }) => {
@@ -412,6 +416,7 @@ function recordExit(session, lastActivity) {
     targetId: session.id,
     cwd: session.cwd,
     title: session.title,
+    projectRoot: session.projectRoot,
     ...(failed ? { detail: session.signal && !session.exitCode ? `Killed by signal ${session.signal}` : `Exited with code ${session.exitCode}` } : {}),
   });
 }

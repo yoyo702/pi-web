@@ -71,3 +71,12 @@ export function isAudioPath(filePath: string): boolean {
 export function isDocumentPreviewPath(filePath: string): boolean {
   return documentPreviewKind(filePath) !== null;
 }
+
+/** Sniffs a byte prefix for a NUL byte — the same heuristic Git and most
+ * editors use to call a file "binary" for preview purposes. */
+export function isBinaryBuffer(bytes: Uint8Array): boolean {
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === 0) return true;
+  }
+  return false;
+}

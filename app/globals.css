@@ -254,6 +254,15 @@ body {
   }
 }
 
+/* Hide the native WebKit/Blink "clear" control on <input type="search">:
+   SessionSidebar.tsx already renders its own clear (X) button next to the
+   search box, so the native one would otherwise show up doubled. */
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
 ::-webkit-scrollbar {
   width: 4px;
   height: 4px;

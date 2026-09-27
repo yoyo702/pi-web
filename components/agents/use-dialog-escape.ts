@@ -8,6 +8,9 @@ export function useDialogEscape(onCancel: () => void, disabled: boolean) {
     if (disabled) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      // An IME committing composed text with Escape (e.g. cancelling a
+      // candidate window) must not also close the dialog underneath it.
+      if (event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
       event.stopPropagation();
       onCancel();

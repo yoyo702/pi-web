@@ -47,3 +47,39 @@ export async function parseFormDataWithinLimit(request: Request, maxBytes: numbe
   const headers = contentType ? { "content-type": contentType } : undefined;
   return new Response(new Blob(chunks), { headers }).formData();
 }
+
+/**
+ * Parse a JSON body only after constraining the complete wire body, the same
+ * way parseFormDataWithinLimit bounds multipart requests. Chunked requests
+ * (where Content-Length is absent or understated) are still capped by the
+ * running total read from the stream.
+ */
+export async function parseJsonWithinLimit(request: Request, maxBytes: number): Promise<unknown> {
+  const declared = declaredContentLength(request);
+  if (declared !== null && declared > maxBytes) {
+    throw new RequestBodyTooLargeError();
+  }
+
+  const reader = request.body?.getReader();
+  if (!reader) return request.json();
+
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (size + value.byteLength > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new RequestBodyTooLargeError();
+      }
+      size += value.byteLength;
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const text = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf-8");
+  return JSON.parse(text);
+}

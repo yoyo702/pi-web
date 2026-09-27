@@ -21,13 +21,15 @@ TianForge pi 原本围绕单一 cwd 工作。当用户并行处理多个仓库�
 - 项目栏展开与图标化收起，状态持久化。
 - 自定义项目名称、固定或取消固定。
 - 关闭后 6 秒内撤销，支持 `Cmd/Ctrl + Shift + T`。
-- 关闭项目时，如果项目根目录或当前打开的 worktree 中有运行中或等待审批的 Terminal、Codex/Claude 聊天或 Pi 会话，先确认。确认框列出各类数量和等待审批的数量，例如 “2 terminals and 1 chat are still running in acme (1 waiting for approval)”。关闭不停止任何进程。已知限制：项目当前未打开的其他 worktree 中的活动暂不计入这个确认框。
+- 关闭项目时，如果项目根目录或当前打开的 worktree 中有运行中或等待审批的 Terminal、Codex/Claude 聊天或 Pi 会话，先确认。确认框列出各类数量和等待审批的数量，例如 “2 terminals and 1 chat are still running in acme (1 waiting for approval)”。关闭不停止任何进程。项目未打开的其他 worktree 中的活动（Terminal、Codex/Claude 聊天、Pi 会话）通过其解析后的项目根目录归入同一项目，同样计入这个确认框。
 
 ### 快速访问
 
 - `Cmd/Ctrl + 1…9` 切换项目，9 表示最后一个项目。
 - `Cmd/Ctrl + Shift + [` / `]` 前后切换。
 - `Cmd/Ctrl + Shift + P` 打开项目搜索。
+- `Cmd/Ctrl + ,` 打开设置面板。
+- `Cmd/Ctrl + K` 打开快速切换器，可搜索并跳转到项目、已打开的标签页或 Pi 会话。
 - 按名称、路径或 Git 分支搜索项目。
 - 最近打开项目进入目录选择器。
 

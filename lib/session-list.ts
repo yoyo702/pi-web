@@ -13,6 +13,13 @@ export function getSessionDisplayTitle(session: SessionInfo): string {
   return session.name || session.firstMessage.slice(0, 50) || session.id.slice(0, 12);
 }
 
+/** Sessions whose display title or first message contains `query` (case-insensitive). Empty query returns `sessions` unchanged. */
+export function filterSessionsByQuery(sessions: SessionInfo[], query: string): SessionInfo[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return sessions;
+  return sessions.filter((session) => `${getSessionDisplayTitle(session)} ${session.firstMessage ?? ""}`.toLowerCase().includes(needle));
+}
+
 export function sortSessionsByRecent(sessions: SessionInfo[]): SessionInfo[] {
   return [...sessions].sort((a, b) => {
     const modified = b.modified.localeCompare(a.modified);

@@ -182,12 +182,24 @@ export function computeRailActivity(input: RailActivityInput): RailActivityResul
   return { running, completed, items, nextExpiry };
 }
 
+/** The project-root value carried by an item's underlying record, when known. */
+function itemProjectRoot(item: RailActivityItem): string | undefined {
+  if (item.kind === "terminal") return item.terminal.projectRoot;
+  if (item.kind === "codex") return item.runtime.projectRoot;
+  if (item.kind === "claude") return item.runtime.projectRoot;
+  return item.session.projectRoot;
+}
+
 /** Groups items onto the workspace whose cwd or project root they belong to. */
 export function groupRailActivity(items: RailActivityItem[], workspaces: ProjectWorkspace[]): Record<string, WorkspaceActivity> {
   const activities: Record<string, WorkspaceActivity> = {};
   for (const workspace of workspaces) activities[workspace.id] = { state: "idle", working: 0, approval: 0, failed: 0, completed: 0, items: [] };
   for (const item of items) {
-    const workspace = workspaces.find((candidate) => item.cwd === candidate.cwd || item.cwd === candidate.projectRoot);
+    const root = itemProjectRoot(item);
+    const workspace = workspaces.find((candidate) =>
+      item.cwd === candidate.cwd ||
+      item.cwd === candidate.projectRoot ||
+      (root != null && root === candidate.projectRoot));
     if (!workspace) continue;
     const activity = activities[workspace.id];
     activity.items.push(item);

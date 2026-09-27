@@ -5,6 +5,7 @@ const crypto = require("node:crypto");
 const workspaceStatus = require("../workspace-status.cjs");
 const requests = require("./codex-requests.cjs");
 const notifications = require("../notifications.cjs");
+const { resolveProjectRoot } = require("./project-root.cjs");
 const sessions = new Map();
 const modelCatalogCache = global.__piWebCodexModelCatalogCache || new Map();
 global.__piWebCodexModelCatalogCache = modelCatalogCache;
@@ -108,7 +109,7 @@ function handleProtocolMessage(state, message) {
 // Turn outcomes and approval requests go to the shared activity notifications.
 function recordNotification(state, message) {
   if (message.method === "thread/name/updated" && message.params?.threadName) state.title = message.params.threadName;
-  const base = { kind: "codex", targetId: state.threadId, cwd: state.cwd, title: state.title || "Codex chat" };
+  const base = { kind: "codex", targetId: state.threadId, cwd: state.cwd, title: state.title || "Codex chat", projectRoot: state.projectRoot };
   if (message.method === "turn/completed") {
     const turn = message.params?.turn;
     if (turn?.error || turn?.status === "failed") notifications.add({ ...base, event: "failed", detail: turn?.error?.message || "Turn failed" });
@@ -125,7 +126,7 @@ function failState(state, error) {
     sessions.delete(state.threadId);
     workspaceStatus.notify("codex_runtimes");
     // A crash mid-turn ends the turn without turn/completed. A stopped runtime is no longer in `sessions`.
-    if (state.activeTurnId) notifications.add({ kind: "codex", event: "failed", targetId: state.threadId, cwd: state.cwd, title: state.title || "Codex chat", detail: state.failure.message });
+    if (state.activeTurnId) notifications.add({ kind: "codex", event: "failed", targetId: state.threadId, cwd: state.cwd, title: state.title || "Codex chat", projectRoot: state.projectRoot, detail: state.failure.message });
   }
   // stderr may name local paths; it goes to the server log, not to clients.
   const detail = state.stderrTail?.trim();
@@ -141,6 +142,8 @@ function spawnRuntime(threadId, cwd) {
   // Event sequence numbers restart with each process; runtimeId lets a
   // reconnecting client tell a new process from the one it last saw.
   const state = { child, threadId, cwd, runtimeId: crypto.randomUUID().slice(0, 8), nextId: 1, nextEventSeq: 1, activeTurnId: null, pending: new Map(), incoming: new Map(), listeners: new Set(), buffer: "", stderrTail: "", failure: null, events: [], idleTimer: null, loaded: false };
+  state.projectRoot = cwd;
+  resolveProjectRoot(cwd).then((root) => { state.projectRoot = root; }).catch(() => {});
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => { state.buffer += chunk; let index; while ((index = state.buffer.indexOf("\n")) >= 0) { const line = state.buffer.slice(0, index); state.buffer = state.buffer.slice(index + 1); try { handleProtocolMessage(state, JSON.parse(line)); } catch {} } });
   child.stderr.setEncoding("utf8");
@@ -257,6 +260,7 @@ function listRuntimes() {
     threadId,
     cwd: state.cwd,
     settings: state.settings ?? null,
+    projectRoot: state.projectRoot,
     ...runtimeForSession(threadId),
   }));
 }

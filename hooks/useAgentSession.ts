@@ -1519,15 +1519,26 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [onSessionForked, addNotice]);
 
-  const handleNavigate = useCallback(async (entryId: string) => {
-    if (bashRunningRef.current) return;
+  // Returns whether the branch switch actually took effect, so callers that
+  // chain further actions onto it (e.g. Regenerate's resend) can bail out
+  // instead of silently acting on the old branch. Existing callers (Edit from
+  // here) are free to ignore the result — they still fire this without
+  // awaiting it, so their own behavior is unchanged.
+  const handleNavigate = useCallback(async (entryId: string): Promise<boolean> => {
+    if (bashRunningRef.current) return false;
     const sid = sessionIdRef.current;
-    if (!sid) return;
-    sendAgentCommand(sid, { type: "navigate_tree", targetId: entryId }).catch(() => {});
+    if (!sid) return false;
+    try {
+      await sendAgentCommand(sid, { type: "navigate_tree", targetId: entryId });
+    } catch (e) {
+      console.error("Failed to switch branch:", e);
+      addNotice({ type: "error", message: e instanceof Error ? `Could not switch branch: ${e.message}` : "Could not switch branch" });
+      return false;
+    }
     setActiveLeafId(entryId);
     rememberActiveLeafId(sid, entryId);
-    await loadContext(sid, entryId);
-  }, [loadContext]);
+    return await loadContext(sid, entryId);
+  }, [loadContext, addNotice]);
 
   const handleLeafChange = useCallback(async (leafId: string | null) => {
     if (bashRunningRef.current) return;

@@ -110,12 +110,36 @@ function getSessionFromRequest(req) {
   return getSession(parseCookies(req.headers?.cookie)[COOKIE_NAME]);
 }
 
+function isLoopbackAddress(address) {
+  if (!address) return false;
+  const normalized = address.replace(/^::ffff:/, "");
+  return normalized === "127.0.0.1" || normalized === "::1";
+}
+
 /**
- * Rate-limit key for login attempts. X-Forwarded-For is client-controlled when
- * the server is exposed directly, so only the socket peer address is trusted.
+ * Rate-limit key for login attempts. The direct socket peer is always trusted.
+ * X-Forwarded-For is only honored when that peer is loopback AND the operator
+ * has explicitly opted in via PI_WEB_TRUST_PROXY=1 — otherwise X-Forwarded-For
+ * is client-controlled whenever the server is exposed directly, and unconditionally
+ * trusting it behind a local reverse proxy (Tailscale Serve, nginx) has the
+ * opposite problem: every request's peer is 127.0.0.1, so one person's failed
+ * logins would key-collide with (and lock out) everyone else.
+ *
+ * This assumes a single trusted local proxy that appends the address it observed
+ * to X-Forwarded-For (e.g. nginx's $proxy_add_x_forwarded_for) rather than replacing
+ * the header outright, so the RIGHT-most entry is the one the proxy itself saw and
+ * the client cannot control — a client that sends its own X-Forwarded-For only gets
+ * to control entries to the left of that, which are ignored here.
  */
 function clientKey(req) {
-  return req?.socket?.remoteAddress || "local";
+  const remoteAddress = req?.socket?.remoteAddress || null;
+  if (process.env.PI_WEB_TRUST_PROXY === "1" && isLoopbackAddress(remoteAddress)) {
+    const forwardedFor = req?.headers?.["x-forwarded-for"];
+    const hops = typeof forwardedFor === "string" ? forwardedFor.split(",").map((hop) => hop.trim()).filter(Boolean) : [];
+    const lastHop = hops[hops.length - 1];
+    if (lastHop) return lastHop;
+  }
+  return remoteAddress || "local";
 }
 
 function isRateLimited(key) {

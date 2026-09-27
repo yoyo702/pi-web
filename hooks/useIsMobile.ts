@@ -131,3 +131,27 @@ export function setTouchKeysOverride(value: TouchKeysOverride): void {
 export function useTouchTerminalKeys(): boolean {
   return useSyncExternalStore(subscribeTouchKeys, getTouchKeysSnapshot, getServerSnapshot);
 }
+
+const COARSE_POINTER_QUERY = "(hover: none) and (pointer: coarse)";
+
+function subscribeCoarsePointer(callback: () => void): () => void {
+  if (typeof window === "undefined" || !window.matchMedia) return () => {};
+  installTouchWatch();
+  const mql = window.matchMedia(COARSE_POINTER_QUERY);
+  touchKeyListeners.add(callback);
+  mql.addEventListener("change", callback);
+  return () => {
+    touchKeyListeners.delete(callback);
+    mql.removeEventListener("change", callback);
+  };
+}
+
+function getCoarsePointerSnapshot(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  return window.matchMedia(COARSE_POINTER_QUERY).matches || readStorage(TOUCH_SEEN_KEY) === "1";
+}
+
+/** True on touch-primary devices (no hover, coarse pointer) — used to show touch-reachable affordances that would otherwise only appear on `:hover`. Once a touch/pen input is seen, this stays true for the rest of the session (`TOUCH_SEEN_KEY`), even on a touchscreen laptop that later switches to mouse/trackpad — that's intentional (see module comment above), but it means "touch-primary" here really means "touch capable, sticky". */
+export function useCoarsePointer(): boolean {
+  return useSyncExternalStore(subscribeCoarsePointer, getCoarsePointerSnapshot, getServerSnapshot);
+}

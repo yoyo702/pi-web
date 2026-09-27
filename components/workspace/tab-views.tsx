@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { useCallback } from "react";
 import { joinFilePath } from "@/lib/file-paths";
 import type { TerminalSession } from "@/lib/agents/terminal";
 import type { TerminalConnectionState } from "@/hooks/useTerminalSocket";
@@ -156,13 +157,23 @@ export function FileTabView({
   activeCwd,
   gitRefreshKey,
   onMentionLines,
+  onDirtyChange,
 }: {
   tab: FileTab;
   activeCwd: string | null;
   gitRefreshKey: number;
   onMentionLines?: (relativePath: string, startLine: number, endLine: number) => void;
+  onDirtyChange?: (tabId: string, dirty: boolean) => void;
 }) {
   const actions = useWorkspaceActions();
+  const tabId = tab.id;
+  // Stable across renders as long as tabId/onDirtyChange don't change, so
+  // FileViewer's onDirtyChange effect (keyed on this callback's identity)
+  // doesn't re-fire on every unrelated re-render of this tab.
+  const handleDirtyChange = useCallback(
+    (_filePath: string, dirty: boolean) => onDirtyChange?.(tabId, dirty),
+    [onDirtyChange, tabId]
+  );
   return (
     <FileViewer
       filePath={tab.filePath}
@@ -171,6 +182,7 @@ export function FileTabView({
       gitRefreshKey={gitRefreshKey}
       onMentionLines={onMentionLines}
       onOpenFile={(filePath) => actions.openFile(filePath, { sourceSessionId: tab.sourceSessionId })}
+      onDirtyChange={onDirtyChange ? handleDirtyChange : undefined}
     />
   );
 }

@@ -39,6 +39,8 @@ interface Props {
   onOpenActivityCenter: () => void;
   /** Opens one activity item (session, terminal, Codex or Claude chat), switching workspace first when needed. */
   onOpenActivityItem: (workspace: ProjectWorkspace, target: ActivityTarget) => void;
+  /** True while a mobile overlay (the sidebar drawer) is open; hides the mobile switcher so it can't cover the drawer's controls. */
+  hideMobileSwitcher?: boolean;
 }
 
 function initials(label: string): string {
@@ -48,7 +50,7 @@ function initials(label: string): string {
 
 const contextMenuButtonStyle: CSSProperties = { minHeight: 32, display: "flex", alignItems: "center", gap: 9, padding: "0 9px", border: 0, borderRadius: 5, background: "transparent", color: "var(--text)", cursor: "pointer", font: "12px/1.2 inherit", textAlign: "left" };
 
-export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, onRestore, onReorder, onOpenTerminal, onRename, onTogglePinned, onOpenSettings, activityById, runningByCwd, onActivityListOpen, onOpenActivityCenter, onOpenActivityItem }: Props) {
+export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, onRestore, onReorder, onOpenTerminal, onRename, onTogglePinned, onOpenSettings, activityById, runningByCwd, onActivityListOpen, onOpenActivityCenter, onOpenActivityItem, hideMobileSwitcher = false }: Props) {
   const unreadCount = useWorkspaceStatusSelector((snapshot) => snapshot.unreadNotifications);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerBusy, setPickerBusy] = useState(false);
@@ -109,6 +111,9 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
       return next;
     });
   };
+  useEffect(() => {
+    if (hideMobileSwitcher) setMobileOpen(false);
+  }, [hideMobileSwitcher]);
   useEffect(() => {
     if (!mobileOpen) return;
     const close = (event: PointerEvent) => { if (!mobileRef.current?.contains(event.target as Node)) setMobileOpen(false); };
@@ -281,7 +286,7 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
       </section>;
     })()}
     {recentlyClosed && <div role="status" aria-live="polite" style={{ position: "fixed", left: 14, bottom: 14, zIndex: 1400, maxWidth: "min(390px,calc(100vw - 28px))", minHeight: 44, display: "flex", alignItems: "center", gap: 10, padding: "8px 9px 8px 13px", border: "1px solid var(--border)", borderRadius: 9, background: "var(--bg-panel)", color: "var(--text)", boxShadow: "0 16px 44px rgba(0,0,0,.36)", fontSize: 12 }}><span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Closed <strong>{recentlyClosed.label}</strong></span><kbd style={{ color: "var(--text-dim)", font: "9px/1 var(--font-mono)" }}>⌘⇧T</kbd><button type="button" onClick={() => { const workspace = recentlyClosed; setRecentlyClosed(null); onRestore(workspace); }} style={{ minHeight: 28, padding: "0 9px", border: 0, borderRadius: 5, background: "var(--bg-selected)", color: "var(--accent)", cursor: "pointer", font: "600 11px/1 inherit" }}>Undo</button><button type="button" aria-label="Dismiss closed project notice" onClick={() => setRecentlyClosed(null)} style={{ width: 28, height: 28, display: "grid", placeItems: "center", padding: 0, border: 0, borderRadius: 5, background: "transparent", color: "var(--text-dim)", cursor: "pointer" }}><X size={13} /></button></div>}
-    <div className="project-mobile-switcher" ref={mobileRef}>
+    {!hideMobileSwitcher && <div className="project-mobile-switcher" ref={mobileRef}>
       <button type="button" className="project-mobile-trigger" aria-label="Switch project" aria-expanded={mobileOpen} onClick={() => setMobileOpen((open) => !open)}><span>{activeWorkspace?.label ?? "Projects"}</span><ChevronDown size={13} /></button>
       {mobileOpen && <div className="project-mobile-menu" role="menu" aria-label="Project workspaces">
         {workspaces.map((workspace) => <div key={workspace.id} className={`project-mobile-row${workspace.id === activeId ? " is-active" : ""}`}>
@@ -290,7 +295,7 @@ export function ProjectRail({ workspaces, activeId, onSelect, onAdd, onClose, on
         </div>)}
         <button type="button" className="project-mobile-add" onClick={() => { setMobileOpen(false); setPickerOpen(true); }}><FolderPlus size={14} />Open project</button>
       </div>}
-    </div>
+    </div>}
     {pickerOpen && <DirectoryPicker
       busy={pickerBusy}
       error={pickerError}

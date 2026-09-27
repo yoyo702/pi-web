@@ -36,16 +36,21 @@ export const GIT_TIMEOUT_MS = 10_000;
  * minutes, and so can stashing large untracked files (Discard saves to a stash).
  */
 export const GIT_LONG_TIMEOUT_MS = 5 * 60_000;
-const LONG_RUNNING_COMMANDS = new Set(["commit", "push", "fetch", "pull", "switch", "stash"]);
+const LONG_RUNNING_COMMANDS = new Set(["commit", "push", "fetch", "pull", "switch", "stash", "revert"]);
 
 /** Timeout for `git <args>`; `args[0]` is the subcommand. */
 export function gitCommandTimeout(args: string[]): number {
   return LONG_RUNNING_COMMANDS.has(args[0]) ? GIT_LONG_TIMEOUT_MS : GIT_TIMEOUT_MS;
 }
 
+/** True when `execFile` killed git because it exceeded its timeout. */
+export function isGitTimeout(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "killed" in error && error.killed === true;
+}
+
 /** A message the Git panel can show: timeouts name the command, other failures use git's stderr. */
 export function gitFailureMessage(error: unknown, args: string[], timeout: number): string {
-  if (typeof error === "object" && error !== null && "killed" in error && error.killed) {
+  if (isGitTimeout(error)) {
     return `git ${args[0]} did not finish within ${timeout / 1000} s and was stopped`;
   }
   const detail = typeof error === "object" && error !== null && "stderr" in error

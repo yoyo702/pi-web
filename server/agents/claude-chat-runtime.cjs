@@ -6,6 +6,7 @@ const crypto = require("node:crypto");
 const workspaceStatus = require("../workspace-status.cjs");
 const notifications = require("../notifications.cjs");
 const catalog = require("./claude-sessions.cjs");
+const { resolveProjectRoot } = require("./project-root.cjs");
 
 // One entry per session with a Claude Chat open or a Claude process running.
 // The process starts on the first message, not when the chat opens: reading
@@ -171,6 +172,8 @@ function open(sessionId, cwd, { title = "", fork = null } = {}) {
     nextEventSeq: 1, droppedThrough: 0, events: [], listeners: new Set(), idleTimer: null,
   };
   sessions.set(sessionId, state);
+  state.projectRoot = cwd;
+  resolveProjectRoot(cwd).then((root) => { state.projectRoot = root; }).catch(() => {});
   scheduleIdleShutdown(state);
   return state;
 }
@@ -285,7 +288,7 @@ function finishTurn(state, result) {
   const failed = Boolean(result.is_error) || (typeof result.subtype === "string" && result.subtype.startsWith("error"));
   const detail = failed ? (typeof result.result === "string" && result.result) || (Array.isArray(result.errors) && result.errors.join("; ")) || "Turn failed" : undefined;
   emit(state, { type: "result", subtype: result.subtype, is_error: failed, interrupted, result: failed ? detail : undefined, total_cost_usd: result.total_cost_usd, usage: result.usage, modelUsage: result.modelUsage });
-  const base = { kind: "claude", targetId: state.sessionId, cwd: state.cwd, title: state.title || "Claude chat" };
+  const base = { kind: "claude", targetId: state.sessionId, cwd: state.cwd, title: state.title || "Claude chat", projectRoot: state.projectRoot };
   if (failed) notifications.add({ ...base, event: "failed", detail });
   else if (!interrupted) notifications.add({ ...base, event: "completed" });
   workspaceStatus.notify("claude_runtimes");
@@ -302,7 +305,7 @@ function onExit(state, child, error) {
   const detail = state.stderrTail.trim();
   if (detail) console.warn(`[pi-web] Claude for ${state.sessionId}: ${error.message}\n${detail}`);
   if (state.running) {
-    notifications.add({ kind: "claude", event: "failed", targetId: state.sessionId, cwd: state.cwd, title: state.title || "Claude chat", detail: error.message });
+    notifications.add({ kind: "claude", event: "failed", targetId: state.sessionId, cwd: state.cwd, title: state.title || "Claude chat", projectRoot: state.projectRoot, detail: error.message });
     state.running = false;
     state.interrupting = false;
     state.incoming.clear();
@@ -497,7 +500,7 @@ function runtimeForSession(sessionId) {
 function isBusySession(sessionId) { const state = sessions.get(sessionId); return Boolean(state && isBusy(state)); }
 function listRuntimes() {
   // model: the alias the process was launched with (null = default), so a chat reopened without its tab keeps it.
-  return [...sessions.values()].filter((state) => state.child).map((state) => ({ sessionId: state.sessionId, cwd: state.cwd, title: state.title || null, ...runtimeForSession(state.sessionId), model: state.launchModel || null, permissionMode: state.permissionMode || null }));
+  return [...sessions.values()].filter((state) => state.child).map((state) => ({ sessionId: state.sessionId, cwd: state.cwd, title: state.title || null, ...runtimeForSession(state.sessionId), model: state.launchModel || null, permissionMode: state.permissionMode || null, projectRoot: state.projectRoot }));
 }
 function describe(state) {
   return { runtimeId: state.runtimeId, running: state.running, compacting: state.compacting, model: state.model, launchModel: state.launchModel, permissionMode: state.permissionMode, process: Boolean(state.child), requests: pendingRequests(state) };

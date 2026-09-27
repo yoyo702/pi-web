@@ -4,12 +4,13 @@ import { useState, useCallback, useReducer, useRef, useEffect, useLayoutEffect, 
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { hasVisibleModal } from "@/lib/escape-abort";
 import { SessionSidebar } from "./SessionSidebar";
 import { ProjectRail } from "./ProjectRail";
 import { ChatWindow } from "./ChatWindow";
 import { NewAgentDialog } from "./agents/NewAgentDialog";
 import { TabBar } from "./TabBar";
-import { claudeChatTabId, codexChatTabId, terminalTabId, GIT_REVIEW_TAB_ID, type CenterTab, type ClaudePermissionMode, type TabStatus, type TerminalTab } from "@/lib/workspace/tabs";
+import { claudeChatTabId, codexChatTabId, fileTabId, terminalTabId, GIT_REVIEW_TAB_ID, type CenterTab, type ClaudeChatTab, type ClaudePermissionMode, type CodexChatTab, type TabStatus, type TerminalTab } from "@/lib/workspace/tabs";
 import { centerReducer, sideReducer, initialCenterState, initialSideState, type TerminalSplit } from "@/lib/workspace/panel-state";
 import { loadCenterState, saveCenterState, loadSideState, saveSideState, type SideSnapshotCache } from "@/lib/workspace/panel-storage";
 import { getMissingSplitTerminalTabs } from "@/lib/terminal-restore";
@@ -25,6 +26,7 @@ const SettingsPanel = dynamic(() => import("./SettingsPanel").then((m) => m.Sett
 import { ProductStatusDot } from "./ProductStatus";
 import { UnreadNotificationBadge } from "./RecentNotifications";
 import { ActivityCenter } from "./ActivityCenter";
+import { QuickSwitcher } from "./QuickSwitcher";
 import { useTheme } from "@/hooks/useTheme";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { getFileName } from "@/lib/file-paths";
@@ -103,6 +105,7 @@ export function AppShell() {
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
   const [mobileSidebarModule, setMobileSidebarModule] = useState<"sessions" | "agents" | "explorer">("sessions");
@@ -197,6 +200,40 @@ export function AppShell() {
   const sideCacheRef = useRef<SideSnapshotCache>(new Map());
   const { tabs: workspaceTabs, activeId: activeWorkspaceTabId, split: terminalSplit } = center;
   const { tabs: fileTabs, activeId: activeFileTabId, open: rightPanelOpen } = side;
+  // File tabs in the side panel are not kept mounted the way center-workspace
+  // tabs are (see workspace/SidePanel.tsx) — switching away from, or closing,
+  // a dirty file tab would otherwise discard its draft silently. FileTabView
+  // reports dirty state up via onDirtyChange; confirmDiscardFileTab gates
+  // every action that would drop the active tab's editor.
+  const dirtyFileTabsRef = useRef<Set<string>>(new Set());
+  const handleFileTabDirtyChange = useCallback((tabId: string, dirty: boolean) => {
+    if (dirty) dirtyFileTabsRef.current.add(tabId);
+    else dirtyFileTabsRef.current.delete(tabId);
+  }, []);
+  const confirmDiscardFileTab = useCallback((tabId: string): boolean => {
+    if (!dirtyFileTabsRef.current.has(tabId)) return true;
+    const tab = side.tabs.find((t) => t.id === tabId);
+    const ok = window.confirm(`Discard unsaved changes to ${tab?.label ?? "this file"}?`);
+    if (ok) dirtyFileTabsRef.current.delete(tabId);
+    return ok;
+  }, [side.tabs]);
+  // Switching or closing the active project hydrates/clears the *entire*
+  // side-panel tab set for the new project scope (see the activeProjectId
+  // layout effect above), which would silently drop every dirty file tab at
+  // once rather than just the active one — confirmDiscardFileTab alone only
+  // guards a single tab. Gate every user-initiated project switch/close with
+  // this instead.
+  const confirmDiscardAllDirtyFileTabs = useCallback((): boolean => {
+    const count = dirtyFileTabsRef.current.size;
+    if (count === 0) return true;
+    const ok = window.confirm(
+      count === 1
+        ? "Discard unsaved changes to 1 open file?"
+        : `Discard unsaved changes to ${count} open files?`
+    );
+    if (ok) dirtyFileTabsRef.current.clear();
+    return ok;
+  }, []);
   const setRightPanelOpen = useCallback((open: boolean) => dispatchSide({ type: "setOpen", open }), []);
   const setTerminalSplit = useCallback((split: TerminalSplit | null | ((current: TerminalSplit | null) => TerminalSplit | null)) => dispatchCenter({ type: "setSplit", split }), []);
   const activateWorkspaceTab = useCallback((id: string) => dispatchCenter({ type: "activate", id }), []);
@@ -238,6 +275,12 @@ export function AppShell() {
   const codexRuntimes = useWorkspaceStatusSelector((snapshot) => snapshot.codexRuntimes);
   const claudeRuntimes = useWorkspaceStatusSelector((snapshot) => snapshot.claudeRuntimes);
   const [pendingChatClose, setPendingChatClose] = useState<{ tabId: string; label: string; chat: BusyChat } | null>(null);
+  // Bulk close (Close Others / Close All): busy tab ids still waiting behind
+  // the one currently shown in pendingTerminalClose/pendingChatClose. Those
+  // two are single-slot, so only one confirmation dialog is ever mounted;
+  // this queue is what lets bulk-close confirm the rest one at a time
+  // instead of losing all but the last busy tab.
+  const [pendingCloseQueue, setPendingCloseQueue] = useState<string[]>([]);
   const [terminalRestartingId, setTerminalRestartingId] = useState<string | null>(null);
   const [terminalRestartError, setTerminalRestartError] = useState<string | null>(null);
   const terminalRestoreInFlightRef = useRef(new Set<string>());
@@ -296,11 +339,22 @@ export function AppShell() {
   const suppressCwdBumpRef = useRef(false);
   const projectSwitchTokenRef = useRef(0);
 
-  const recordProjectWorkspace = useCallback((cwd: string, projectRoot = cwd, sessionId?: string | null) => {
+  // Central choke point for every path that can move activeProjectId to a
+  // different project (session pick, cwd/worktree change, new session, etc.).
+  // Any such move hydrates/clears the whole side-panel tab set for the new
+  // project scope, so gate it here once rather than at each call site.
+  // Returns false (and does nothing) if the user cancels a cross-project
+  // switch — callers must bail out without applying any of their own side
+  // effects in that case. Same-project calls (including mount-time restore,
+  // where activeProjectId is whatever was just set, or the no-project-yet
+  // case, where dirtyFileTabsRef is necessarily empty) never prompt.
+  const recordProjectWorkspace = useCallback((cwd: string, projectRoot = cwd, sessionId?: string | null): boolean => {
+    if (projectRoot !== activeProjectId && !confirmDiscardAllDirtyFileTabs()) return false;
     setProjectSelectionDismissed(false);
     setActiveProjectId(projectRoot);
     setProjectWorkspaces((current) => upsertProjectWorkspace(current, { projectRoot, cwd, sessionId }));
-  }, [setActiveProjectId, setProjectWorkspaces]);
+    return true;
+  }, [activeProjectId, confirmDiscardAllDirtyFileTabs, setActiveProjectId, setProjectWorkspaces]);
 
 
   useEffect(() => {
@@ -339,12 +393,17 @@ export function AppShell() {
   }, [initialNavigation]);
 
   const handleCwdChange = useCallback((cwd: string | null, projectRoot?: string | null) => {
-    setActiveCwd(cwd);
     // Skip if cwd is null (initial mount) or during the initial URL restore.
-    if (!cwd) return;
+    if (!cwd) {
+      setActiveCwd(cwd);
+      return;
+    }
     const newProject = projectRoot ?? cwd;
     const selectedProject = selectedSession ? selectedSession.projectRoot ?? selectedSession.cwd : null;
-    recordProjectWorkspace(cwd, newProject, selectedProject === newProject ? selectedSession?.id : undefined);
+    // Ask before any state changes if this would silently swap the side panel
+    // out from under a dirty draft; on cancel, don't touch activeCwd either.
+    if (!recordProjectWorkspace(cwd, newProject, selectedProject === newProject ? selectedSession?.id : undefined)) return;
+    setActiveCwd(cwd);
     if (suppressCwdBumpRef.current) {
       suppressCwdBumpRef.current = false;
       return;
@@ -393,8 +452,12 @@ export function AppShell() {
     return () => controller.abort();
   }, [activeCwd]);
 
-  const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
-    recordProjectWorkspace(session.cwd, session.projectRoot ?? session.cwd, session.id);
+  const handleSelectSession = useCallback((session: SessionInfo, isRestore = false): boolean => {
+    // On cancel, abort the whole selection — no session/tab/cwd change. The
+    // boolean return lets SessionSidebar's own optimistic selectedCwd update
+    // (which would otherwise re-trigger this same guard a second time via the
+    // onCwdChange effect) skip itself too, instead of drifting out of sync.
+    if (!recordProjectWorkspace(session.cwd, session.projectRoot ?? session.cwd, session.id)) return false;
     activateWorkspaceTab("pi");
     setNewSessionCwd(null);
     setSelectedSession(session);
@@ -413,10 +476,11 @@ export function AppShell() {
     if (!isRestore) {
       router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
     }
+    return true;
   }, [recordProjectWorkspace, router, isMobile, activateWorkspaceTab]);
 
   const handleNewSession = useCallback((_sessionId: string, cwd: string) => {
-    recordProjectWorkspace(cwd, activeProjectId ?? cwd, null);
+    if (!recordProjectWorkspace(cwd, activeProjectId ?? cwd, null)) return;
     activateWorkspaceTab("pi");
     setSelectedSession(null);
     setNewSessionCwd(cwd);
@@ -455,6 +519,10 @@ export function AppShell() {
           id: workspace.id === workspace.cwd ? authorizedCwd : workspace.id,
           projectRoot: workspace.projectRoot === workspace.cwd ? authorizedCwd : workspace.projectRoot,
         };
+    // Only ask if this activation actually swaps the side-panel scope away
+    // from the current project (re-activating the same project, e.g. the
+    // initial-restore-on-mount effect, never touches its own tabs).
+    if (authorizedWorkspace.id !== activeProjectId && !confirmDiscardAllDirtyFileTabs()) return;
     persistCurrentProjectPanels();
     rememberRecentProject(authorizedWorkspace);
     const token = ++projectSwitchTokenRef.current;
@@ -480,13 +548,17 @@ export function AppShell() {
       const data = await response.json() as { sessions?: SessionInfo[] };
       const session = data.sessions?.find((candidate) => candidate.id === authorizedWorkspace.sessionId);
       if (!session || token !== projectSwitchTokenRef.current) return;
+      // The project switch itself was already confirmed above; this just fills
+      // in the session that goes with it, so this call should always no-op
+      // through to true (activeProjectId already matches by now). Still check
+      // the return value for correctness/future-proofing.
+      if (!recordProjectWorkspace(session.cwd, session.projectRoot ?? authorizedWorkspace.projectRoot, session.id)) return;
       setNewSessionCwd(null);
       setSelectedSession(session);
-      recordProjectWorkspace(session.cwd, session.projectRoot ?? authorizedWorkspace.projectRoot, session.id);
       setSessionKey((key) => key + 1);
       router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
     } catch { /* keep the project open with a fresh Pi tab */ }
-  }, [persistCurrentProjectPanels, recordProjectWorkspace, rememberRecentProject, router, setActiveProjectId, setProjectWorkspaces, activateWorkspaceTab]);
+  }, [activeProjectId, confirmDiscardAllDirtyFileTabs, persistCurrentProjectPanels, recordProjectWorkspace, rememberRecentProject, router, setActiveProjectId, setProjectWorkspaces, activateWorkspaceTab]);
 
   const handleAddProjectWorkspace = useCallback(async (path: string) => {
     const workspace: ProjectWorkspace = { id: path, projectRoot: path, cwd: path, label: projectLabel(path), sessionId: null, lastActive: Date.now() };
@@ -494,6 +566,10 @@ export function AppShell() {
   }, [activateProjectWorkspace]);
 
   const handleCloseProjectWorkspace = useCallback((workspace: ProjectWorkspace) => {
+    // Closing the active project clears or hands off its entire side-panel
+    // tab set (see activateProjectWorkspace's own guard, and the no-`next`
+    // branch below) — ask before dropping any of it.
+    if (workspace.id === activeProjectId && !confirmDiscardAllDirtyFileTabs()) return;
     if (workspace.id === activeProjectId) persistCurrentProjectPanels();
     const remaining = projectWorkspaces.filter((candidate) => candidate.id !== workspace.id);
     setProjectWorkspaces(remaining);
@@ -511,7 +587,7 @@ export function AppShell() {
       setSessionKey((key) => key + 1);
       router.replace("/", { scroll: false });
     }
-  }, [activeProjectId, activateProjectWorkspace, persistCurrentProjectPanels, projectWorkspaces, router, setActiveProjectId, setProjectWorkspaces]);
+  }, [activeProjectId, activateProjectWorkspace, confirmDiscardAllDirtyFileTabs, persistCurrentProjectPanels, projectWorkspaces, router, setActiveProjectId, setProjectWorkspaces]);
 
 
   useEffect(() => {
@@ -524,6 +600,8 @@ export function AppShell() {
   useGlobalKeyboardShortcuts({
     onNewSession: (cwd: string) => handleNewSession(`kb-${Date.now()}`, cwd),
     activeCwd,
+    onOpenSettings: () => setSettingsOpen(true),
+    onOpenQuickSwitcher: () => setQuickSwitcherOpen(true),
   });
 
   // Client-built transient SessionInfo (new session / fork) lacks the
@@ -543,7 +621,7 @@ export function AppShell() {
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo) => {
-    recordProjectWorkspace(session.cwd, session.projectRoot ?? activeProjectId ?? session.cwd, session.id);
+    if (!recordProjectWorkspace(session.cwd, session.projectRoot ?? activeProjectId ?? session.cwd, session.id)) return;
     setNewSessionCwd(null);
     setSelectedSession(session);
     setRefreshKey((k) => k + 1);
@@ -635,10 +713,11 @@ export function AppShell() {
   }, [selectedSession, router]);
 
   const handleOpenFile = useCallback((filePath: string, fileName: string, sourceSessionId?: string | null) => {
+    if (activeFileTabId && activeFileTabId !== fileTabId(filePath) && !confirmDiscardFileTab(activeFileTabId)) return;
     dispatchSide({ type: "openFile", filePath, label: fileName, sourceSessionId });
     // On mobile the file panel is full-screen; close the drawer so it shows.
     if (isMobile) setSidebarOpen(false);
-  }, [isMobile]);
+  }, [activeFileTabId, confirmDiscardFileTab, isMobile]);
 
   const handleRevealFileInExplorer = useCallback((filePath: string) => {
     setExplorerRevealRequest((current) => ({ path: filePath, key: (current?.key ?? 0) + 1 }));
@@ -651,40 +730,191 @@ export function AppShell() {
   }, [isMobile, prepareMobileOverlayHistory, setRightPanelOpen]);
 
   const handleExplorerPathRenamed = useCallback((oldPath: string, newPath: string, isDir: boolean) => {
+    // pathRenamed (lib/workspace/panel-state.ts) gives a renamed file tab a
+    // new id/filePath, which remounts its FileViewer under a new key and
+    // drops any in-progress draft with no chance for FileViewer's own
+    // dirty-tracking effect to intercept it. The rename has already happened
+    // on disk by the time this fires, so we can't undo it — at minimum,
+    // confirm before letting the tab (and its draft) go.
+    const isUnder = (value: string) => value === oldPath || (isDir && value.startsWith(`${oldPath}/`));
+    const affectsDirtyTab = side.tabs.some((tab) => tab.kind === "file" && isUnder(tab.filePath) && dirtyFileTabsRef.current.has(tab.id));
+    if (affectsDirtyTab && !window.confirm("Renaming will discard unsaved changes to an open file. Continue?")) return;
     dispatchSide({ type: "pathRenamed", oldPath, newPath, isDir });
-  }, []);
+  }, [side.tabs]);
 
   const handleExplorerPathDeleted = useCallback((deletedPath: string, isDir: boolean) => {
     dispatchSide({ type: "pathDeleted", path: deletedPath, isDir });
   }, []);
 
-  const handleCloseFileTabs = useCallback((tabIds: string[]) => dispatchSide({ type: "close", ids: tabIds }), []);
-  const handleCloseFileTab = useCallback((tabId: string) => dispatchSide({ type: "close", ids: [tabId] }), []);
+  const handleCloseFileTabs = useCallback((tabIds: string[]) => {
+    const ids = tabIds.filter((id) => confirmDiscardFileTab(id));
+    if (ids.length > 0) dispatchSide({ type: "close", ids });
+  }, [confirmDiscardFileTab]);
+  const handleCloseFileTab = useCallback((tabId: string) => {
+    if (!confirmDiscardFileTab(tabId)) return;
+    dispatchSide({ type: "close", ids: [tabId] });
+  }, [confirmDiscardFileTab]);
   const handleToggleFileTabLocked = useCallback((tabId: string) => dispatchSide({ type: "toggleLock", id: tabId }), []);
 
-  const removeWorkspaceTab = useCallback((tabId: string) => dispatchCenter({ type: "remove", id: tabId }), []);
+  // Cmd/Ctrl+Shift+T undo support. A "closed batch" is every tab removed by
+  // one user action: a single tab close is a batch of one; Close Others/All
+  // (closeWorkspaceTabsSequentially below) is a batch of everything it
+  // closed, including busy tabs confirmed one at a time from
+  // pendingCloseQueue. History is kept per project (keyed by cwd, the same
+  // scope workspaceTabs/localStorage persistence already uses) so closing a
+  // tab in project A and switching to B never lets the shortcut inject A's
+  // tab into B; each project's stack is capped so it can't grow unbounded
+  // across a long session — 10 batches is generous for an undo feature
+  // nobody is expected to reach for more than a step or two back.
+  const CLOSED_BATCH_STACK_CAP = 10;
+  type ClosableTab = TerminalTab | CodexChatTab | ClaudeChatTab;
+  const closedBatchStackByCwdRef = useRef<Map<string, ClosableTab[][]>>(new Map());
+  // Non-null exactly while closeWorkspaceTabsSequentially's tabs (idle ones
+  // synchronously, busy ones as their confirmation dialogs resolve) are still
+  // being collected into one batch for one project (its cwd captured at
+  // batch-open time); null the rest of the time, so a lone removeWorkspaceTab
+  // call pushes its own batch of one instead.
+  const activeCloseBatchRef = useRef<{ cwd: string; tabs: ClosableTab[] } | null>(null);
+  const pushClosedBatch = useCallback((cwd: string, batch: ClosableTab[]) => {
+    if (batch.length === 0) return;
+    const stacks = closedBatchStackByCwdRef.current;
+    const existing = stacks.get(cwd) ?? [];
+    stacks.set(cwd, [...existing, batch].slice(-CLOSED_BATCH_STACK_CAP));
+  }, []);
+  const finalizeActiveCloseBatch = useCallback(() => {
+    const active = activeCloseBatchRef.current;
+    activeCloseBatchRef.current = null;
+    if (active) pushClosedBatch(active.cwd, active.tabs);
+  }, [pushClosedBatch]);
 
-  const handleCloseWorkspaceTab = useCallback((tabId: string) => {
+  const removeWorkspaceTab = useCallback((tabId: string) => {
+    const closed = workspaceTabs.find((tab) => tab.id === tabId);
+    // The Pi tab is never actually removed (centerReducer's "remove" case
+    // no-ops for it) and isn't a valid "open" tab, so it's never recorded.
+    // There's also nothing to scope the batch to without an active project.
+    if (closed && closed.kind !== "pi" && activeCwd) {
+      if (activeCloseBatchRef.current && activeCloseBatchRef.current.cwd === activeCwd) activeCloseBatchRef.current.tabs.push(closed);
+      else pushClosedBatch(activeCwd, [closed]);
+    }
+    dispatchCenter({ type: "remove", id: tabId });
+  }, [workspaceTabs, activeCwd, pushClosedBatch]);
+
+  // Cmd/Ctrl+Shift+T reopens the last closed batch of workspace tabs (a
+  // single tab, or every tab one Close Others/Close All action closed) for
+  // the *current* project. ProjectRail binds the same chord (bubble phase,
+  // on `document`) for 6 seconds after a whole project is closed, to undo
+  // that instead — see docs/prd/multi-project-workspaces.md. This listener is
+  // bubble phase on `window`, so it fires after any document-level bubble
+  // listener (bubbling goes target -> ... -> document -> window); it checks
+  // event.defaultPrevented first so ProjectRail's handler — which calls
+  // preventDefault() whenever it acts — always wins, undoing the project
+  // close instead of a tab close. It also bails while any modal or menu is
+  // visible (hasVisibleModal), matching the Settings/Quick Switcher
+  // shortcuts in hooks/useKeyboardShortcuts.ts, so it never fires underneath
+  // one.
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (!(event.metaKey || event.ctrlKey) || !event.shiftKey || event.key.toLowerCase() !== "t") return;
+      if (!activeCwd || hasVisibleModal(document)) return;
+      const stacks = closedBatchStackByCwdRef.current;
+      const stack = stacks.get(activeCwd);
+      if (!stack || stack.length === 0) return;
+      const batch = stack[stack.length - 1];
+      event.preventDefault();
+      stacks.set(activeCwd, stack.slice(0, -1));
+      // centerReducer's "open" case reuses an existing tab of the same id
+      // (or the same chat session's tab), so if any of these were already
+      // reopened by hand in the meantime this just re-activates them rather
+      // than creating duplicates — no extra guard needed here.
+      for (const tab of batch) dispatchCenter({ type: "open", tab });
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [activeCwd]);
+
+  // Whether closing a tab needs to confirm first (a running terminal or a
+  // busy chat), and what to show if so. Shared by the single-tab close path
+  // and the bulk-close queue below so they never disagree about "busy".
+  type BusyTabConfirmation =
+    | { kind: "terminal"; terminal: TerminalSession }
+    | { kind: "chat"; label: string; chat: BusyChat };
+  const classifyBusyTab = useCallback((tabId: string): BusyTabConfirmation | null => {
     const tab = workspaceTabs.find((item) => item.id === tabId);
     const terminal = tab && "terminalId" in tab && tab.terminalId ? terminals[tab.terminalId] : null;
-    if (terminal?.state === "running") {
-      setTerminalCloseError(null);
-      setPendingTerminalClose({ tabId, terminal });
-      return;
-    }
+    if (terminal?.state === "running") return { kind: "terminal", terminal };
     const chat = tab ? busyChatForTab(tab, codexRuntimes ?? [], claudeRuntimes ?? []) : null;
-    if (tab && chat) {
-      setTerminalCloseError(null);
-      setPendingChatClose({ tabId, label: tab.label, chat });
-      return;
-    }
+    if (tab && chat) return { kind: "chat", label: tab.label, chat };
+    return null;
+  }, [claudeRuntimes, codexRuntimes, terminals, workspaceTabs]);
+
+  const openBusyTabConfirmation = useCallback((tabId: string, busy: BusyTabConfirmation) => {
+    setTerminalCloseError(null);
+    if (busy.kind === "terminal") setPendingTerminalClose({ tabId, terminal: busy.terminal });
+    else setPendingChatClose({ tabId, label: busy.label, chat: busy.chat });
+  }, []);
+
+  const handleCloseWorkspaceTab = useCallback((tabId: string) => {
+    const busy = classifyBusyTab(tabId);
+    if (busy) { openBusyTabConfirmation(tabId, busy); return; }
     removeWorkspaceTab(tabId);
-  }, [claudeRuntimes, codexRuntimes, removeWorkspaceTab, terminals, workspaceTabs]);
+  }, [classifyBusyTab, openBusyTabConfirmation, removeWorkspaceTab]);
+
+  // Bulk close (Close Others / Close All): idle tabs close immediately
+  // through the same removal funnel as a single close. Busy tabs cannot all
+  // go through handleCloseWorkspaceTab at once — pendingTerminalClose and
+  // pendingChatClose are single-slot state, so calling it once per busy tab
+  // in a loop would just overwrite the dialog with the next one, silently
+  // dropping every busy tab but the last. Instead, only the first busy tab's
+  // confirmation opens now; the rest wait in pendingCloseQueue and are
+  // confirmed one at a time by advanceCloseQueue below, so exactly one
+  // RunningCloseDialog is ever mounted.
+  const closeWorkspaceTabsSequentially = useCallback((ids: string[]) => {
+    // Opens the batch that removeWorkspaceTab (idle tabs, below, and busy
+    // ones later via advanceCloseQueue) accumulates into instead of each
+    // pushing its own single-tab batch. Scoped to the project active right
+    // now, same as removeWorkspaceTab; if there's no active project there's
+    // nothing to scope a batch to, so it's left null and removeWorkspaceTab
+    // simply won't record anything either.
+    activeCloseBatchRef.current = activeCwd ? { cwd: activeCwd, tabs: [] } : null;
+    const busyIds: string[] = [];
+    for (const id of ids) {
+      const busy = classifyBusyTab(id);
+      if (busy) busyIds.push(id);
+      else removeWorkspaceTab(id);
+    }
+    if (busyIds.length === 0) { finalizeActiveCloseBatch(); return; }
+    const [firstId, ...rest] = busyIds;
+    const firstBusy = classifyBusyTab(firstId);
+    if (!firstBusy) { removeWorkspaceTab(firstId); finalizeActiveCloseBatch(); return; } // raced idle between classify and here
+    setPendingCloseQueue(rest);
+    openBusyTabConfirmation(firstId, firstBusy);
+  }, [activeCwd, classifyBusyTab, openBusyTabConfirmation, removeWorkspaceTab, finalizeActiveCloseBatch]);
+
+  // Called after a busy tab's dialog resolves by keeping it running or
+  // stopping it (never after Cancel, which clears the queue instead — see
+  // the dialogs' onCancel below). Skips (and immediately closes) any queued
+  // tab that stopped being busy in the meantime; opens the next dialog as
+  // soon as it finds one that's still busy.
+  const advanceCloseQueue = useCallback(() => {
+    let queue = pendingCloseQueue;
+    while (queue.length > 0) {
+      const [nextId, ...rest] = queue;
+      const busy = classifyBusyTab(nextId);
+      if (busy) { setPendingCloseQueue(rest); openBusyTabConfirmation(nextId, busy); return; }
+      removeWorkspaceTab(nextId);
+      queue = rest;
+    }
+    setPendingCloseQueue([]);
+    // The queue is fully drained (every busy tab either closed or raced
+    // idle above) — the batch closeWorkspaceTabsSequentially opened is done.
+    finalizeActiveCloseBatch();
+  }, [pendingCloseQueue, classifyBusyTab, openBusyTabConfirmation, removeWorkspaceTab, finalizeActiveCloseBatch]);
 
   const closeTerminalTab = useCallback(async (stop: boolean) => {
     const target = pendingTerminalClose;
     if (!target) return;
-    if (!stop) { setPendingTerminalClose(null); removeWorkspaceTab(target.tabId); return; }
+    if (!stop) { setPendingTerminalClose(null); removeWorkspaceTab(target.tabId); advanceCloseQueue(); return; }
     setTerminalCloseBusy(true);
     setTerminalCloseError(null);
     try {
@@ -694,16 +924,17 @@ export function AppShell() {
       if (data.terminal) updateTerminals((current) => [...current.filter((item) => item.id !== data.terminal!.id), data.terminal!]);
       setPendingTerminalClose(null);
       removeWorkspaceTab(target.tabId);
+      advanceCloseQueue();
     } catch (cause) { setTerminalCloseError(cause instanceof Error ? cause.message : "Unable to stop terminal"); }
     finally { setTerminalCloseBusy(false); }
-  }, [pendingTerminalClose, removeWorkspaceTab, updateTerminals]);
+  }, [advanceCloseQueue, pendingTerminalClose, removeWorkspaceTab, updateTerminals]);
 
   // Keep running: the server runtime finishes the turn (or holds the approval)
   // with no viewer. Stop: the same interrupt as the chat's Stop button.
   const closeChatTab = useCallback(async (stop: boolean) => {
     const target = pendingChatClose;
     if (!target) return;
-    if (!stop) { setPendingChatClose(null); removeWorkspaceTab(target.tabId); return; }
+    if (!stop) { setPendingChatClose(null); removeWorkspaceTab(target.tabId); advanceCloseQueue(); return; }
     setTerminalCloseBusy(true);
     setTerminalCloseError(null);
     try {
@@ -718,9 +949,10 @@ export function AppShell() {
       if (!response.ok && data.code !== "no_active_turn") throw new Error(data.error || "Unable to stop the chat");
       setPendingChatClose(null);
       removeWorkspaceTab(target.tabId);
+      advanceCloseQueue();
     } catch (cause) { setTerminalCloseError(cause instanceof Error ? cause.message : "Unable to stop the chat"); }
     finally { setTerminalCloseBusy(false); }
-  }, [pendingChatClose, removeWorkspaceTab]);
+  }, [advanceCloseQueue, pendingChatClose, removeWorkspaceTab]);
 
   const handleSelectWorkspaceTab = useCallback((tabId: string) => {
     dispatchCenter({ type: "select", id: tabId });
@@ -760,9 +992,10 @@ export function AppShell() {
 
   const openGitReview = useCallback(() => {
     if (!activeCwd) return;
+    if (activeFileTabId && activeFileTabId !== GIT_REVIEW_TAB_ID && !confirmDiscardFileTab(activeFileTabId)) return;
     dispatchSide({ type: "openGitReview" });
     if (isMobile) setSidebarOpen(false);
-  }, [activeCwd, isMobile]);
+  }, [activeCwd, activeFileTabId, confirmDiscardFileTab, isMobile]);
 
   const handleOpenGitReview = useCallback(() => {
     if (rightPanelOpen && activeFileTabId === GIT_REVIEW_TAB_ID) {
@@ -792,8 +1025,16 @@ export function AppShell() {
     setTerminalRestoreErrors((current) => { const next = { ...current }; delete next[tab.id]; return next; });
     try {
       if (tab.terminalId) await fetch(`/api/terminals/${encodeURIComponent(tab.terminalId)}`, { method: "DELETE" }).catch(() => undefined);
-      const resumeCodex = tab.terminalProvider === "codex" && Boolean(tab.sourceSessionId);
-      const response = await fetch("/api/terminals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: tab.terminalProvider, cwd: tab.cwd, permissionMode: tab.terminalPermissionMode, launchMode: resumeCodex ? "resume" : "new", sourceSessionId: resumeCodex ? tab.sourceSessionId : undefined, noAltScreen: tab.terminalNoAltScreen, model: tab.terminalModel, webSearch: tab.terminalWebSearch, chatMode: tab.terminalChatMode }) });
+      // Only a terminal that was originally launched with `resume` keeps a
+      // source session id that still refers to itself. A `fork` terminal's
+      // sourceSessionId is the PARENT session it forked from, so restarting
+      // it with `--resume <sourceSessionId>` would resume into the parent's
+      // session instead of starting a fresh one. A terminal launched `new`
+      // never learns a retroactive session id (Claude has no equivalent of
+      // Codex's unknownCodexTerminals reconciliation), so it also restarts
+      // fresh.
+      const canResume = (tab.terminalProvider === "codex" || tab.terminalProvider === "claude") && tab.terminalLaunchMode === "resume" && Boolean(tab.sourceSessionId);
+      const response = await fetch("/api/terminals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider: tab.terminalProvider, cwd: tab.cwd, permissionMode: tab.terminalPermissionMode, launchMode: canResume ? "resume" : "new", sourceSessionId: canResume ? tab.sourceSessionId : undefined, noAltScreen: tab.terminalNoAltScreen, model: tab.terminalModel, webSearch: tab.terminalWebSearch, chatMode: tab.terminalChatMode }) });
       const data = await response.json() as { terminal?: TerminalSession; error?: string };
       if (!response.ok || !data.terminal) throw new Error(data.error || "Unable to restart terminal");
       const renamedResponse = await fetch(`/api/terminals/${encodeURIComponent(data.terminal.id)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title: tab.label }) });
@@ -1270,6 +1511,7 @@ export function AppShell() {
           void activateProjectWorkspace(workspace);
           setNewTerminalProvider("shell");
         }}
+        hideMobileSwitcher={isMobile && sidebarOpen}
       />
       {activityCenterOpen && <ActivityCenter
         workspaces={projectWorkspaces}
@@ -1279,6 +1521,17 @@ export function AppShell() {
         onSelectWorkspace={(workspace) => void activateProjectWorkspace(workspace)}
         onOpen={handleOpenActivityItem}
       />}
+      <QuickSwitcher
+        open={quickSwitcherOpen}
+        onClose={() => setQuickSwitcherOpen(false)}
+        projects={projectWorkspaces}
+        activeProjectId={activeProjectId}
+        onSelectProject={(workspace) => void activateProjectWorkspace(workspace)}
+        tabs={workspaceTabs.map((tab) => ({ id: tab.id, label: tab.label }))}
+        onSelectTab={handleSelectWorkspaceTab}
+        activeCwd={activeCwd}
+        onSelectSession={handleSelectSession}
+      />
 
       {/* Left sidebar */}
       <div
@@ -1333,7 +1586,15 @@ export function AppShell() {
             )}
           </button>
           <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
-            <TabBar ariaLabel="Workspace tabs" tabs={workspaceTabs} activeTabId={activeWorkspaceTabId} onSelectTab={handleSelectWorkspaceTab} onCloseTab={handleCloseWorkspaceTab} />
+            <TabBar
+              ariaLabel="Workspace tabs"
+              tabs={workspaceTabs}
+              activeTabId={activeWorkspaceTabId}
+              onSelectTab={handleSelectWorkspaceTab}
+              onCloseTab={handleCloseWorkspaceTab}
+              onCloseTabs={closeWorkspaceTabsSequentially}
+              onReorderTabs={(id, beforeId) => dispatchCenter({ type: "reorder", id, beforeId })}
+            />
           </div>
           {showWorkspaceTabBar && topRightControls}
         </div>
@@ -1491,7 +1752,10 @@ export function AppShell() {
               ariaLabel="File and tool tabs"
               tabs={fileTabs}
               activeTabId={activeFileTabId ?? ""}
-              onSelectTab={(id) => dispatchSide({ type: "activate", id })}
+              onSelectTab={(id) => {
+                if (activeFileTabId && id !== activeFileTabId && !confirmDiscardFileTab(activeFileTabId)) return;
+                dispatchSide({ type: "activate", id });
+              }}
               onCloseTab={handleCloseFileTab}
               onCloseTabs={handleCloseFileTabs}
               onToggleTabLocked={handleToggleFileTabLocked}
@@ -1557,7 +1821,7 @@ export function AppShell() {
         {/* File content */}
         <div style={{ flex: 1, overflow: "hidden", ...(chatHidden ? { width: "auto", minWidth: 0 } : {}) }}>
           <SidePanel tab={activeFileTab} renderTab={(tab) => tab.kind === "file"
-            ? <FileTabView tab={tab} activeCwd={activeCwd} gitRefreshKey={explorerRefreshKey} onMentionLines={rightPanelOpen ? handleFileLineMention : undefined} />
+            ? <FileTabView tab={tab} activeCwd={activeCwd} gitRefreshKey={explorerRefreshKey} onMentionLines={rightPanelOpen ? handleFileLineMention : undefined} onDirtyChange={handleFileTabDirtyChange} />
             : <GitTabView activeCwd={activeCwd} gitRefreshKey={explorerRefreshKey} onRepoChanged={handleExplorerRefresh} />
           } />
         </div>
@@ -1594,8 +1858,12 @@ export function AppShell() {
         onCreated={handleTerminalCreated}
       />
     )}
-    {pendingTerminalClose && <RunningCloseDialog label="Close terminal" title={`Close ${pendingTerminalClose.terminal.provider} terminal?`} description={`The process is still running in ${pendingTerminalClose.terminal.cwd}. You can keep it running and reopen it from Agents, or stop it now.`} busy={terminalCloseBusy} error={terminalCloseError} onCancel={() => { if (!terminalCloseBusy) setPendingTerminalClose(null); }} onKeepRunning={() => void closeTerminalTab(false)} onStop={() => void closeTerminalTab(true)} />}
-    {pendingChatClose && <RunningCloseDialog label="Close chat" {...chatCloseText(pendingChatClose.label, pendingChatClose.chat)} busy={terminalCloseBusy} error={terminalCloseError} onCancel={() => { if (!terminalCloseBusy) setPendingChatClose(null); }} onKeepRunning={() => void closeChatTab(false)} onStop={() => void closeChatTab(true)} />}
+    {/* Cancel on either dialog stops the bulk-close queue outright (per the
+        brief: cancelling keeps the current tab open AND leaves any remaining
+        queued busy tabs open too, with no further dialogs) rather than
+        advancing to the next queued tab. */}
+    {pendingTerminalClose && <RunningCloseDialog label="Close terminal" title={`Close ${pendingTerminalClose.terminal.provider} terminal?`} description={`The process is still running in ${pendingTerminalClose.terminal.cwd}. You can keep it running and reopen it from Agents, or stop it now.`} busy={terminalCloseBusy} error={terminalCloseError} onCancel={() => { if (!terminalCloseBusy) { setPendingTerminalClose(null); setPendingCloseQueue([]); finalizeActiveCloseBatch(); } }} onKeepRunning={() => void closeTerminalTab(false)} onStop={() => void closeTerminalTab(true)} />}
+    {pendingChatClose && <RunningCloseDialog label="Close chat" {...chatCloseText(pendingChatClose.label, pendingChatClose.chat)} busy={terminalCloseBusy} error={terminalCloseError} onCancel={() => { if (!terminalCloseBusy) { setPendingChatClose(null); setPendingCloseQueue([]); finalizeActiveCloseBatch(); } }} onKeepRunning={() => void closeChatTab(false)} onStop={() => void closeChatTab(true)} />}
     {settingsOpen && <SettingsPanel
       isDark={isDark}
       cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd}

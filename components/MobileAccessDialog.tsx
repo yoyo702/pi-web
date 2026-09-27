@@ -19,6 +19,7 @@ export function MobileAccessDialog({ open = true, onClose, embedded = false }: {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -77,6 +78,25 @@ export function MobileAccessDialog({ open = true, onClose, embedded = false }: {
     return () => window.clearTimeout(timer);
   }, [copied]);
 
+  useEffect(() => {
+    if (!pairing) return;
+    const delay = Math.max(0, pairing.expiresAt - Date.now()) + 250;
+    const timer = window.setTimeout(() => setNow(Date.now()), delay);
+    return () => window.clearTimeout(timer);
+  }, [pairing]);
+
+  useEffect(() => {
+    // Background tabs (and a sleeping laptop) throttle or delay the setTimeout
+    // above, so a dialog that gets foregrounded after the real expiry can still
+    // show a dead QR code until the delayed timer eventually fires. Re-check
+    // against the wall clock as soon as the page becomes visible again.
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") setNow(Date.now());
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, []);
+
   const selected = useMemo(
     () => info?.addresses.find((address) => address.id === selectedId) ?? null,
     [info, selectedId],
@@ -87,12 +107,14 @@ export function MobileAccessDialog({ open = true, onClose, embedded = false }: {
     url.searchParams.set("token", pairing.token);
     return url.toString();
   }, [pairing, selected]);
+  const pairingExpired = pairing ? now >= pairing.expiresAt : false;
+  const effectivePairingUrl = pairingUrl && !pairingExpired ? pairingUrl : null;
 
   if (!embedded && !open) return null;
 
   const copyUrl = async () => {
     if (!selected) return;
-    await copyText(pairingUrl ?? selected.origin);
+    await copyText(effectivePairingUrl ?? selected.origin);
     setCopied(true);
   };
 
@@ -136,12 +158,12 @@ export function MobileAccessDialog({ open = true, onClose, embedded = false }: {
               {selected && (
                 <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", alignItems: "center", gap: 18, marginTop: 16 }}>
                   <div style={{ padding: 10, borderRadius: 10, background: "#fff", lineHeight: 0, opacity: selected.reachable ? 1 : 0.62 }}>
-                    <QRCodeSVG value={pairingUrl ?? selected.origin} size={196} level="M" marginSize={2} title={pairingUrl ? "Sign in to TianForge pi" : `Open ${selected.origin}`} />
+                    <QRCodeSVG value={effectivePairingUrl ?? selected.origin} size={196} level="M" marginSize={2} title={effectivePairingUrl ? "Sign in to TianForge pi" : `Open ${selected.origin}`} />
                   </div>
                   <div style={{ flex: "1 1 220px", minWidth: 0, display: "grid", gap: 10 }}>
                     <div style={{ padding: "9px 10px", border: "1px solid var(--border)", borderRadius: 7, background: "var(--bg)", color: "var(--text)", font: "11px/1.45 var(--font-mono)", overflowWrap: "anywhere", userSelect: "text" }}>{selected.origin}</div>
                     <div style={{ display: "flex", gap: 8 }}>
-                      <button type="button" onClick={() => void copyUrl()} style={primaryButtonStyle}>{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? "Copied" : pairingUrl ? "Copy sign-in link" : "Copy link"}</button>
+                      <button type="button" onClick={() => void copyUrl()} style={primaryButtonStyle}>{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? "Copied" : effectivePairingUrl ? "Copy sign-in link" : "Copy link"}</button>
                       <button type="button" onClick={() => window.open(selected.origin, "_blank", "noopener,noreferrer")} style={secondaryButtonStyle}><ExternalLink size={13} />Open address</button>
                     </div>
                     <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 10.5, lineHeight: 1.5 }}>
@@ -160,9 +182,19 @@ export function MobileAccessDialog({ open = true, onClose, embedded = false }: {
                 <div style={warningStyle}>Network access should be password protected. Restart with <code>PI_WEB_PASSWORD</code> configured before sharing this address.</div>
               )}
               {selected?.reachable && info.passwordRequired && (
-                pairingUrl
-                  ? <div style={safeStyle}><ShieldCheck size={14} />Scan to sign in automatically—no password entry. This link works once and expires at {new Date(pairing!.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.</div>
-                  : <div style={warningStyle}>Automatic sign-in is unavailable{pairingError ? `: ${pairingError}` : ""}. Refresh after restarting the server, or enter the password on the phone.</div>
+                pairingUrl && pairingExpired
+                  ? (
+                    <div style={warningStyle}>
+                      This sign-in link expired at {new Date(pairing!.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.
+                      {" "}
+                      <button type="button" onClick={() => void load()} disabled={loading} style={inlineRefreshButtonStyle}>
+                        <RefreshCw size={13} />Expired — Refresh
+                      </button>
+                    </div>
+                  )
+                  : pairingUrl
+                    ? <div style={safeStyle}><ShieldCheck size={14} />Scan to sign in automatically—no password entry. This link works once and expires at {new Date(pairing!.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.</div>
+                    : <div style={warningStyle}>Automatic sign-in is unavailable{pairingError ? `: ${pairingError}` : ""}. Refresh after restarting the server, or enter the password on the phone.</div>
               )}
               {selected?.reachable && info.protocol === "https" && (
                 <>
@@ -225,6 +257,7 @@ const embeddedDialogStyle: React.CSSProperties = { width: "100%", height: "100%"
 const iconButtonStyle: React.CSSProperties = { width: 28, height: 28, display: "grid", placeItems: "center", padding: 0, border: "1px solid var(--border)", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer" };
 const primaryButtonStyle: React.CSSProperties = { minHeight: 32, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "0 11px", border: "1px solid var(--accent)", borderRadius: 6, background: "var(--accent)", color: "#fff", cursor: "pointer", font: "11px/1 inherit" };
 const secondaryButtonStyle: React.CSSProperties = { ...primaryButtonStyle, borderColor: "var(--border)", background: "var(--bg-hover)", color: "var(--text)" };
+const inlineRefreshButtonStyle: React.CSSProperties = { display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-hover)", color: "var(--text)", cursor: "pointer", font: "10.5px/1 inherit" };
 const warningStyle: React.CSSProperties = { marginTop: 12, padding: "9px 10px", border: "1px solid color-mix(in srgb, #f59e0b 35%, var(--border))", borderRadius: 7, background: "color-mix(in srgb, #f59e0b 8%, transparent)", color: "var(--text-muted)", fontSize: 10.5, lineHeight: 1.55 };
 const safeStyle: React.CSSProperties = { marginTop: 12, display: "flex", alignItems: "center", gap: 7, padding: "8px 10px", borderRadius: 7, background: "color-mix(in srgb, #22c55e 8%, transparent)", color: "var(--text-muted)", fontSize: 10.5, lineHeight: 1.45 };
 const errorStyle: React.CSSProperties = { padding: "10px 11px", border: "1px solid color-mix(in srgb, #ef4444 35%, var(--border))", borderRadius: 7, background: "color-mix(in srgb, #ef4444 8%, transparent)", color: "#f87171", fontSize: 11.5 };

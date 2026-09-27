@@ -10,6 +10,7 @@ import {
   isWindowsAbsolutePath,
 } from "@/lib/file-access";
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "@/lib/file-fuzzy";
+import { searchFileContent } from "@/lib/file-content-search";
 import { errorResponse } from "@/lib/http-error";
 
 const execFileAsync = promisify(execFile);
@@ -149,6 +150,11 @@ export async function GET(req: NextRequest) {
     }
     if (!isExistingFilePathAllowed(cwd, allowedRoots)) {
       return NextResponse.json({ error: "Access denied" }, { status: 403 });
+    }
+
+    const contentQuery = req.nextUrl.searchParams.get("contentQuery")?.slice(0, MAX_QUERY_LENGTH) ?? "";
+    if (contentQuery) {
+      return NextResponse.json({ matches: await searchFileContent(cwd, contentQuery, req.signal) });
     }
 
     const cache = getIndexCache();

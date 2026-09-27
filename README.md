@@ -62,6 +62,16 @@ PI_WEB_ALLOWED_HOSTS='pi.example.com,*.ts.net' pi-web --hostname 0.0.0.0
 
 A request with an unrecognized host is rejected with `421 unrecognized Host header; set PI_WEB_ALLOWED_HOSTS to allow it`. If the page does not load through a new address, check this first.
 
+### Reverse proxy login rate limiting
+
+Failed logins are rate-limited (8 failures locks out further attempts from that client for 15 minutes) keyed on the direct TCP peer address, because `X-Forwarded-For` can be set by anyone when TianForge pi is reachable directly. If you put TianForge pi behind a local reverse proxy (Tailscale Serve, nginx) instead, every request's direct peer becomes the proxy's loopback address, so one person's failed logins would lock out every other user. Set `PI_WEB_TRUST_PROXY=1` to key on `X-Forwarded-For` instead — only honored when the direct peer is loopback, so this has no effect (and is safe to leave set) if the server is ever reached directly. This assumes a single trusted proxy that appends the address it observed to `X-Forwarded-For` rather than replacing it (e.g. nginx's `$proxy_add_x_forwarded_for`); TianForge pi uses the right-most entry, since that is the one the proxy itself set and a client cannot control it:
+
+```bash
+PI_WEB_TRUST_PROXY=1 pi-web
+```
+
+Don't set this if the "proxy" is actually a plain TCP/SSH port forward (e.g. `ssh -L`) or a TCP-mode `tailscale serve`/`funnel`: those forward bytes without adding `X-Forwarded-For`, so a client could set it themselves and rate limiting would key on an address they fully control.
+
 ## HTTP Proxy
 
 TianForge pi reads the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables for server-side model and API requests.

@@ -15,6 +15,7 @@ TianForge pi 会暴露本机项目文件、Session 和 Terminal。局域网访�
 - 开发密码持久化到用户目录并限制文件权限。
 - 登录使用 POST，密码不进入 URL、历史记录或 Referer。
 - 已登录电脑通过同源 `POST /api/auth/pair` 签发 5 分钟有效、仅能兑换一次的手机配对链接；配对 URL 只携带随机令牌，不携带密码。
+- 配对二维码过期后对话框切换为 "Expired — Refresh" 状态，其刷新按钮在请求进行中禁用，防止重复点击铸造多个配对令牌；标签页从后台切回前台（`visibilitychange`）时会重新核对过期时间，避免后台节流的定时器导致过期后仍展示已死的二维码。
 - 手机端始终提供 PWA 安装入口；Android 使用可用的浏览器安装事件，iOS 引导“分享 → 添加到主屏幕”。标签页全屏作为独立的可选操作，不覆盖安装入口。
 - Web App Manifest、图标和空缓存 Service Worker 可在未登录时读取，但不暴露 API、项目或会话数据。
 - Tailscale 长期访问推荐用 `tailscale serve --bg https+insecure://127.0.0.1:30141` 暴露受信任的 `*.ts.net` 地址；Serve 配置持久化，TianForge 后端仍独立启停。
@@ -25,7 +26,7 @@ TianForge pi 会暴露本机项目文件、Session 和 Terminal。局域网访�
 - 所有 HTTP 请求和 WebSocket 升级都校验 `Host`，只接受本机名称、本机网卡地址和 `PI_WEB_ALLOWED_HOSTS`（默认 `*.ts.net`），其他返回 421，防御 DNS rebinding。
 - 密码和内部 Terminal 令牌启动后即从 `process.env` 移除，Agent 的 bash 工具和子进程读不到；会话 Cookie 使用由密码派生的独立签名密钥。
 - 登出记录（仅存 Token 哈希，权限 0600）持久化到 `~/.pi-web/revoked-sessions.json`，服务重启后已登出的 Cookie 仍然无效。
-- 登录限流按连接地址计数，不信任客户端可伪造的 `X-Forwarded-For`；认证前的请求体有大小上限。
+- 登录限流默认按直连的 Socket 地址计数；仅当运维显式设置 `PI_WEB_TRUST_PROXY=1` 且直连对端是 loopback 地址时，才改为按 `X-Forwarded-For` 最右侧一跳计数（假设本地只有一个会追加而非替换该请求头的可信反向代理，客户端伪造的左侧条目会被忽略）；认证前的请求体有大小上限。
 - 未登录时只开放 `/_next/static/`；绑定到非本机地址且未启用 TLS 时启动日志给出警告。
 - `/api/models-config` 返回前隐藏 API Key；工作区文件和会话导出页以 CSP sandbox 返回，恶意 SVG/HTML 无法在应用源内执行脚本。
 - `models.json` 加载失败（如文件损坏）时，设置面板的 Models 页展示错误信息并提供 Retry，Save 按钮禁用，避免用空配置覆盖已有文件。

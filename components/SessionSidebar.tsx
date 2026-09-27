@@ -6,11 +6,11 @@ import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import type { TerminalProvider } from "@/lib/agents/terminal";
 import { AgentsPanel } from "./agents/AgentsPanel";
 import { applyBackgroundSessionEvent, type BackgroundAgentEvent } from "@/lib/session-background-sync";
-import { getSessionDisplayTitle, resolveSessionLineage, sortSessionsByRecent } from "@/lib/session-list";
+import { filterSessionsByQuery, getSessionDisplayTitle, resolveSessionLineage, sortSessionsByRecent } from "@/lib/session-list";
 import { getProductStatus } from "@/lib/product-status";
 import { useWorkspaceActions } from "./workspace/WorkspaceActions";
 import { useWorkspaceStatusMessages } from "@/hooks/useWorkspaceStatus";
-import { ChevronDown, Settings } from "lucide-react";
+import { ChevronDown, Search, Settings, X } from "lucide-react";
 
 declare global {
   interface Window {
@@ -22,7 +22,11 @@ declare global {
 
 interface Props {
   selectedSessionId: string | null;
-  onSelectSession: (session: SessionInfo, isRestore?: boolean) => void;
+  // A `false` return means the caller aborted the selection (e.g. the user
+  // cancelled a cross-project discard-unsaved-changes prompt) — the sidebar
+  // must not apply its own optimistic cwd change in that case, or the
+  // subsequent onCwdChange effect re-fires the same guard a second time.
+  onSelectSession: (session: SessionInfo, isRestore?: boolean) => boolean | void;
   onNewSession?: (sessionId: string, cwd: string) => void;
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
@@ -331,6 +335,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   const sessionPane = useVerticalPaneSize("pi-sidebar-sessions-h", 280, 100, 640);
   const [sessionsExpanded, setSessionsExpanded] = useState(true);
+  const [sessionSearch, setSessionSearch] = useState("");
   const [sessionView, setSessionView] = useState<"tree" | "recent">("tree");
   const [agentsExpanded, setAgentsExpanded] = useState(true);
   const [sidebarMode, setSidebarMode] = useState<"sessions" | "agents">("sessions");
@@ -693,8 +698,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // works when the prop value won't change — e.g. re-clicking the already
   // open session after manually switching worktrees.
   const handleSelectSessionFromList = useCallback((s: SessionInfo) => {
+    // Ask the caller first — if it declines (returns false), don't move our
+    // own selectedCwd state at all, or the onCwdChange effect below would
+    // notice the drift and prompt the same discard confirm a second time.
+    if (onSelectSession(s) === false) return;
     if (s.cwd) setSelectedCwd(s.cwd);
-    onSelectSession(s);
   }, [onSelectSession]);
 
   const handleNewSession = useCallback(() => {
@@ -728,9 +736,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (projectPathCopiedTimerRef.current) clearTimeout(projectPathCopiedTimerRef.current);
     projectPathCopiedTimerRef.current = setTimeout(() => setProjectPathCopied(false), 1600);
   }, [displayedProjectPath]);
-  const filteredSessions = useMemo(() => selectedProject
-    ? allSessions.filter((s) => (s.projectRoot ?? s.cwd) === selectedProject)
-    : allSessions, [allSessions, selectedProject]);
+  const filteredSessions = useMemo(() => {
+    const scoped = selectedProject
+      ? allSessions.filter((s) => (s.projectRoot ?? s.cwd) === selectedProject)
+      : allSessions;
+    return filterSessionsByQuery(scoped, sessionSearch);
+  }, [allSessions, selectedProject, sessionSearch]);
   const showWorktreeSwitcher = Boolean(
     worktreeState?.isGit
     && worktreeState.isTopLevel
@@ -1275,6 +1286,22 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         </div>
       </div>
       {sessionsExpanded && <div style={{ flex: (selectedCwdProp || selectedCwd) && explorerOpen ? `0 1 ${sessionPane.size}px` : "1 1 auto", height: (selectedCwdProp || selectedCwd) && explorerOpen ? sessionPane.size : undefined, overflowY: "auto", padding: "0", minHeight: 80 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, margin: "0 8px 4px", padding: "4px 8px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)" }}>
+          <Search size={13} style={{ flexShrink: 0, opacity: 0.6 }} aria-hidden="true" />
+          <input
+            value={sessionSearch}
+            onChange={(event) => setSessionSearch(event.target.value)}
+            placeholder="Search sessions"
+            aria-label="Search Pi sessions"
+            type="search"
+            style={{ flex: 1, minWidth: 0, border: "none", outline: "none", background: "transparent", font: "12px inherit", color: "var(--text)" }}
+          />
+          {sessionSearch && (
+            <button type="button" onClick={() => setSessionSearch("")} aria-label="Clear session search" title="Clear" style={{ display: "flex", border: "none", background: "none", color: "var(--text-dim)", cursor: "pointer", padding: 0 }}>
+              <X size={13} aria-hidden="true" />
+            </button>
+          )}
+        </label>
         {loading && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
             Loading...

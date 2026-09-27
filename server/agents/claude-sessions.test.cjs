@@ -13,16 +13,22 @@ const catalog = require("./claude-sessions.cjs");
 const terminalApi = require("./terminal-api.cjs");
 const terminalManager = require("./terminal-manager.cjs");
 const api = require("./claude-sessions-api.cjs");
+const meta = require("./claude-session-meta.cjs");
 
 const IDS = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555"];
 
 // A temp Claude config dir (test-env.cjs already points CLAUDE_CONFIG_DIR at
-// one; each test gets its own) with a fake workspace folder.
+// one; each test gets its own) with a fake workspace folder. Also gives each
+// test its own rename/archive sidecar file (test-env.cjs's default is shared
+// for the whole process), so tests reusing the same session ids (IDS[0], …)
+// never see another test's overlay.
 function claudeHome(t, cwd = "/work/app") {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-web-claude-home-"));
   const previous = process.env.CLAUDE_CONFIG_DIR;
+  const previousMeta = process.env.PI_WEB_CLAUDE_SESSION_META_FILE;
   process.env.CLAUDE_CONFIG_DIR = home;
-  t.after(() => { process.env.CLAUDE_CONFIG_DIR = previous; fs.rmSync(home, { recursive: true, force: true }); });
+  process.env.PI_WEB_CLAUDE_SESSION_META_FILE = path.join(home, "claude-session-meta.json");
+  t.after(() => { process.env.CLAUDE_CONFIG_DIR = previous; process.env.PI_WEB_CLAUDE_SESSION_META_FILE = previousMeta; fs.rmSync(home, { recursive: true, force: true }); });
   const dir = path.join(home, "projects", catalog.encodeCwd(cwd));
   fs.mkdirSync(dir, { recursive: true });
   let clock = Date.parse("2026-09-01T00:00:00Z");
@@ -163,7 +169,7 @@ test("the API lists without file paths and requires an authorized folder", async
   write(IDS[0], [user("Hello")]);
   const response = await request("GET", "/api/claude/sessions?cwd=/work/app&limit=1");
   assert.equal(response.status, 200);
-  assert.deepEqual(Object.keys(response.body.sessions[0]).sort(), ["createdAt", "cwd", "firstMessage", "gitBranch", "id", "runtime", "size", "title", "updatedAt"]);
+  assert.deepEqual(Object.keys(response.body.sessions[0]).sort(), ["archived", "createdAt", "cwd", "firstMessage", "gitBranch", "id", "runtime", "size", "title", "updatedAt"]);
   assert.equal((await request("GET", "/api/claude/sessions")).status, 400);
   assert.equal((await request("GET", "/api/claude/sessions?cwd=/other")).status, 403);
   assert.equal((await request("POST", "/api/claude/sessions?cwd=/work/app")).status, 405);
@@ -202,6 +208,57 @@ test("the API refuses to delete a session resumed in a terminal", async (t) => {
   const response = await request("POST", `/api/claude/sessions/${IDS[0]}/delete`, { cwd: "/work/app" });
   assert.equal(response.status, 409);
   assert.equal(fs.existsSync(path.join(dir, `${IDS[0]}.jsonl`)), true);
+});
+
+test("rename: renames a session and the API returns it in subsequent listings", async (t) => {
+  const { write } = apiSetup(t);
+  write(IDS[0], [user("hello")]);
+  const response = await request("POST", `/api/claude/sessions/${IDS[0]}/rename`, { cwd: "/work/app", name: "  Renamed session  " });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.session.title, "Renamed session");
+  assert.equal(response.body.session.path, undefined);
+  assert.equal(catalog.listSessions({ cwd: "/work/app" }).sessions[0].title, "Renamed session");
+  const rejected = await request("POST", `/api/claude/sessions/${IDS[0]}/rename`, { cwd: "/work/app", name: "   " });
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.body.code, "invalid_name");
+  assert.equal((await request("POST", `/api/claude/sessions/${IDS[2]}/rename`, { cwd: "/work/app", name: "x" })).status, 404);
+});
+
+test("archive/unarchive: moves a session between the active and archived lists", async (t) => {
+  const { write } = apiSetup(t);
+  write(IDS[0], [user("hello")]);
+  assert.equal(catalog.listSessions({ cwd: "/work/app" }).sessions.length, 1);
+  const archived = await request("POST", `/api/claude/sessions/${IDS[0]}/archive`, { cwd: "/work/app" });
+  assert.equal(archived.status, 200);
+  assert.equal(archived.body.session.archived, true);
+  assert.equal(catalog.listSessions({ cwd: "/work/app", archived: false }).sessions.length, 0);
+  assert.equal(catalog.listSessions({ cwd: "/work/app", archived: true }).sessions.length, 1);
+  const restored = await request("POST", `/api/claude/sessions/${IDS[0]}/unarchive`, { cwd: "/work/app" });
+  assert.equal(restored.status, 200);
+  assert.equal(restored.body.session.archived, false);
+  assert.equal(catalog.listSessions({ cwd: "/work/app", archived: false }).sessions.length, 1);
+  assert.equal(catalog.listSessions({ cwd: "/work/app", archived: true }).sessions.length, 0);
+});
+
+test("rename/archive bypass the busy check that guards delete", async (t) => {
+  const { write } = apiSetup(t, { runtime: { owner: "terminal", state: "running", terminalId: "t1" } });
+  write(IDS[0], [user("hello")]);
+  assert.equal((await request("POST", `/api/claude/sessions/${IDS[0]}/rename`, { cwd: "/work/app", name: "New name" })).status, 200);
+  assert.equal((await request("POST", `/api/claude/sessions/${IDS[0]}/archive`, { cwd: "/work/app" })).status, 200);
+  assert.equal((await request("POST", `/api/claude/sessions/${IDS[0]}/delete`, { cwd: "/work/app" })).status, 409);
+});
+
+test("deleting a session clears its rename/archive overlay", async (t) => {
+  const { dir, write } = apiSetup(t);
+  write(IDS[0], [user("hello")]);
+  catalog.rename(IDS[0], "/work/app", "Named");
+  catalog.setArchived(IDS[0], "/work/app", true);
+  assert.ok(meta.get(IDS[0]), "overlay should exist before delete");
+  assert.equal((await request("POST", `/api/claude/sessions/${IDS[0]}/delete`, { cwd: "/work/app" })).status, 200);
+  assert.equal(fs.existsSync(path.join(dir, `${IDS[0]}.jsonl`)), false);
+  // If `remove()` stopped calling `meta.remove(id)`, this would still find the
+  // overlay entry (the sidecar is keyed by id, independent of the deleted file).
+  assert.equal(meta.get(IDS[0]), null);
 });
 
 // A fresh terminal manager with a fake pty and a fake `claude` on PATH that

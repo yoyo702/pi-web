@@ -10,8 +10,9 @@ import {
   normalizeFilePathSlashes,
 } from "@/lib/file-paths";
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
-import { Check, ChevronUp, Copy, Eye, EyeOff, FilePlus2, FolderPlus, Pencil, Search, Trash2, X } from "lucide-react";
+import { Check, ChevronUp, Copy, Eye, EyeOff, FilePlus2, FolderPlus, MoreVertical, Pencil, Search, Trash2, X } from "lucide-react";
 import { ProductStatusDot } from "./ProductStatus";
+import { useCoarsePointer } from "@/hooks/useIsMobile";
 
 interface FileEntry {
   name: string;
@@ -30,6 +31,7 @@ interface FileNode {
 }
 
 interface SearchEntry { path: string; isDir: boolean }
+interface ContentSearchEntry { path: string; line: number; text: string }
 type MutationAction = "create-file" | "create-folder" | "rename";
 
 interface Props {
@@ -190,6 +192,11 @@ function DismissButton({ onClick, title }: { onClick: () => void; title: string 
   );
 }
 
+/** Dot-segment paths are hidden in search results unless "Show hidden" is on. */
+function isHiddenSearchPath(relativePath: string): boolean {
+  return relativePath.split("/").some((part) => part.startsWith("."));
+}
+
 function HighlightedPath({ path, query }: { path: string; query: string }) {
   const trimmed = query.trim();
   if (!trimmed) return <>{path}</>;
@@ -214,6 +221,7 @@ function TreeNode({
   selectedPath,
   onSelect,
   onContextMenu,
+  isCoarsePointer,
 }: {
   node: FileNode;
   depth: number;
@@ -230,6 +238,7 @@ function TreeNode({
   selectedPath: string;
   onSelect: (node: FileNode) => void;
   onContextMenu: (node: FileNode, event: React.MouseEvent) => void;
+  isCoarsePointer: boolean;
 }) {
   const open = expandedPaths.has(node.fullPath);
   const highlighted = highlightedPaths.has(node.fullPath);
@@ -358,7 +367,7 @@ function TreeNode({
             <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
           </svg>
         )}
-        {onAtMention && hovered && (
+        {onAtMention && hovered && !isCoarsePointer && (
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -390,7 +399,7 @@ function TreeNode({
             mention
           </button>
         )}
-        {hovered && !node.isDir && (
+        {hovered && !isCoarsePointer && !node.isDir && (
           <a
             href={`/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`}
             download
@@ -425,6 +434,32 @@ function TreeNode({
             </svg>
           </a>
         )}
+        {isCoarsePointer && (
+          // Deliberately ignores `hovered`: a touch tap fires a synthetic
+          // mouseover/mouseenter before its own click (the classic mobile
+          // "hover trap" — see e.g. https://css-tricks.com/annoying-mobile-double-tap-link-issue/),
+          // so gating this on `!hovered` let the tap's own hover flip
+          // `hovered` true and unmount this button a frame before the
+          // click's mousedown/mouseup landed, which then fell through to
+          // whatever the button's spot revealed instead (the row itself,
+          // selecting the file). The hover-revealed mention/download
+          // affordances above are suppressed instead when isCoarsePointer,
+          // since both duplicate options already in this button's menu.
+          <button
+            onClick={(e) => { e.stopPropagation(); onContextMenu(node, e); }}
+            title="File actions"
+            aria-label="File actions"
+            style={{
+              position: "absolute", right: 4, top: "50%", transform: "translateY(-50%)",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              width: 22, height: 22,
+              background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 4,
+              color: "var(--text-muted)", cursor: "pointer",
+            }}
+          >
+            <MoreVertical size={13} />
+          </button>
+        )}
       </div>
       {node.isDir && open && (
         <div>
@@ -446,6 +481,7 @@ function TreeNode({
               selectedPath={selectedPath}
               onSelect={onSelect}
               onContextMenu={onContextMenu}
+              isCoarsePointer={isCoarsePointer}
             />
           ))}
           {children.length === 0 && loaded && (
@@ -470,6 +506,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   onPathDeleted,
   revealRequest,
 }, ref) {
+  const isCoarsePointer = useCoarsePointer();
   const [roots, setRoots] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -484,6 +521,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [pendingConflict, setPendingConflict] = useState<PendingConflict | null>(null);
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState<{ loading: boolean; error: string; results: SearchEntry[] }>({ loading: false, error: "", results: [] });
+  const [searchMode, setSearchMode] = useState<"name" | "content">("name");
+  const [contentSearch, setContentSearch] = useState<{ loading: boolean; error: string; results: ContentSearchEntry[] }>({ loading: false, error: "", results: [] });
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const searchResultRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const [showHidden, setShowHidden] = useState(false);
@@ -559,6 +598,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       setQuery("");
       return;
     }
+    if (searchMode !== "name") return;
     if (search.results.length === 0) return;
     if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       event.preventDefault();
@@ -570,7 +610,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       event.preventDefault();
       revealSearchResult(search.results[searchActiveIndex] ?? search.results[0]);
     }
-  }, [query, revealSearchResult, search.results, searchActiveIndex]);
+  }, [query, revealSearchResult, search.results, searchActiveIndex, searchMode]);
 
   useEffect(() => {
     if (!contextMenu && !pendingMutation && !deleteNode) return;
@@ -591,6 +631,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   }, [contextMenu, deleteNode, pendingMutation]);
 
   useEffect(() => {
+    if (searchMode !== "name") return;
     const trimmed = query.trim();
     if (!trimmed) { setSearch({ loading: false, error: "", results: [] }); return; }
     const controller = new AbortController();
@@ -602,12 +643,30 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
         .then(async (response) => {
           const data = await response.json() as { matches?: SearchEntry[]; error?: string };
           if (!response.ok) throw new Error(data.error || `Search failed (HTTP ${response.status})`);
-          setSearch({ loading: false, error: "", results: (data.matches ?? []).filter((entry) => showHidden || !entry.path.split("/").some((part) => part.startsWith("."))) });
+          setSearch({ loading: false, error: "", results: (data.matches ?? []).filter((entry) => showHidden || !isHiddenSearchPath(entry.path)) });
         })
         .catch((cause) => { if (!controller.signal.aborted) setSearch({ loading: false, error: cause instanceof Error ? cause.message : String(cause), results: [] }); });
     }, 180);
     return () => { controller.abort(); window.clearTimeout(timer); };
-  }, [cwd, query, showHidden]);
+  }, [cwd, query, searchMode, showHidden]);
+
+  useEffect(() => {
+    if (searchMode !== "content") return;
+    const trimmed = query.trim();
+    if (!trimmed) { setContentSearch({ loading: false, error: "", results: [] }); return; }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setContentSearch((current) => ({ ...current, loading: true, error: "" }));
+      void fetch(`/api/file-index?${new URLSearchParams({ cwd, contentQuery: trimmed })}`, { signal: controller.signal })
+        .then(async (response) => {
+          const data = await response.json() as { matches?: ContentSearchEntry[]; error?: string };
+          if (!response.ok) throw new Error(data.error || `Search failed (HTTP ${response.status})`);
+          setContentSearch({ loading: false, error: "", results: (data.matches ?? []).filter((match) => showHidden || !isHiddenSearchPath(match.path)) });
+        })
+        .catch((cause) => { if (!controller.signal.aborted) setContentSearch({ loading: false, error: cause instanceof Error ? cause.message : String(cause), results: [] }); });
+    }, 250);
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [cwd, query, searchMode, showHidden]);
 
   const startMutation = useCallback((action: MutationAction, node: FileNode | null) => {
     setContextMenu(null);
@@ -948,9 +1007,15 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "5px 6px", borderBottom: "1px solid var(--border)" }}>
         <label style={{ minWidth: 0, height: 27, flex: 1, display: "flex", alignItems: "center", gap: 5, padding: "0 7px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg)", color: "var(--text-dim)" }}>
           <Search size={13} aria-hidden="true" />
-          <input value={query} onChange={(event) => { setQuery(event.target.value); setSearchActiveIndex(0); }} onKeyDown={handleSearchKeyDown} placeholder="Search files" aria-label="Search files" role="combobox" aria-autocomplete="list" aria-expanded={Boolean(query.trim())} aria-controls="explorer-search-results" aria-activedescendant={query.trim() && search.results[searchActiveIndex] ? `explorer-search-result-${searchActiveIndex}` : undefined} style={{ width: "100%", minWidth: 0, border: 0, outline: 0, background: "transparent", color: "var(--text)", font: "11px/1.2 inherit" }} />
+          <input value={query} onChange={(event) => { setQuery(event.target.value); setSearchActiveIndex(0); }} onKeyDown={handleSearchKeyDown} placeholder="Search files" aria-label="Search files" role="combobox" aria-autocomplete="list" aria-expanded={Boolean(query.trim())} aria-controls={searchMode === "name" ? "explorer-search-results" : undefined} aria-activedescendant={searchMode === "name" && query.trim() && search.results[searchActiveIndex] ? `explorer-search-result-${searchActiveIndex}` : undefined} style={{ width: "100%", minWidth: 0, border: 0, outline: 0, background: "transparent", color: "var(--text)", font: "11px/1.2 inherit" }} />
           {query && <button type="button" onClick={() => setQuery("")} aria-label="Clear file search" title="Clear" style={toolbarButtonStyle}><X size={12} /></button>}
         </label>
+        {query.trim() && (
+          <div role="group" aria-label="Search mode" style={{ display: "flex", gap: 2 }}>
+            <button type="button" onClick={() => setSearchMode("name")} aria-pressed={searchMode === "name"} style={{ ...toolbarButtonStyle, width: "auto", padding: "2px 8px", ...(searchMode === "name" ? toolbarButtonActiveStyle : {}) }}>Name</button>
+            <button type="button" onClick={() => setSearchMode("content")} aria-pressed={searchMode === "content"} style={{ ...toolbarButtonStyle, width: "auto", padding: "2px 8px", ...(searchMode === "content" ? toolbarButtonActiveStyle : {}) }}>Content</button>
+          </div>
+        )}
         <button type="button" onClick={() => setExpandedPaths(new Set())} aria-label="Collapse all folders" title="Collapse all" style={toolbarButtonStyle}><ChevronUp size={14} /></button>
         <button type="button" onClick={() => setShowHidden((value) => !value)} aria-pressed={showHidden} aria-label={showHidden ? "Hide hidden and generated files" : "Show hidden and generated files"} title={showHidden ? "Hide hidden and generated files" : "Show hidden and generated files"} style={{ ...toolbarButtonStyle, ...(showHidden ? toolbarButtonActiveStyle : {}) }}>{showHidden ? <Eye size={14} /> : <EyeOff size={14} />}</button>
         <button type="button" onClick={() => startMutation("create-file", selectedNode)} aria-label="New file" title="New file" style={toolbarButtonStyle}><FilePlus2 size={14} /></button>
@@ -964,7 +1029,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
       </form>}
       {mutationError && <div role="alert" style={{ padding: "5px 8px", color: "#f87171", fontSize: 10, overflowWrap: "anywhere" }}>{mutationError}</div>}
 
-      {query.trim() && <div id="explorer-search-results" role="listbox" aria-label="File search results" style={{ maxHeight: 220, overflowY: "auto", padding: 4, borderBottom: "1px solid var(--border)" }}>
+      {query.trim() && searchMode === "name" && <div id="explorer-search-results" role="listbox" aria-label="File search results" style={{ maxHeight: 220, overflowY: "auto", padding: 4, borderBottom: "1px solid var(--border)" }}>
         {search.loading && <div style={emptyStyle}>Searching…</div>}
         {!search.loading && search.error && <div style={{ ...emptyStyle, color: "#f87171" }}>{search.error}</div>}
         {!search.loading && !search.error && search.results.length === 0 && <div style={emptyStyle}>No matching files</div>}
@@ -980,6 +1045,31 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
           </button>;
         })}
       </div>}
+      {query.trim() && searchMode === "content" && (
+        <div role="listbox" aria-label="File content search results" style={{ maxHeight: 260, overflowY: "auto", padding: 4, borderBottom: "1px solid var(--border)" }}>
+          {contentSearch.loading && <div style={emptyStyle}>Searching…</div>}
+          {!contentSearch.loading && contentSearch.error && <div style={{ ...emptyStyle, color: "#f87171" }}>{contentSearch.error}</div>}
+          {!contentSearch.loading && !contentSearch.error && contentSearch.results.length === 0 && <div style={emptyStyle}>No matching content</div>}
+          {contentSearch.results.map((match, index) => (
+            <button
+              key={`${match.path}:${match.line}:${index}`}
+              type="button"
+              role="option"
+              aria-selected={false}
+              onClick={() => { setQuery(""); onOpenFile(normalizeFilePathSlashes(joinFilePath(cwd, match.path)), match.path.split("/").pop() || match.path); }}
+              title={`${match.path}:${match.line}`}
+              style={{ ...searchResultStyle, flexDirection: "column", alignItems: "flex-start", gap: 2 }}
+            >
+              <span style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", minWidth: 0 }}>
+                {getFileIcon(match.path, 14)}
+                <span style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{match.path}</span>
+                <span style={{ flexShrink: 0, color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 10 }}>:{match.line}</span>
+              </span>
+              <span style={{ minWidth: 0, width: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 10.5 }}>{match.text}</span>
+            </button>
+          ))}
+        </div>
+      )}
       {showUploadFeedback && (
         <div style={{ padding: "6px 8px", borderBottom: "1px solid var(--border)" }}>
         {uploadBusy && (
@@ -1169,6 +1259,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 setSelectedNode(node);
                 setContextMenu({ node, x: event.clientX, y: event.clientY });
               }}
+              isCoarsePointer={isCoarsePointer}
             />
           ))
         )}

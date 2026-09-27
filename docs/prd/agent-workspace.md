@@ -8,7 +8,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 
 - 在当前项目启动 Shell、Codex 或 Claude。
 - 恢复、Fork、重命名、归档或删除 Codex Session。
-- 查看、搜索、删除当前项目的 Claude 会话，在终端中恢复或 Fork，在聊天中打开或 Fork。
+- 查看、搜索、重命名、归档和删除当前项目的 Claude 会话，在终端中恢复或 Fork，在聊天中打开或 Fork。归档状态存储在 `~/.pi-web/claude-session-meta.json` 中，不写入 Claude 自身的会话文件。
 - 在 Chat 与 Terminal 两种交互界面之间选择。
 - 保留模型、推理强度、权限策略等每个标签的配置。
 - 在运行、审批或失败时获得清晰反馈并可终止任务。
@@ -21,7 +21,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
 - Codex 支持 Chat 和 Terminal Session；Chat 支持模型、推理、服务等级和审批策略。
 - Claude 支持 Chat 和 Terminal Session；Chat 支持模型、权限模式、权限卡片、图片和 Fork。
 - Session 支持新建、恢复、Fork、重命名、归档和删除确认。
-- Terminal 支持停止、重启、删除记录、清理已结束任务和重连缓冲区；停止终端先发送 SIGTERM/SIGHUP，进程组若在几秒内未退出则发送 SIGKILL，避免忽略信号的进程在记录被删除后成为孤儿进程；服务器关闭时也会等待所有已停止的终端退出（同样最多几秒），超时后强制杀死仍存活的进程组，再退出进程。
+- Terminal 支持停止、重启、删除记录、清理已结束任务和重连缓冲区；停止终端先发送 SIGTERM/SIGHUP，进程组若在几秒内未退出则发送 SIGKILL，避免忽略信号的进程在记录被删除后成为孤儿进程；服务器关闭时也会等待所有已停止的终端退出（同样最多几秒），超时后强制杀死仍存活的进程组，再退出进程；重启一个以恢复（Resume）方式启动的 Claude 或 Codex 终端会使用 `--resume` 继续原会话（仅当终端记录中保留了来源会话 id 时适用）；以 Fork 方式启动的终端重启时不会恢复该来源会话（其来源会话 id 是被 Fork 出来的父会话，恢复会写入父会话），而是像普通新建终端一样重新开始。
 - Codex Terminal 的权限：Safe 用 `--sandbox workspace-write --ask-for-approval untrusted`（执行不受信任的命令前询问）。Codex 0.155 起 CLI 不再接受 `untrusted`（参数和配置都会报错，终端无法启动），这时 Safe 改用 `on-request`，与 Balanced 相同；是否支持看 `codex --help` 是否列出 `untrusted`（结果按可执行文件缓存到它变化）。Codex Chat 走 app-server，仍可用 `untrusted`。
 - Claude Terminal 的权限：Keep CLI confirmations（不加参数，Claude 在终端里询问）、Plan（`--permission-mode plan`，批准计划前只读）、Accept edits（`--permission-mode acceptEdits`，编辑文件不询问，命令仍需确认）、Dangerous bypass（`--dangerously-skip-permissions`）。新建终端和 Claude 会话的 Resume/Fork to Terminal 都可选。Claude Terminal 也接受模型（`--model`）和第一条消息（最后一个参数，以 “-” 开头时前面加 `--`），规则与 Codex 相同。
 - Chat 支持中断运行及处理审批卡片。
@@ -47,10 +47,14 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
   - 编码规则：cwd 中所有非字母数字字符替换为 `-`。超过 200 个字符时，Claude 会截断并加哈希后缀，所以按前 200 个字符匹配目录。
   - 同名的 `<会话 id>/` 目录存放子代理记录和大的工具结果。
 - 实现：`server/agents/claude-sessions.cjs`（读取）和 `claude-sessions-api.cjs`（接口）。
-  - 列表：`GET /api/claude/sessions?cwd=&q=&cursor=&limit=`。
+  - 列表：`GET /api/claude/sessions?cwd=&q=&cursor=&limit=&archived=`，`archived=true` 时只列已归档会话，默认（`false`）只列活跃会话。
+  - 重命名：`POST /api/claude/sessions/:id/rename`，请求体为 `{cwd, name}`；`name` 去除首尾空白后需在 1-120 字符之间，否则返回 400 `invalid_name`。
+  - 归档 / 恢复：`POST /api/claude/sessions/:id/archive`、`POST /api/claude/sessions/:id/unarchive`，请求体为 `{cwd}`。
   - 删除：`POST /api/claude/sessions/:id/delete`，请求体为 `{cwd}`。
   - cwd 必须在授权目录内（与终端相同的检查）。
   - 文件路径不返回给浏览器。
+  - 重命名和归档/恢复只写入 `server/agents/claude-session-meta.cjs` 管理的 `~/.pi-web/claude-session-meta.json` 覆盖层（原子写：先写临时文件再 rename），从不改写 Claude 自己的 `.jsonl` 会话文件——Claude 自身的 schema 和并发写入都不受 pi-web 控制。因此重命名和归档/恢复不做“会话是否正在被写入”的占用检查（与删除不同），随时可以操作；只有删除会真正移除文件，需要该检查。删除会话时一并清除它的覆盖层记录。
+  - 会话列表中标题的优先级变为：覆盖层里的自定义标题 > 用户自定义标题（`/rename`）> Claude 生成的标题 > 第一条消息。
 - 读取方式：会话文件可达几十 MB，服务端是单进程，所以不整读。
   - 头部按 64 KiB 分块读，读到第一条真实用户消息为止，最多读 4 MiB。从中取 cwd、git 分支、创建时间和第一条消息。超过 1 MiB 的单行（如粘贴的图片、大的 hook 输出）直接跳过，不解析。
   - 尾部读最后 256 KiB，取最新的标题。
@@ -81,7 +85,7 @@ TianForge pi 不应把 Codex、Claude 和 Terminal 做成与产品割裂的测�
     - 同目录下有运行中的 Claude 终端（任何启动方式），且它在该会话最后一次修改之前启动。`new`、`fork` 终端写入的会话 id 未知；在任何 Claude 终端里，用户都可以 `/clear` 开始新会话，或 `/resume` 其他会话。
   - 检查与删除在同一个同步步骤中完成，中间不会有新的终端启动。
   - 已知限制：在普通 Shell 终端或 pi-web 之外手动运行的 `claude` 无法检测。删除前请确认它已退出。
-- 接口错误码：400 参数错误，403 目录未授权，404 会话不存在（包括会话文件无法读取），409 会话正在使用，其余 500（只返回通用提示，详情写服务端日志）。
+- 接口错误码：400 参数错误（含重命名的 `invalid_name`），403 目录未授权，404 会话不存在（包括会话文件无法读取），409 会话正在使用（仅删除），其余 500（只返回通用提示，详情写服务端日志）。
 
 ## Codex 聊天运行时
 

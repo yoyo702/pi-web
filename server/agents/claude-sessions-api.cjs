@@ -16,7 +16,7 @@ function withRuntime(session) {
   return result;
 }
 
-const STATUS = { invalid_session: 400, invalid_cwd: 400, invalid_body: 400, forbidden_cwd: 403, not_found: 404, session_busy: 409 };
+const STATUS = { invalid_session: 400, invalid_cwd: 400, invalid_body: 400, invalid_name: 400, forbidden_cwd: 403, not_found: 404, session_busy: 409 };
 function json(res, status, body) { res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify(body)); }
 async function readJson(req) {
   let text;
@@ -43,7 +43,8 @@ function assertNotBusy(session, cwd) {
   if (writer) throw Object.assign(new Error("A running Claude terminal in this workspace may be writing this session. Stop it first."), { code: "session_busy" });
 }
 
-function isPath(pathname) { return pathname === "/api/claude/sessions" || /^\/api\/claude\/sessions\/[^/]+\/delete$/.test(pathname); }
+const ACTION = /^\/api\/claude\/sessions\/[^/]+\/(delete|rename|archive|unarchive)$/;
+function isPath(pathname) { return pathname === "/api/claude/sessions" || ACTION.test(pathname); }
 async function handle(req, res, url) {
   try {
     if (url.pathname === "/api/claude/sessions") {
@@ -51,17 +52,22 @@ async function handle(req, res, url) {
       const { sessions, nextCursor } = catalog.listSessions({
         cwd: requireCwd(url.searchParams.get("cwd")),
         query: url.searchParams.get("q") || "",
+        archived: url.searchParams.get("archived") === "true",
         cursor: url.searchParams.get("cursor") || undefined,
         limit: url.searchParams.get("limit") || 50,
       });
       return json(res, 200, { sessions: sessions.map(withRuntime), nextCursor });
     }
     if (req.method !== "POST") return json(res, 405, { error: "method not allowed" });
-    const id = url.pathname.split("/")[4];
+    const [id, action] = url.pathname.split("/").slice(4);
     const body = await readJson(req);
     const cwd = requireCwd(body.cwd);
+    if (action === "rename") return json(res, 200, { session: withRuntime(catalog.rename(id, cwd, body.name)) });
+    if (action === "archive" || action === "unarchive") return json(res, 200, { session: withRuntime(catalog.setArchived(id, cwd, action === "archive")) });
     // Checked and removed in one synchronous step, so no terminal can start
-    // on this session in between.
+    // on this session in between. Rename/archive above skip this check:
+    // they only touch the sidecar overlay, never Claude's own session file,
+    // so they're safe even while a terminal or Claude Chat is writing it.
     const session = catalog.requireSession(id, cwd);
     assertNotBusy(session, cwd);
     return json(res, 200, { session: withRuntime(catalog.remove(id, cwd)) });

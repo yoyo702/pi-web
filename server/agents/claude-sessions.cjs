@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const readline = require("node:readline");
+const meta = require("./claude-session-meta.cjs");
 
 // Claude Code keeps one JSONL file per session in
 // `<config dir>/projects/<encoded cwd>/<session id>.jsonl`, where the encoded
@@ -124,10 +125,17 @@ function headFor(target, stat) {
   return cachedFor(headCache, target, stat, () => readHead(target));
 }
 
-function sessionAt(target, id, stat) {
+/**
+ * `overrides` is the sidecar's full `meta.getAll()` map, read once by the
+ * caller (a scan of a whole folder, or one `requireSession` lookup) rather
+ * than once per session file — `meta.get(id)` alone would re-read and
+ * re-parse the sidecar on every call.
+ */
+function sessionAt(target, id, stat, overrides) {
   const head = headFor(target, stat);
   const tail = cachedFor(tailCache, target, stat, () => readTail(target, stat.size));
-  const title = tail.custom || head.titles.custom || tail.ai || head.titles.ai || null;
+  const override = overrides[id];
+  const title = override?.title || tail.custom || head.titles.custom || tail.ai || head.titles.ai || null;
   // A file without a prompt is a session that was opened and left, or only
   // holds title records; there is nothing to resume.
   if (!head.firstMessage) return null;
@@ -140,6 +148,7 @@ function sessionAt(target, id, stat) {
     createdAt: head.createdAt,
     updatedAt: stat.mtime.toISOString(),
     size: stat.size,
+    archived: Boolean(override?.archived),
     path: target,
   };
 }
@@ -147,6 +156,7 @@ function sessionAt(target, id, stat) {
 function scan(cwd) {
   const sessions = [];
   const seen = new Set();
+  const overrides = meta.getAll();
   for (const directory of projectDirs(cwd)) {
     let names = [];
     try { names = fs.readdirSync(directory); } catch { continue; }
@@ -158,7 +168,7 @@ function scan(cwd) {
         const stat = fs.statSync(target);
         if (!stat.isFile()) continue;
         seen.add(target);
-        const session = sessionAt(target, id, stat);
+        const session = sessionAt(target, id, stat, overrides);
         // Two folders can share an encoded name (`/a/b-c` and `/a/b/c`).
         if (session && (!session.cwd || session.cwd === cwd)) sessions.push(session);
       } catch { /* skip unreadable or concurrently removed files */ }
@@ -172,7 +182,7 @@ function scan(cwd) {
  * The cursor is an offset. Sessions include the file path; strip it before
  * sending them to the browser.
  */
-function listSessions({ cwd, query, cursor, limit = 50 } = {}) {
+function listSessions({ cwd, query, cursor, limit = 50, archived = false } = {}) {
   if (typeof cwd !== "string" || !path.isAbsolute(cwd)) throw error("invalid_cwd", "A workspace folder is required");
   const { sessions, seen } = scan(cwd);
   // Drop entries of this folder's deleted files; bound the rest.
@@ -183,6 +193,7 @@ function listSessions({ cwd, query, cursor, limit = 50 } = {}) {
   if (headCache.size > 5000) { headCache.clear(); tailCache.clear(); }
   const needle = typeof query === "string" ? query.trim().toLowerCase() : "";
   const matching = sessions
+    .filter((session) => Boolean(session.archived) === Boolean(archived))
     .filter((session) => !needle || `${session.title} ${session.firstMessage || ""} ${session.id}`.toLowerCase().includes(needle))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   const offset = /^\d+$/.test(String(cursor ?? "")) ? Number(cursor) : 0;
@@ -195,13 +206,14 @@ function listSessions({ cwd, query, cursor, limit = 50 } = {}) {
 function requireSession(id, cwd) {
   if (typeof id !== "string" || !SESSION_ID.test(id)) throw error("invalid_session", "Invalid Claude session id");
   if (typeof cwd !== "string" || !path.isAbsolute(cwd)) throw error("invalid_cwd", "A workspace folder is required");
+  const overrides = meta.getAll();
   for (const directory of projectDirs(cwd)) {
     const target = path.join(directory, `${id}.jsonl`);
     let session = null;
     // Filesystem errors carry the file path; they must not reach the browser.
     try {
       const stat = fs.statSync(target);
-      if (stat.isFile()) session = sessionAt(target, id, stat);
+      if (stat.isFile()) session = sessionAt(target, id, stat, overrides);
     } catch { continue; }
     if (session && (!session.cwd || session.cwd === cwd)) return session;
   }
@@ -215,7 +227,27 @@ function remove(id, cwd) {
   fs.rmSync(path.join(path.dirname(session.path), id), { recursive: true, force: true });
   headCache.delete(session.path);
   tailCache.delete(session.path);
+  meta.remove(id);
   return session;
+}
+
+/**
+ * Renames a session via the sidecar overlay (`claude-session-meta.cjs`);
+ * Claude's own `.jsonl` file is never modified. `requireSession` runs twice:
+ * once to confirm the id belongs to `cwd` before touching the sidecar, and
+ * once after to return a fresh session object with the overlay applied,
+ * mirroring `remove`'s validate-then-act shape.
+ */
+function rename(id, cwd, name) {
+  requireSession(id, cwd);
+  const updated = meta.rename(id, name);
+  return { ...requireSession(id, cwd), title: updated.title, archived: Boolean(updated.archived) };
+}
+
+function setArchived(id, cwd, archived) {
+  requireSession(id, cwd);
+  const updated = meta.setArchived(id, Boolean(archived));
+  return { ...requireSession(id, cwd), archived: Boolean(updated.archived) };
 }
 
 // Transcript records for Claude Chat. Tool results, tool inputs and pasted
@@ -416,4 +448,4 @@ function agentTranscript(id, cwd, toolUseId) {
   } finally { fs.closeSync(handle); }
 }
 
-module.exports = { listSessions, requireSession, remove, encodeCwd, sessionFile, readHistory, forkPoint, agentTranscript, compactRecord };
+module.exports = { listSessions, requireSession, remove, rename, setArchived, encodeCwd, sessionFile, readHistory, forkPoint, agentTranscript, compactRecord };

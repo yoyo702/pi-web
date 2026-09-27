@@ -36,7 +36,7 @@ interface ProjectScript { name: string; command: string }
 interface TaskNotice { terminal: TerminalSession; notificationId: string; title: string; summary: string }
 type PendingAction =
   | { kind: "session"; action: "rename" | "archive" | "unarchive" | "delete"; session: CodexSession }
-  | { kind: "claude-session"; session: ClaudeSession }
+  | { kind: "claude-session"; action: "rename" | "archive" | "unarchive" | "delete"; session: ClaudeSession }
   | { kind: "terminal"; action: "stop" | "remove"; terminal: TerminalSession }
   | { kind: "clear"; provider?: TerminalProvider; count: number }
   | { kind: "template"; action: "run" | "delete"; template: TaskTemplate };
@@ -72,6 +72,7 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   const [sessionQuery, setSessionQuery] = useState("");
   const [debouncedSessionQuery, setDebouncedSessionQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [claudeShowArchived, setClaudeShowArchived] = useState(false);
   const [claudeQuery, setClaudeQuery] = useState("");
   const [debouncedClaudeQuery, setDebouncedClaudeQuery] = useState("");
   const [claudeLaunch, setClaudeLaunch] = useState<{ session: ClaudeSession; mode: "resume" | "fork"; permission: ClaudePermissionMode } | null>(null);
@@ -338,13 +339,14 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     enabled: claudeOpen,
     query: debouncedClaudeQuery,
     refreshKey,
+    archived: claudeShowArchived,
     // A Claude terminal or chat turn starting or ending creates or updates a session file.
     changeKey: [...claudeTerminals.map((terminal) => `${terminal.id}:${terminal.state}`), ...claudeChatRuntimes.map((runtime) => `${runtime.sessionId}:${runtime.state === "idle" ? "idle" : "busy"}`)].sort().join(","),
   });
   // A resumed session is shown as its terminal row, like Codex.
   const liveClaudeSessionIds = new Set(claudeTerminals.filter((terminal) => terminal.state === "running" && terminal.launchMode === "resume").map((terminal) => terminal.sourceSessionId).filter(Boolean));
   // Chat state comes from the status stream; the catalog is only re-read on changes.
-  const claudeHistory = claudeCatalog.sessions.filter((session) => !liveClaudeSessionIds.has(session.id)).map((session) => {
+  const claudeHistory = (claudeShowArchived ? claudeCatalog.sessions : claudeCatalog.sessions.filter((session) => !liveClaudeSessionIds.has(session.id))).map((session) => {
     const runtime = claudeChatRuntimes.find((item) => item.sessionId === session.id);
     return runtime ? { ...session, runtime: { owner: "chat" as const, state: runtime.state, connected: Boolean(runtime.connected) } } : status.claudeRuntimes && session.runtime?.owner === "chat" ? { ...session, runtime: null } : session;
   });
@@ -461,25 +463,36 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
   }, [cwd, onOpenClaudeChat]);
 
   const { reload: reloadClaudeSessions } = claudeCatalog;
-  const deleteClaudeSession = useCallback(async (session: ClaudeSession) => {
+  const manageClaudeSession = useCallback(async (session: ClaudeSession, action: "rename" | "archive" | "unarchive" | "delete", requestedName?: string) => {
+    let body: Record<string, string> = { cwd };
+    if (action === "rename") {
+      const name = requestedName?.trim();
+      if (!name || name === session.title) return;
+      body = { ...body, name };
+    }
     setBusyId(session.id);
     setClaudeError(null);
     try {
-      const response = await fetch(`/api/claude/sessions/${encodeURIComponent(session.id)}/delete`, {
+      const response = await fetch(`/api/claude/sessions/${encodeURIComponent(session.id)}/${action}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd }),
+        body: JSON.stringify(body),
       });
       const data = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(data.error || "Unable to delete Claude session");
+      if (!response.ok) throw new Error(data.error || `Unable to ${action} session`);
       await reloadClaudeSessions(true);
-      onCodexSessionChanged?.({ id: session.id, action: "delete" });
+      onCodexSessionChanged?.({ id: session.id, action, name: action === "rename" ? requestedName?.trim() : undefined });
     } catch (cause) {
-      setClaudeError(cause instanceof Error ? cause.message : "Unable to delete Claude session");
+      setClaudeError(cause instanceof Error ? cause.message : `Unable to ${action} session`);
     } finally {
       setBusyId(null);
     }
   }, [cwd, reloadClaudeSessions, onCodexSessionChanged]);
+
+  const requestClaudeSessionAction = useCallback((session: ClaudeSession, action: "rename" | "archive" | "unarchive" | "delete") => {
+    setRenameValue(session.title);
+    setPendingAction({ kind: "claude-session", action, session });
+  }, []);
 
   const stopTerminal = useCallback(async (terminal: TerminalSession) => {
     setActionError(null);
@@ -632,13 +645,14 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
     const pending = pendingAction;
     if (!pending) return;
     if (pending.kind === "session" && pending.action === "rename" && (!renameValue.trim() || renameValue.trim() === pending.session.name)) return;
+    if (pending.kind === "claude-session" && pending.action === "rename" && (!renameValue.trim() || renameValue.trim() === pending.session.title)) return;
     setPendingAction(null);
     if (pending.kind === "session") void manageSession(pending.session, pending.action, renameValue);
-    else if (pending.kind === "claude-session") void deleteClaudeSession(pending.session);
+    else if (pending.kind === "claude-session") void manageClaudeSession(pending.session, pending.action, renameValue);
     else if (pending.kind === "terminal") void (pending.action === "stop" ? stopTerminal(pending.terminal) : removeTerminalRecord(pending.terminal));
     else if (pending.kind === "template") void (pending.action === "run" ? runTemplate(pending.template) : deleteTemplate(pending.template));
     else void clearEndedTerminalRecords(pending.provider);
-  }, [clearEndedTerminalRecords, deleteClaudeSession, deleteTemplate, manageSession, pendingAction, removeTerminalRecord, renameValue, runTemplate, stopTerminal]);
+  }, [clearEndedTerminalRecords, manageClaudeSession, deleteTemplate, manageSession, pendingAction, removeTerminalRecord, renameValue, runTemplate, stopTerminal]);
 
   const requestSessionAction = useCallback((session: CodexSession, action: "rename" | "archive" | "unarchive" | "delete") => {
     setRenameValue(session.name);
@@ -770,20 +784,24 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
             <input value={claudeQuery} onChange={(event) => setClaudeQuery(event.target.value)} placeholder="Search sessions" aria-label="Search Claude sessions" style={searchInputStyle} />
             {claudeQuery && <button type="button" onClick={() => setClaudeQuery("")} aria-label="Clear Claude session search" title="Clear" style={searchClearStyle}>×</button>}
           </label>
+          <div style={sessionFilterStyle}>
+            <button type="button" onClick={() => setClaudeShowArchived(false)} aria-pressed={!claudeShowArchived} style={{ ...filterButtonStyle, ...(!claudeShowArchived ? filterButtonActiveStyle : {}) }}>Active</button>
+            <button type="button" onClick={() => setClaudeShowArchived(true)} aria-pressed={claudeShowArchived} style={{ ...filterButtonStyle, ...(claudeShowArchived ? filterButtonActiveStyle : {}) }}>Archived</button>
+          </div>
         </div>
         {claudeError && !claudeLaunch && <div role="alert" style={errorStyle}>{claudeError}</div>}
-        {claudeTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "claude", count: claudeTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
-        {claudeTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} preferredLabel={claudeCatalog.sessions.find((session) => session.id === terminal.sourceSessionId && terminal.launchMode === "resume")?.title} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
+        {!claudeShowArchived && claudeTerminals.some((terminal) => terminal.state !== "running") && <button type="button" onClick={() => setPendingAction({ kind: "clear", provider: "claude", count: claudeTerminals.filter((terminal) => terminal.state !== "running").length })} style={clearEndedStyle}>Clear ended terminals</button>}
+        {!claudeShowArchived && claudeTerminals.map((terminal) => <TerminalRow key={terminal.id} terminal={terminal} preferredLabel={claudeCatalog.sessions.find((session) => session.id === terminal.sourceSessionId && terminal.launchMode === "resume")?.title} onOpen={onOpenTerminal} onStop={(item) => setPendingAction({ kind: "terminal", action: "stop", terminal: item })} onRemove={(item) => setPendingAction({ kind: "terminal", action: "remove", terminal: item })} />)}
         {claudeCatalog.loading && claudeCatalog.sessions.length === 0 ? <InlineMessage>Loading sessions…</InlineMessage>
           : claudeCatalog.error ? <button type="button" onClick={() => void claudeCatalog.reload()} style={retryStyle}>Couldn&apos;t load sessions · Retry</button>
-            : claudeHistory.length === 0 && claudeTerminals.length === 0 ? <InlineMessage>{claudeQuery ? "No matching sessions" : "No Claude sessions in this folder"}</InlineMessage>
+            : claudeHistory.length === 0 && (claudeShowArchived || claudeTerminals.length === 0) ? <InlineMessage>{claudeQuery ? "No matching sessions" : `No ${claudeShowArchived ? "archived" : "active"} Claude sessions`}</InlineMessage>
               : claudeHistory.map((session) => <div key={session.id} style={sessionContainerStyle}>
                 <button
                   type="button"
                   disabled={busyId === session.id}
-                  style={{ ...sessionMainStyle, cursor: "pointer" }}
+                  style={{ ...sessionMainStyle, cursor: claudeShowArchived ? "default" : "pointer" }}
                   title={[session.title, session.firstMessage !== session.title && session.firstMessage, session.gitBranch && `Branch: ${session.gitBranch}`, session.id].filter(Boolean).join("\n")}
-                  onClick={() => openClaudeSession(session)}
+                  onClick={() => { if (!claudeShowArchived) openClaudeSession(session); }}
                 >
                   <StatusDot state={session.runtime?.owner === "chat" ? session.runtime.state : "idle"} />
                   <span style={{ minWidth: 0, flex: 1 }}>
@@ -793,12 +811,16 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
                   <span style={timeStyle}>{busyId === session.id ? "…" : formatRelativeTime(session.updatedAt)}</span>
                 </button>
                 <ActionMenu label={`Manage ${session.title}`}>
-                  {onOpenClaudeChat && <MenuButton onClick={() => onOpenClaudeChat({ sessionId: session.id, sessionName: session.title, cwd })}>Open in Chat</MenuButton>}
-                  {onForkClaudeChat && <MenuButton onClick={() => onForkClaudeChat({ sessionId: session.id, sessionName: session.title, cwd })}>Fork to Chat</MenuButton>}
-                  <MenuButton onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "resume", permission: "confirm" }); }}>Resume in Terminal…</MenuButton>
-                  <MenuButton onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "fork", permission: "confirm" }); }}>Fork to Terminal…</MenuButton>
-                  <span style={menuDividerStyle} />
-                  <MenuButton danger onClick={() => setPendingAction({ kind: "claude-session", session })}>Delete…</MenuButton>
+                  {!claudeShowArchived && <>
+                    {onOpenClaudeChat && <MenuButton onClick={() => onOpenClaudeChat({ sessionId: session.id, sessionName: session.title, cwd })}>Open in Chat</MenuButton>}
+                    {onForkClaudeChat && <MenuButton onClick={() => onForkClaudeChat({ sessionId: session.id, sessionName: session.title, cwd })}>Fork to Chat</MenuButton>}
+                    <MenuButton onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "resume", permission: "confirm" }); }}>Resume in Terminal…</MenuButton>
+                    <MenuButton onClick={() => { setClaudeError(null); setClaudeLaunch({ session, mode: "fork", permission: "confirm" }); }}>Fork to Terminal…</MenuButton>
+                    <span style={menuDividerStyle} />
+                  </>}
+                  <MenuButton onClick={() => requestClaudeSessionAction(session, "rename")}>Rename</MenuButton>
+                  {claudeShowArchived ? <MenuButton onClick={() => requestClaudeSessionAction(session, "unarchive")}>Restore</MenuButton> : <MenuButton onClick={() => requestClaudeSessionAction(session, "archive")}>Archive</MenuButton>}
+                  <MenuButton danger onClick={() => requestClaudeSessionAction(session, "delete")}>Delete…</MenuButton>
                 </ActionMenu>
               </div>)}
         {!claudeCatalog.loading && !claudeCatalog.error && claudeCatalog.nextCursor && <button type="button" disabled={claudeCatalog.loadingMore} onClick={() => void claudeCatalog.loadMore()} style={retryStyle}>{claudeCatalog.loadingMore ? "Loading…" : claudeCatalog.loadMoreError ? "Couldn't load more · Retry" : "Load more sessions"}</button>}
@@ -846,10 +868,13 @@ export function AgentsPanel({ cwd, refreshKey, style, onExpandedChange, onNewAge
 }
 
 function AgentActionDialog({ action, renameValue, busy, onRenameChange, onCancel, onConfirm }: { action: PendingAction; renameValue: string; busy: boolean; onRenameChange: (value: string) => void; onCancel: () => void; onConfirm: () => void }) {
-  const rename = action.kind === "session" && action.action === "rename";
-  const destructive = action.kind === "session" && action.action === "delete" || action.kind === "claude-session" || action.kind === "terminal" || action.kind === "clear" || action.kind === "template";
+  const rename = (action.kind === "session" || action.kind === "claude-session") && action.action === "rename";
+  const destructive = action.kind === "session" ? action.action === "delete"
+    : action.kind === "claude-session" ? action.action === "delete"
+      : action.kind === "terminal" || action.kind === "clear" || action.kind === "template";
   const { title, description, confirmLabel } = actionDialogText(action);
-  const confirmDisabled = busy || rename && (!renameValue.trim() || renameValue.trim() === action.session.name);
+  const currentName = action.kind === "session" ? action.session.name : action.kind === "claude-session" ? action.session.title : "";
+  const confirmDisabled = busy || rename && (!renameValue.trim() || renameValue.trim() === currentName);
   return <ConfirmDialog title={title} description={description} confirmLabel={confirmLabel} destructive={destructive} busy={busy} confirmDisabled={confirmDisabled} onCancel={onCancel} onConfirm={onConfirm}>
     {rename && <input autoFocus value={renameValue} maxLength={120} onChange={(event) => onRenameChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !confirmDisabled) onConfirm(); }} style={{ ...inputStyle, marginTop: 14 }} />}
   </ConfirmDialog>;
@@ -864,8 +889,13 @@ function actionDialogText(action: PendingAction): { title: string; description: 
       if (action.action === "unarchive") return { title: "Restore Codex session", description: `“${name}” will return to the active session list.`, confirmLabel: "Restore" };
       return { title: "Delete Codex session", description: `“${name}” will be permanently deleted. This cannot be undone.`, confirmLabel: "Remove" };
     }
-    case "claude-session":
-      return { title: "Delete Claude session", description: `“${action.session.title}” and its sub-agent transcripts will be permanently deleted. This cannot be undone.`, confirmLabel: "Remove" };
+    case "claude-session": {
+      const title = action.session.title;
+      if (action.action === "rename") return { title: "Rename Claude session", description: "Choose a name that identifies this session.", confirmLabel: "Rename" };
+      if (action.action === "archive") return { title: "Archive Claude session", description: `“${title}” will move out of the active session list.`, confirmLabel: "Archive" };
+      if (action.action === "unarchive") return { title: "Restore Claude session", description: `“${title}” will return to the active session list.`, confirmLabel: "Restore" };
+      return { title: "Delete Claude session", description: `“${title}” and its sub-agent transcripts will be permanently deleted. This cannot be undone.`, confirmLabel: "Remove" };
+    }
     case "terminal":
       return action.action === "stop"
         ? { title: `Stop ${action.terminal.provider} terminal`, description: "The running process will be interrupted. Its session history will remain available.", confirmLabel: "Stop terminal" }

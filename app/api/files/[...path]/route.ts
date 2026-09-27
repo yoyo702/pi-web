@@ -25,8 +25,9 @@ import {
   parseUploadConflictStrategy,
   validateUploadFileNames,
 } from "@/lib/file-upload";
-import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
+import { parseFormDataWithinLimit, parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { errorResponse } from "@/lib/http-error";
+import { decodeUtf8Text, isBinaryFile, isUtf8File, truncateToUtf8Boundary } from "@/lib/file-binary";
 
 // These are hidden from directory listings by default because they are usually
 // generated or dependency-heavy. `hideHidden=1` controls this whole default
@@ -46,6 +47,7 @@ const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024;
 // Multipart boundaries and headers are not file bytes, but must be bounded too.
 const MAX_UPLOAD_REQUEST_BYTES = MAX_UPLOAD_TOTAL_BYTES + 1024 * 1024;
+const MAX_FILE_WRITE_BYTES = 1024 * 1024;
 
 const EXT_TO_LANGUAGE: Record<string, string> = {
   ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
@@ -120,6 +122,46 @@ async function getUploadDirectory(segments: string[]): Promise<
   return { directory: realDirectory };
 }
 
+async function getWritableFilePath(segments: string[]): Promise<
+  { filePath: string } | { response: NextResponse }
+> {
+  const filePath = filePathFromSegments(segments);
+  const allowedRoots = await getAllowedFileRoots();
+  if (!isFilePathAllowed(filePath, allowedRoots)) {
+    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
+  }
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return { response: NextResponse.json({ error: "Not found" }, { status: 404 }) };
+  }
+  if (!stat.isFile()) {
+    return { response: NextResponse.json({ error: "Not a file" }, { status: 400 }) };
+  }
+  if (!isExistingFilePathAllowed(filePath, allowedRoots)) {
+    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
+  }
+
+  // A file can be a symlink. Resolve both sides before writing so a
+  // symlink inside an allowed root cannot redirect the write outside it.
+  const realFilePath = fs.realpathSync(filePath);
+  const realRoots = new Set<string>();
+  for (const root of allowedRoots) {
+    try {
+      realRoots.add(fs.realpathSync(root));
+    } catch {
+      // Ignore stale session roots that no longer exist.
+    }
+  }
+  if (!isFilePathAllowed(realFilePath, realRoots)) {
+    return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
+  }
+
+  return { filePath: realFilePath };
+}
+
 function parseUploadFileNames(value: unknown): string[] | null {
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) return null;
   return value;
@@ -131,10 +173,83 @@ export async function POST(
 ) {
   try {
     const { path: segments } = await params;
+    const type = request.nextUrl.searchParams.get("type") ?? "upload";
+
+    if (type === "write") {
+      const writable = await getWritableFilePath(segments);
+      if ("response" in writable) return writable.response;
+      const { filePath } = writable;
+
+      let body: { content?: unknown; mtimeMs?: unknown; size?: unknown } | null;
+      try {
+        body = await parseJsonWithinLimit(request, MAX_FILE_WRITE_BYTES) as typeof body;
+      } catch (error) {
+        if (error instanceof RequestBodyTooLargeError) {
+          return NextResponse.json({ error: "Files edited here must be 1MB or less" }, { status: 413 });
+        }
+        body = null;
+      }
+      if (!body || typeof body.content !== "string") {
+        return NextResponse.json({ error: "content must be a string" }, { status: 400 });
+      }
+      if (typeof body.mtimeMs !== "number") {
+        return NextResponse.json({ error: "mtimeMs must be a number" }, { status: 400 });
+      }
+      if (isBinaryFile(filePath)) {
+        return NextResponse.json({ error: "Binary files cannot be edited here" }, { status: 400 });
+      }
+      // A stale client could still hold a lossy U+FFFD decoding of a
+      // non-UTF-8 file; saving it would destroy every non-ASCII character.
+      if (!isUtf8File(filePath)) {
+        return NextResponse.json({ error: "Only UTF-8 text files can be edited here" }, { status: 400 });
+      }
+
+      const currentStat = fs.statSync(filePath);
+      // Size is checked too: coarse-mtime filesystems and mtime-preserving
+      // tools can change a file without changing its mtimeMs.
+      if (body.mtimeMs !== currentStat.mtimeMs || (typeof body.size === "number" && body.size !== currentStat.size)) {
+        return NextResponse.json({
+          error: "This file changed on disk since it was loaded. Reload it to see the latest version before saving.",
+        }, { status: 409 });
+      }
+
+      // Write to a temp file in the same directory, then rename over the
+      // target, so a concurrent reader never observes a partially-written
+      // file. The temp file copies the original's mode bits.
+      const tempPath = path.join(
+        path.dirname(filePath),
+        `.${path.basename(filePath)}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+      );
+      try {
+        // "wx" fails instead of silently overwriting if the temp path somehow
+        // already exists (it shouldn't, given the pid/timestamp/random suffix,
+        // but the flag makes that guarantee explicit rather than assumed).
+        // Creating it with the target's mode means a 0600 file's contents are
+        // never readable under the default umask mode, even briefly.
+        const mode = currentStat.mode & 0o777;
+        fs.writeFileSync(tempPath, body.content, { encoding: "utf-8", flag: "wx", mode });
+        try {
+          // The umask can strip bits from the creation mode; restore them exactly.
+          fs.chmodSync(tempPath, mode);
+        } catch {
+          // Some filesystems (e.g. certain network mounts) don't support mode bits.
+        }
+        fs.renameSync(tempPath, filePath);
+      } catch (error) {
+        try {
+          fs.unlinkSync(tempPath);
+        } catch {
+          // Best-effort cleanup; the write itself already failed.
+        }
+        throw error;
+      }
+      const nextStat = fs.statSync(filePath);
+      return NextResponse.json({ size: nextStat.size, mtimeMs: nextStat.mtimeMs });
+    }
+
     const uploadDirectory = await getUploadDirectory(segments);
     if ("response" in uploadDirectory) return uploadDirectory.response;
     const { directory } = uploadDirectory;
-    const type = request.nextUrl.searchParams.get("type") ?? "upload";
 
     if (type === "upload-check") {
       const body = await request.json().catch(() => null) as { fileNames?: unknown } | null;
@@ -503,12 +618,51 @@ export async function GET(
       if (documentMime) {
         return streamFile(filePath, stat, documentMime, request.headers.get("range"));
       }
-      if (stat.size > TEXT_PREVIEW_MAX_BYTES) {
-        return NextResponse.json({ error: "File too large for preview (>256KB)" }, { status: 413 });
+      if (isBinaryFile(filePath)) {
+        return NextResponse.json({ binary: true, size: stat.size, mtimeMs: stat.mtimeMs, language: getLanguage(filePath) });
       }
-      const content = fs.readFileSync(filePath, "utf-8");
+      const truncateRequested = request.nextUrl.searchParams.get("truncate") === "1";
+      if (stat.size > TEXT_PREVIEW_MAX_BYTES && !truncateRequested) {
+        return NextResponse.json({
+          error: "File too large for preview (>256KB)",
+          size: stat.size,
+          canTruncate: true,
+        }, { status: 413 });
+      }
+      let bytes: Buffer;
+      let truncated = false;
+      if (stat.size > TEXT_PREVIEW_MAX_BYTES) {
+        const fd = fs.openSync(filePath, "r");
+        try {
+          const buffer = Buffer.alloc(TEXT_PREVIEW_MAX_BYTES);
+          const bytesRead = fs.readSync(fd, buffer, 0, TEXT_PREVIEW_MAX_BYTES, 0);
+          bytes = buffer.subarray(0, truncateToUtf8Boundary(buffer, bytesRead));
+        } finally {
+          fs.closeSync(fd);
+        }
+        truncated = true;
+      } else {
+        bytes = fs.readFileSync(filePath);
+      }
+      const { text: content, validUtf8 } = decodeUtf8Text(bytes);
+      // Editing is limited to whole, valid UTF-8 files the write route will accept.
+      const notEditableReason = !validUtf8
+        ? "Not UTF-8 text"
+        : truncated
+          ? "Only the first 256 KB is loaded"
+          : allowedBySessionReference
+            ? "Outside the workspace (opened from a chat reference)"
+            : null;
       const language = getLanguage(filePath);
-      return NextResponse.json({ content, language, size: stat.size });
+      return NextResponse.json({
+        content,
+        language,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        truncated,
+        editable: notEditableReason === null,
+        ...(notEditableReason ? { notEditableReason } : {}),
+      });
     }
 
     if (type === "download") {

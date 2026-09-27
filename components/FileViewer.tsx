@@ -33,12 +33,27 @@ interface Props {
   onOpenFile?: (filePath: string) => void;
   onMentionLines?: (relativePath: string, startLine: number, endLine: number) => void;
   gitRefreshKey?: number;
+  onDirtyChange?: (filePath: string, dirty: boolean) => void;
+}
+
+// Textareas normalize CRLF/CR line endings to LF as soon as the DOM's .value
+// getter is read, so draft content is always LF-only. Comparisons against the
+// last-loaded (possibly CRLF) file content must normalize the same way, or
+// every CRLF file would look permanently dirty.
+function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n/g, "\n");
 }
 
 interface FileData {
   content: string;
   language: string;
   size: number;
+  mtimeMs: number;
+  binary?: boolean;
+  truncated?: boolean;
+  /** False when the server won't accept a save (not UTF-8, truncated, outside the workspace). */
+  editable?: boolean;
+  notEditableReason?: string;
 }
 
 type DisplayMode = "source" | "preview" | "diff";
@@ -194,7 +209,7 @@ function SourceCodeRenderer({ rows, stylesheet, useInlineStyles, wrapLines }: So
 
 function getFileApiUrl(
   filePath: string,
-  type: "read" | "download" | "meta" | "preview" | "watch",
+  type: "read" | "write" | "download" | "meta" | "preview" | "watch",
   sourceSessionId?: string | null,
   params: Record<string, string | number | undefined> = {},
 ): string {
@@ -778,7 +793,7 @@ function DocumentViewer({ filePath, cwd, sourceSessionId }: Props) {
   );
 }
 
-export function FileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, gitRefreshKey }: Props) {
+export function FileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, gitRefreshKey, onDirtyChange }: Props) {
   if (isImagePath(filePath)) {
     return <ImageViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} />;
   }
@@ -788,15 +803,17 @@ export function FileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMenti
   if (isDocumentPreviewPath(filePath)) {
     return <DocumentViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} />;
   }
-  return <TextFileViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} onOpenFile={onOpenFile} onMentionLines={onMentionLines} gitRefreshKey={gitRefreshKey} />;
+  return <TextFileViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} onOpenFile={onOpenFile} onMentionLines={onMentionLines} gitRefreshKey={gitRefreshKey} onDirtyChange={onDirtyChange} />;
 }
 
-function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, gitRefreshKey }: Props) {
+function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, gitRefreshKey, onDirtyChange }: Props) {
   const { isDark } = useTheme();
   const [data, setData] = useState<FileData | null>(null);
   const [gitDiff, setGitDiff] = useState<GitFileDiffResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [oversized, setOversized] = useState<{ size: number } | null>(null);
+  const [truncating, setTruncating] = useState(false);
   const [displayMode, setDisplayMode] = useState<DisplayMode>("source");
   const [wrapLines, setWrapLines] = useState(false);
   const [watching, setWatching] = useState(false);
@@ -804,24 +821,52 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
   const gitDiffRequestRef = useRef(0);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [selectedLineRange, setSelectedLineRange] = useState<SelectedLineRange | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draftContent, setDraftContent] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [externalChangeWhileEditing, setExternalChangeWhileEditing] = useState(false);
+  const editingRef = useRef(false);
+  editingRef.current = editing;
+  // The line ending the file used on disk when editing started. Restored
+  // before saving, since the textarea normalizes CRLF/CR to LF as you type.
+  const originalLineEndingRef = useRef<"\r\n" | "\n">("\n");
+  // Read through a ref so a chat link that only changes the tab's
+  // sourceSessionId doesn't recreate fetchContent and reset the viewer
+  // (which would throw away an unsaved draft).
+  const sourceSessionIdRef = useRef(sourceSessionId);
+  sourceSessionIdRef.current = sourceSessionId;
 
-  const fetchContent = useCallback((filePath: string) => {
-    return fetch(getFileApiUrl(filePath, "read", sourceSessionId))
-      .then((r) => r.json())
-      .then((d: FileData & { error?: string }) => {
-        if (d.error) {
-          setError(d.error);
+  const fetchContent = useCallback((filePath: string, options: { truncate?: boolean } = {}) => {
+    return fetch(getFileApiUrl(filePath, "read", sourceSessionIdRef.current, options.truncate ? { truncate: 1 } : {}))
+      .then(async (r) => {
+        const raw = await r.json() as Partial<FileData> & { error?: string; canTruncate?: boolean; size?: number };
+        if (!r.ok) {
+          setError(raw.error ?? `Failed to load file (${r.status})`);
+          setOversized(raw.canTruncate ? { size: raw.size ?? 0 } : null);
           return null;
         }
+        const next: FileData = {
+          content: raw.content ?? "",
+          language: raw.language ?? "text",
+          size: raw.size ?? 0,
+          mtimeMs: raw.mtimeMs ?? 0,
+          binary: raw.binary,
+          truncated: raw.truncated,
+          editable: raw.editable,
+          notEditableReason: raw.notEditableReason,
+        };
         setError(null);
-        setData(d);
-        return d;
+        setOversized(null);
+        setData(next);
+        return next;
       })
       .catch((e) => {
         setError(String(e));
+        setOversized(null);
         return null;
       });
-  }, [sourceSessionId]);
+  }, []);
 
   const fetchGitDiff = useCallback(async (targetPath: string) => {
     const requestId = ++gitDiffRequestRef.current;
@@ -841,26 +886,108 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     }
   }, [cwd]);
 
-  // Initial load + SSE watch setup
+  const startEditing = useCallback(() => {
+    if (!data || data.binary || data.truncated || data.editable === false) return;
+    // Preview and Diff don't show the editor; editing always happens in Source.
+    setDisplayMode("source");
+    originalLineEndingRef.current = data.content.includes("\r\n") ? "\r\n" : "\n";
+    setDraftContent(normalizeLineEndings(data.content));
+    setSaveError(null);
+    setExternalChangeWhileEditing(false);
+    setEditing(true);
+  }, [data]);
+
+  const cancelEditing = useCallback(() => {
+    setEditing(false);
+    setSaveError(null);
+    // The view was left stale while editing masked an external change
+    // notification (see the SSE "change" handler below) — catch it up now.
+    if (externalChangeWhileEditing) {
+      setExternalChangeWhileEditing(false);
+      void fetchContent(filePath);
+    }
+  }, [externalChangeWhileEditing, fetchContent, filePath]);
+
+  const saveEdits = useCallback(async () => {
+    if (!data) return;
+    setSaving(true);
+    setSaveError(null);
+    const contentToSave = originalLineEndingRef.current === "\r\n" ? draftContent.replace(/\n/g, "\r\n") : draftContent;
+    try {
+      const response = await fetch(getFileApiUrl(filePath, "write", sourceSessionId), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: contentToSave, mtimeMs: data.mtimeMs, size: data.size }),
+      });
+      const next = await response.json() as { error?: string; size?: number; mtimeMs?: number };
+      if (!response.ok) {
+        setSaveError(next.error ?? `Could not save (${response.status})`);
+        return;
+      }
+      setData({ ...data, content: contentToSave, size: next.size ?? contentToSave.length, mtimeMs: next.mtimeMs ?? data.mtimeMs });
+      setEditing(false);
+      setExternalChangeWhileEditing(false);
+    } catch (e) {
+      setSaveError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }, [data, draftContent, filePath, sourceSessionId]);
+
+  // Unsaved edits should never vanish silently. `dirty` drives two things:
+  // (1) a warning before the browser tab is closed or reloaded, below, and
+  // (2) onDirtyChange, which reports this same flag upward so the workspace
+  // shell (AppShell) can confirm before discarding it — e.g. before switching
+  // to another file/Git tab or closing this file's tab. Both are needed:
+  // side-panel tabs are not kept mounted the way center-workspace tabs are,
+  // so switching away reuses (or unmounts) this component outright.
+  const dirty = editing && data !== null && draftContent !== normalizeLineEndings(data.content);
+
+  useEffect(() => {
+    onDirtyChange?.(filePath, dirty);
+    return () => {
+      onDirtyChange?.(filePath, false);
+    };
+  }, [onDirtyChange, filePath, dirty]);
+
+  useEffect(() => {
+    if (!dirty) return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [dirty]);
+
+  // Initial load; resets the viewer (and any draft) only when the path changes.
   useEffect(() => {
     setLoading(true);
     setError(null);
+    setOversized(null);
+    setTruncating(false);
     setData(null);
     setGitDiff(null);
     setDisplayMode("source");
     setWrapLines(false);
     setWatching(false);
-
-    if (esRef.current) {
-      esRef.current.close();
-      esRef.current = null;
-    }
+    setEditing(false);
+    setDraftContent("");
+    setSaveError(null);
+    setExternalChangeWhileEditing(false);
 
     fetchContent(filePath).then((d) => {
       if (d?.language === "markdown") setDisplayMode("preview");
     }).finally(() => setLoading(false));
+  }, [filePath, fetchContent]);
 
-    // Set up SSE watch
+  // SSE watch. Kept separate from the load/reset effect above: re-subscribing
+  // with a new sourceSessionId must not reset the viewer or the draft.
+  useEffect(() => {
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
+    }
     const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
     esRef.current = es;
 
@@ -869,6 +996,10 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     });
 
     es.addEventListener("change", () => {
+      if (editingRef.current) {
+        setExternalChangeWhileEditing(true);
+        return;
+      }
       void fetchContent(filePath);
       void fetchGitDiff(filePath);
     });
@@ -1012,7 +1143,48 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     );
   }
 
+  if (oversized) {
+    return (
+      <div style={{ height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, padding: 24, color: "var(--text-muted)", fontSize: 13, textAlign: "center" }}>
+        <div>This file is {formatSize(oversized.size)}, over the 256 KB preview limit.</div>
+        <button
+          type="button"
+          disabled={truncating}
+          onClick={() => {
+            setTruncating(true);
+            void fetchContent(filePath, { truncate: true }).finally(() => setTruncating(false));
+          }}
+          style={{ border: "1px solid var(--border)", borderRadius: 4, padding: "6px 14px", fontSize: 12, fontWeight: 600, cursor: truncating ? "default" : "pointer", background: "var(--bg-panel)", color: "var(--accent)", opacity: truncating ? 0.6 : 1 }}
+        >
+          {truncating ? "Loading…" : "Show first 256 KB"}
+        </button>
+      </div>
+    );
+  }
+
   if (!data) return null;
+
+  if (data.binary) {
+    return (
+      <div className="file-viewer-shell" style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
+        <div
+          className="file-viewer-toolbar"
+          style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 12px", borderBottom: "1px solid var(--border)", fontSize: 11, color: "var(--text-dim)", background: "var(--bg)", flexShrink: 0 }}
+        >
+          <span className="file-viewer-path" style={{ fontFamily: "var(--font-mono)" }} title={filePath}>
+            {getRelativeFilePath(filePath, cwd)}
+          </span>
+          <span className="file-viewer-meta">{formatSize(data.size)}</span>
+          <div className="file-viewer-controls">
+            <DownloadLink filePath={filePath} sourceSessionId={sourceSessionId} />
+          </div>
+        </div>
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", fontSize: 13 }}>
+          Binary file — preview isn&apos;t available. Use Download to save a copy.
+        </div>
+      </div>
+    );
+  }
 
   const isHtml = data.language === "html";
   const isMarkdown = data.language === "markdown";
@@ -1047,6 +1219,16 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
         </span>
 
         <span className="file-viewer-meta" title={metadata}>{metadata}</span>
+        {data.truncated && (
+          <span style={{ color: "#d6a84b" }} title="Only the first 256 KB is shown. Editing is disabled for truncated files.">
+            Truncated
+          </span>
+        )}
+        {!data.truncated && data.editable === false && (
+          <span data-testid="file-read-only-reason" style={{ color: "#d6a84b" }} title={`Editing is disabled: ${data.notEditableReason ?? "this file can't be saved here"}`}>
+            Read-only{data.notEditableReason ? ` · ${data.notEditableReason}` : ""}
+          </span>
+        )}
         <span
           title={watching ? "Live sync active" : "Not watching"}
           aria-label={watching ? "Live sync active" : "Not watching"}
@@ -1067,7 +1249,8 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
                     key={mode}
                     type="button"
                     onClick={() => setDisplayMode(mode)}
-                    title={mode === "diff" ? "Compare working tree with HEAD" : undefined}
+                    disabled={editing && mode !== "source"}
+                    title={editing && mode !== "source" ? "Save or cancel your edits to switch views" : mode === "diff" ? "Compare working tree with HEAD" : undefined}
                     aria-pressed={active}
                     className="file-viewer-mode-button"
                     style={{
@@ -1117,15 +1300,89 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
                 </button>
               </>
             )}
+            {!data.binary && !data.truncated && (
+              editing ? (
+                <>
+                  <button type="button" onClick={() => void saveEdits()} disabled={saving} title="Save changes" aria-label="Save changes" className="file-viewer-icon-button">
+                    {saving ? "Saving…" : "Save"}
+                  </button>
+                  <button type="button" onClick={cancelEditing} disabled={saving} title="Discard edits" aria-label="Discard edits" className="file-viewer-icon-button">
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={startEditing}
+                  disabled={data.editable === false}
+                  title={data.editable === false ? `Editing is disabled: ${data.notEditableReason ?? "this file can't be saved here"}` : "Edit file"}
+                  aria-label="Edit file"
+                  className="file-viewer-icon-button"
+                >
+                  Edit
+                </button>
+              )
+            )}
           </div>
 
           <DownloadLink filePath={filePath} sourceSessionId={sourceSessionId} />
         </div>
       </div>
 
+      {saveError && (
+        <div role="alert" style={{ padding: "6px 12px", color: "#f87171", fontSize: 11.5, borderBottom: "1px solid var(--border)" }}>
+          {saveError}
+          {saveError.includes("changed on disk") && (
+            <button
+              type="button"
+              onClick={() => {
+                if (!window.confirm("Discard your unsaved changes and reload the file from disk?")) return;
+                setSaveError(null);
+                setExternalChangeWhileEditing(false);
+                void fetchContent(filePath).then((d) => {
+                  if (!d) return;
+                  originalLineEndingRef.current = d.content.includes("\r\n") ? "\r\n" : "\n";
+                  setDraftContent(normalizeLineEndings(d.content));
+                });
+              }}
+              style={{ marginLeft: 8, textDecoration: "underline", background: "none", border: "none", color: "inherit", cursor: "pointer", font: "inherit" }}
+            >
+              Reload
+            </button>
+          )}
+        </div>
+      )}
+      {externalChangeWhileEditing && (
+        <div role="status" style={{ padding: "6px 12px", color: "var(--text-dim)", fontSize: 11.5, borderBottom: "1px solid var(--border)" }}>
+          This file changed on disk while you were editing. Saving will be refused unless you reload first.
+        </div>
+      )}
+
       {/* Content area */}
       <div ref={contentRef} className="file-viewer-content" style={{ flex: 1, overflow: "auto", background: "var(--bg)" }}>
-        {displayMode === "diff" && hasGitDiff ? (
+        {editing ? (
+          <textarea
+            value={draftContent}
+            onChange={(event) => setDraftContent(event.target.value)}
+            readOnly={saving}
+            spellCheck={false}
+            aria-label={`Edit ${getRelativeFilePath(filePath, cwd)}`}
+            style={{
+              width: "100%",
+              height: "100%",
+              border: "none",
+              outline: "none",
+              resize: "none",
+              boxSizing: "border-box",
+              padding: "8px 12px",
+              background: "var(--bg)",
+              color: "var(--text)",
+              fontFamily: "var(--font-mono)",
+              fontSize: 13,
+              lineHeight: 1.6,
+            }}
+          />
+        ) : displayMode === "diff" && hasGitDiff ? (
           <DiffView patch={gitDiff.patch!} />
         ) : isHtml && displayMode === "preview" ? (
           <iframe

@@ -4,9 +4,9 @@ import os from "os";
 import path from "path";
 import { TEXT_PREVIEW_MAX_BYTES } from "./file-types";
 import { DISCARD_STASH_MESSAGE } from "./git-discard";
-import { runGit, gitCommandTimeout, gitFailureMessage } from "./git-exec";
+import { runGit, gitCommandTimeout, gitFailureMessage, isGitTimeout } from "./git-exec";
 import { buildPartialPatch, parsePatch, selectedAddedContent } from "./git-partial-patch";
-import { conflict, badRequest } from "./http-error";
+import { conflict, badRequest, HttpError } from "./http-error";
 import type {
   GitBranch,
   GitBranchesResponse,
@@ -29,14 +29,24 @@ import {
 const GIT_STATUS_MAX_BUFFER = 8 * 1024 * 1024;
 const COMMIT_MESSAGE_DIFF_MAX_CHARS = 50_000;
 
+/** A git failure with a displayable message; `timedOut` is set when git was killed by its timeout. */
+class GitCommandError extends Error {
+  constructor(message: string, readonly timedOut: boolean) {
+    super(message);
+    this.name = "GitCommandError";
+  }
+}
+
 async function git(cwd: string, args: string[], maxBuffer = GIT_STATUS_MAX_BUFFER): Promise<string> {
   const timeout = gitCommandTimeout(args);
   try {
     return await runGit(args, { cwd, timeout, maxBuffer });
   } catch (error) {
-    throw new Error(gitFailureMessage(error, args, timeout));
+    throw new GitCommandError(gitFailureMessage(error, args, timeout), isGitTimeout(error));
   }
 }
+
+const gitTimedOut = (error: unknown) => error instanceof GitCommandError && error.timedOut;
 
 async function findRepositoryRoot(cwd: string): Promise<string | null> {
   try {
@@ -152,16 +162,28 @@ export async function syncGitRemote(cwd: string, action: GitRemoteAction): Promi
   } else {
     if (!upstream?.upstream) throw new Error("The current branch has no upstream remote branch configured");
     if (action === "pull") {
-      const changes = await readStatusEntries(repositoryRoot);
-      if (changes.length > 0) {
-        throw new Error("Pull is blocked because the worktree has uncommitted changes. Commit, stash, or discard them first.");
+      try {
+        await git(repositoryRoot, ["pull", "--ff-only"]);
+      } catch (error) {
+        throw pullFailure(error);
       }
-      await git(repositoryRoot, ["pull", "--ff-only"]);
     } else {
       await git(repositoryRoot, ["push"]);
     }
   }
   return getGitStatus(cwd);
+}
+
+/**
+ * Only a local-state refusal (diverged history, or files pull would
+ * overwrite) is a conflict the user resolves; remote/auth/network failures
+ * are upstream errors (502) and a timeout is a 504.
+ */
+function pullFailure(error: unknown): HttpError {
+  const message = error instanceof Error ? error.message : String(error);
+  if (gitTimedOut(error)) return new HttpError(504, message);
+  if (/not possible to fast-forward|diverg|would be overwritten/i.test(message)) return conflict(message);
+  return new HttpError(502, message);
 }
 
 export type StagedDiffForCommitMessage = {
@@ -675,6 +697,52 @@ export async function commitChanges(
   if (options.amend) args.push("--amend");
   args.push("-m", trimmed);
   await git(repositoryRoot, args);
+  return getGitStatus(cwd);
+}
+
+const OPERATION_MARKERS = ["REVERT_HEAD", "CHERRY_PICK_HEAD", "MERGE_HEAD", "rebase-merge", "rebase-apply"];
+
+/** Paths of in-progress operation markers; `--git-path` resolves them correctly in linked worktrees. */
+async function operationMarkerPaths(repositoryRoot: string): Promise<string[]> {
+  const output = await git(repositoryRoot, ["rev-parse", ...OPERATION_MARKERS.flatMap((marker) => ["--git-path", marker])]);
+  return output.split(/\r?\n/).filter(Boolean).map((marker) => path.resolve(repositoryRoot, marker));
+}
+
+async function gitOperationInProgress(repositoryRoot: string): Promise<boolean> {
+  return (await operationMarkerPaths(repositoryRoot)).some((marker) => fs.existsSync(marker));
+}
+
+export async function revertCommit(cwd: string, hash: string): Promise<GitStatusResponse> {
+  const repositoryRoot = await requireRepositoryRoot(cwd);
+  if (!/^[0-9a-fA-F]{4,40}$/.test(hash)) throw badRequest("Invalid commit hash");
+  let parents: string[];
+  try {
+    parents = (await git(repositoryRoot, ["rev-list", "--parents", "-n", "1", hash, "--"])).trim().split(/\s+/).slice(1);
+  } catch {
+    throw badRequest(`Unknown commit ${hash}`);
+  }
+  if (parents.length > 1) throw badRequest("Reverting merge commits is not supported");
+  // Never touch a revert/cherry-pick/merge/rebase the user already has in progress.
+  if (await gitOperationInProgress(repositoryRoot)) throw conflict("Another git operation is in progress");
+  try {
+    await git(repositoryRoot, ["revert", "--no-edit", hash]);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (gitTimedOut(error)) {
+      // The revert commit may already exist (slow post-commit hook); aborting could discard it.
+      throw new HttpError(504, `${message}. Check the repository state with git before retrying.`);
+    }
+    // No operation was in progress before, so any REVERT_HEAD now was started by this call.
+    const revertHead = (await operationMarkerPaths(repositoryRoot))[0];
+    if (fs.existsSync(revertHead)) {
+      try {
+        await git(repositoryRoot, ["revert", "--abort"]);
+      } catch {
+        // The abort itself failed — the outer error below still surfaces.
+      }
+    }
+    throw conflict(`Could not revert this commit cleanly: ${message.split("\n")[0]}. Resolve conflicts manually with git, or choose a different commit.`);
+  }
   return getGitStatus(cwd);
 }
 

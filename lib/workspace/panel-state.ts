@@ -42,7 +42,8 @@ export type CenterAction =
   | { type: "remove"; id: string }
   | { type: "removeWhere"; predicate: (tab: CenterTab) => boolean }
   | { type: "update"; update: (tab: CenterTab) => CenterTab }
-  | { type: "setSplit"; split: TerminalSplit | null | ((current: TerminalSplit | null) => TerminalSplit | null) };
+  | { type: "setSplit"; split: TerminalSplit | null | ((current: TerminalSplit | null) => TerminalSplit | null) }
+  | { type: "reorder"; id: string; beforeId: string | null };
 
 function mount(state: CenterState): CenterState {
   return state.mountedIds.includes(state.activeId) ? state : { ...state, mountedIds: [...state.mountedIds, state.activeId] };
@@ -106,6 +107,19 @@ export function centerReducer(state: CenterState, action: CenterAction): CenterS
     case "setSplit": {
       const split = typeof action.split === "function" ? action.split(state.split) : action.split;
       return split === state.split ? state : { ...state, split };
+    }
+    case "reorder": {
+      if (action.id === PI_TAB.id || action.id === action.beforeId) return state;
+      const from = state.tabs.findIndex((tab) => tab.id === action.id);
+      if (from < 0) return state;
+      const moved = state.tabs[from];
+      const withoutMoved = state.tabs.filter((tab) => tab.id !== action.id);
+      const toIndex = action.beforeId ? withoutMoved.findIndex((tab) => tab.id === action.beforeId) : withoutMoved.length;
+      if (toIndex < 0) return state;
+      // The pinned Pi tab always stays first; nothing can land before it.
+      const insertAt = Math.max(toIndex, withoutMoved[0]?.id === PI_TAB.id ? 1 : 0);
+      const tabs = [...withoutMoved.slice(0, insertAt), moved, ...withoutMoved.slice(insertAt)];
+      return { ...state, tabs };
     }
   }
 }

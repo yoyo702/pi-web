@@ -13,6 +13,7 @@ export interface ClaudeSession {
   createdAt: string | null;
   updatedAt: string;
   size: number;
+  archived: boolean;
   /** Set while a terminal resumes (writes) this session or Claude Chat runs it. */
   runtime: { owner: "terminal"; state: "running"; terminalId: string } | { owner: "chat"; state: "idle" | "running" | "approval"; connected: boolean } | null;
 }
@@ -27,7 +28,7 @@ const MAX_PAGE = 200;
  * 30 s while visible and whenever `changeKey` changes (a Claude terminal
  * started or ended).
  */
-export function useClaudeSessions(cwd: string, { enabled, query, changeKey, refreshKey }: { enabled: boolean; query: string; changeKey: string; refreshKey?: number }) {
+export function useClaudeSessions(cwd: string, { enabled, query, changeKey, refreshKey, archived }: { enabled: boolean; query: string; changeKey: string; refreshKey?: number; archived?: boolean }) {
   const [sessions, setSessions] = useState<ClaudeSession[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -38,13 +39,13 @@ export function useClaudeSessions(cwd: string, { enabled, query, changeKey, refr
   const loadedRef = useRef(0);
 
   const fetchPage = useCallback(async (cursor: number, limit: number) => {
-    const params = new URLSearchParams({ cwd, limit: String(limit), cursor: String(cursor) });
+    const params = new URLSearchParams({ cwd, limit: String(limit), cursor: String(cursor), archived: String(Boolean(archived)) });
     if (query) params.set("q", query);
     const response = await fetch(`/api/claude/sessions?${params}`, { cache: "no-store" });
     if (!response.ok) throw new Error("Unable to load Claude sessions");
     const data = await response.json() as { sessions?: ClaudeSession[]; nextCursor?: string | null };
     return { page: data.sessions ?? [], cursor: data.nextCursor ?? null };
-  }, [cwd, query]);
+  }, [cwd, query, archived]);
 
   // A refresh re-reads the rows already shown (the cursor is an offset), in
   // pages of up to 200. Only the latest request applies its result; a newer
@@ -107,7 +108,7 @@ export function useClaudeSessions(cwd: string, { enabled, query, changeKey, refr
     setNextCursor(null);
     setError(false);
     setLoadMoreError(false);
-  }, [cwd, query]);
+  }, [cwd, query, archived]);
 
   useEffect(() => {
     if (!enabled || !cwd) return;

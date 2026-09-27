@@ -57,6 +57,7 @@ export interface TerminalSession {
   bufferTruncated: boolean;
   history: string[];
   activity?: TerminalActivity | null;
+  projectRoot?: string;
 }
 
 export class TerminalRequestError extends Error {

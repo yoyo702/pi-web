@@ -21,6 +21,8 @@ import { discardConfirmMessage } from "@/lib/git-discard";
 import { DiffView } from "./FileViewer";
 import { GitLineDiffView } from "./GitLineDiffView";
 import { PrecommitChecks } from "./PrecommitChecks";
+import { ArrowLeft } from "lucide-react";
+import { useIsMobile } from "@/hooks/useIsMobile";
 
 type PanelTab = "changes" | "branch" | "history";
 
@@ -40,6 +42,12 @@ interface GitRepositoryEntry {
 
 function selectedRepositoryStorageKey(workspaceCwd: string): string {
   return `pi-web:git-repository:${encodeURIComponent(workspaceCwd)}`;
+}
+
+/** Per-repository draft key; null for a missing repository so drafts never land on a shared key. */
+export function commitDraftStorageKey(repositoryCwd: string | null | undefined): string | null {
+  const repository = repositoryCwd?.trim();
+  return repository ? `pi-web:git-commit-draft:${encodeURIComponent(repository)}` : null;
 }
 
 const TABS: Array<{ key: PanelTab; label: string }> = [
@@ -159,6 +167,7 @@ function useSplit(storageKey: string, defaultSize: number, min: number, max: num
 export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: string | null; refreshKey?: number; onRepoChanged?: () => void }) {
   const [tab, setTab] = useState<PanelTab>("changes");
   const changesSplit = useSplit("pi-git-changes-split", 240, 150, 520);
+  const isMobile = useIsMobile();
   const [nonce, setNonce] = useState(0);
   const [status, setStatus] = useState<GitStatusResponse | null>(null);
   const [selected, setSelected] = useState<SelectedChange | null>(null);
@@ -175,6 +184,9 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
   const [generatingCommitMessage, setGeneratingCommitMessage] = useState(false);
   const [generationNotice, setGenerationNotice] = useState<string | null>(null);
   const [commitMessage, setCommitMessage] = useState("");
+  const [amend, setAmend] = useState(false);
+  const [amendTarget, setAmendTarget] = useState<{ shortHash: string; subject: string } | null>(null);
+  const [draftRepository, setDraftRepository] = useState<string | null>(null);
   const [repositories, setRepositories] = useState<GitRepositoryEntry[]>([]);
   const [selectedRepositoryPath, setSelectedRepositoryPath] = useState<string | null>(null);
   const [repositoriesLoading, setRepositoriesLoading] = useState(false);
@@ -214,6 +226,42 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
     if (!cwd || !selectedRepositoryPath) return;
     try { localStorage.setItem(selectedRepositoryStorageKey(cwd), selectedRepositoryPath); } catch { /* storage can be unavailable */ }
   }, [cwd, selectedRepositoryPath]);
+
+  useEffect(() => {
+    setAmend(false);
+    setDraftRepository(repositoryCwd);
+    const key = commitDraftStorageKey(repositoryCwd);
+    let draft = "";
+    if (key) {
+      try { draft = localStorage.getItem(key) ?? ""; } catch { /* storage can be unavailable */ }
+    }
+    setCommitMessage(draft);
+  }, [repositoryCwd]);
+
+  useEffect(() => {
+    // Skip the render where the repository changed but the previous repository's message is still in state.
+    const key = draftRepository === repositoryCwd ? commitDraftStorageKey(repositoryCwd) : null;
+    if (!key) return;
+    try {
+      if (commitMessage) localStorage.setItem(key, commitMessage);
+      else localStorage.removeItem(key);
+    } catch { /* storage can be unavailable */ }
+  }, [commitMessage, draftRepository, repositoryCwd]);
+
+  useEffect(() => {
+    setAmendTarget(null);
+    if (!amend || !repositoryCwd) return;
+    const controller = new AbortController();
+    void fetch(`/api/git/log?${new URLSearchParams({ cwd: repositoryCwd, limit: "1" })}`, { signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json() as GitLogResponse & { error?: string };
+        if (!response.ok) return;
+        const head = data.commits?.[0];
+        if (head) setAmendTarget({ shortHash: head.shortHash, subject: head.subject });
+      })
+      .catch(() => { /* the label simply stays without the commit summary */ });
+    return () => controller.abort();
+  }, [amend, repositoryCwd, status]);
 
   const loadStatus = useCallback(async () => {
     if (!repositoryCwd) {
@@ -322,11 +370,12 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
   const commit = useCallback(async () => {
     const message = commitMessage.trim();
     if (!message) return;
-    if (await runWrite("/api/git/commit", { message })) {
+    if (await runWrite("/api/git/commit", { message, amend })) {
       setCommitMessage("");
+      setAmend(false);
       setGenerationNotice(null);
     }
-  }, [commitMessage, runWrite]);
+  }, [amend, commitMessage, runWrite]);
   const generateCommitMessage = useCallback(async () => {
     if (!repositoryCwd || generatingCommitMessage) return;
     setGeneratingCommitMessage(true);
@@ -382,9 +431,9 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
             <button
               type="button"
               onClick={() => void syncRemote("pull")}
-              disabled={busy || !showAheadBehind || (status?.files.length ?? 0) > 0}
-              title={!showAheadBehind ? "Current branch has no upstream" : (status?.files.length ? "Commit, stash, or discard local changes before pulling" : "Pull using fast-forward only")}
-              style={{ ...syncButtonStyle, opacity: busy || !showAheadBehind || (status?.files.length ?? 0) > 0 ? 0.5 : 1 }}
+              disabled={busy || !showAheadBehind}
+              title={!showAheadBehind ? "Current branch has no upstream" : "Pull using fast-forward only"}
+              style={{ ...syncButtonStyle, opacity: busy || !showAheadBehind ? 0.5 : 1 }}
             >↓ Pull</button>
             <button
               type="button"
@@ -466,92 +515,105 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
       ) : status && !status.isGitRepository ? (
         <EmptyState title="This folder is not a Git repository" detail={repositoryCwd ?? cwd} />
       ) : tab === "history" ? (
-        <HistoryView cwd={repositoryCwd!} refreshToken={refreshKey + nonce} />
+        <HistoryView cwd={repositoryCwd!} refreshToken={refreshKey + nonce} onChanged={refresh} />
       ) : tab === "branch" ? (
         <BranchView cwd={repositoryCwd!} refreshToken={refreshKey + nonce} onChanged={refresh} hasUncommittedChanges={(status?.files.length ?? 0) > 0} />
       ) : !status ? (
         <EmptyState title="Loading Git changes…" />
       ) : (
         <div style={{ minHeight: 0, flex: 1, display: "flex", flexDirection: "column" }}>
-          <div style={{ minHeight: 0, flex: 1, display: "flex" }}>
-            <aside style={{ width: changesSplit.size, flexShrink: 0, overflow: "auto", borderRight: "1px solid var(--border)", padding: "8px 6px" }}>
-              {GROUPS.map((group) => {
-                const files = grouped.get(group.key) ?? [];
-                if (files.length === 0) return null;
-                const paths = files.map((file) => file.filePath);
-                const staged = group.key === "staged";
-                return (
-                  <section key={group.key} style={{ marginBottom: 12 }}>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 8px" }}>
-                      <span style={{ color: "var(--text-muted)", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em" }}>
-                        {group.label} <span style={{ color: "var(--text-dim)" }}>{files.length}</span>
-                      </span>
-                      <span style={{ display: "flex", gap: 2 }}>
-                        {staged ? (
-                          <button type="button" onClick={() => unstage(paths)} disabled={busy} title="Unstage every file in this group" style={writeButtonStyle}>−</button>
-                        ) : (
-                          <>
-                            <button type="button" onClick={() => stage(paths)} disabled={busy} title="Stage every file in this group for the next commit" style={writeButtonStyle}>+</button>
-                            <button type="button" onClick={() => discard(files)} disabled={busy} title="Discard every file in this group (saved as a Git stash)" style={writeButtonStyle}>⨯</button>
-                          </>
-                        )}
-                      </span>
+          <div style={{ minHeight: 0, flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row" }}>
+            {(!isMobile || !selected) && (
+              <aside style={{ width: isMobile ? "100%" : changesSplit.size, flexShrink: isMobile ? undefined : 0, flex: isMobile ? 1 : undefined, minHeight: isMobile ? 0 : undefined, overflow: "auto", borderRight: isMobile ? "none" : "1px solid var(--border)", borderBottom: isMobile ? "1px solid var(--border)" : "none", padding: "8px 6px" }}>
+                {GROUPS.map((group) => {
+                  const files = grouped.get(group.key) ?? [];
+                  if (files.length === 0) return null;
+                  const paths = files.map((file) => file.filePath);
+                  const staged = group.key === "staged";
+                  return (
+                    <section key={group.key} style={{ marginBottom: 12 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "5px 8px" }}>
+                        <span style={{ color: "var(--text-muted)", fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".04em" }}>
+                          {group.label} <span style={{ color: "var(--text-dim)" }}>{files.length}</span>
+                        </span>
+                        <span style={{ display: "flex", gap: 2 }}>
+                          {staged ? (
+                            <button type="button" onClick={() => unstage(paths)} disabled={busy} title="Unstage every file in this group" style={writeButtonStyle}>−</button>
+                          ) : (
+                            <>
+                              <button type="button" onClick={() => stage(paths)} disabled={busy} title="Stage every file in this group for the next commit" style={writeButtonStyle}>+</button>
+                              <button type="button" onClick={() => discard(files)} disabled={busy} title="Discard every file in this group (saved as a Git stash)" style={writeButtonStyle}>⨯</button>
+                            </>
+                          )}
+                        </span>
+                      </div>
+                      {files.map((file) => {
+                        const isSelected = selected?.file.filePath === file.filePath && selected.scope === group.scope;
+                        return (
+                          <div key={`${group.key}:${file.filePath}`} style={{ display: "flex", alignItems: "center", borderRadius: 4, background: isSelected ? "var(--bg-selected)" : "transparent", minWidth: 0 }}>
+                            <button type="button" onClick={() => setSelected({ file, scope: group.scope })} title={`View diff: ${file.filePath}`} style={{ ...fileButtonStyle, background: "transparent", flex: 1 }}>
+                              <span style={{ width: 14, flexShrink: 0, fontFamily: "var(--font-mono)", fontWeight: 700, color: STATUS_COLORS[file.status] }}>{statusLetter(file, group.scope)}</span>
+                              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{getRelativeFilePath(file.filePath, repoRoot)}</span>
+                            </button>
+                            <span style={{ display: "flex", gap: 2, flexShrink: 0, paddingRight: 4 }}>
+                              {staged ? (
+                                <button type="button" onClick={() => unstage([file.filePath])} disabled={busy} title="Remove this file from the next commit" style={writeButtonStyle}>−</button>
+                              ) : (
+                                <>
+                                  <button type="button" onClick={() => stage([file.filePath])} disabled={busy} title="Add this file to the next commit" style={writeButtonStyle}>+</button>
+                                  <button type="button" onClick={() => discard([file])} disabled={busy} title="Discard this file's changes (saved as a Git stash)" style={writeButtonStyle}>⨯</button>
+                                </>
+                              )}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </section>
+                  );
+                })}
+                {status.files.length === 0 && <div style={{ padding: 14, color: "var(--text-dim)", fontSize: 12 }}>Working tree clean</div>}
+              </aside>
+            )}
+            {!isMobile && <div className="resize-handle" onMouseDown={changesSplit.onDragStart} role="separator" aria-orientation="vertical" title="Drag to resize" />}
+            {(!isMobile || selected) && (
+              <main style={{ minWidth: 0, flex: 1, overflow: "auto" }}>
+                {isMobile && selected && (
+                  <button
+                    type="button"
+                    onClick={() => setSelected(null)}
+                    style={{ display: "flex", alignItems: "center", gap: 6, margin: 8, padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text)", cursor: "pointer", fontSize: 12 }}
+                  >
+                    <ArrowLeft size={14} />Back to changes
+                  </button>
+                )}
+                {!selected ? (
+                  <EmptyState title={status.files.length ? "Select a changed file" : "No uncommitted changes"} detail={status.files.length ? "Choose a file from the change list to inspect its diff." : "Changes made by you or the agent will appear here."} />
+                ) : loadingDiff ? (
+                  <EmptyState title="Loading diff…" />
+                ) : diff?.supported && diff.patch ? (
+                  <div>
+                    <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)" }}>
+                      {getFileName(selected.file.filePath)}
                     </div>
-                    {files.map((file) => {
-                      const isSelected = selected?.file.filePath === file.filePath && selected.scope === group.scope;
-                      return (
-                        <div key={`${group.key}:${file.filePath}`} style={{ display: "flex", alignItems: "center", borderRadius: 4, background: isSelected ? "var(--bg-selected)" : "transparent", minWidth: 0 }}>
-                          <button type="button" onClick={() => setSelected({ file, scope: group.scope })} title={`View diff: ${file.filePath}`} style={{ ...fileButtonStyle, background: "transparent", flex: 1 }}>
-                            <span style={{ width: 14, flexShrink: 0, fontFamily: "var(--font-mono)", fontWeight: 700, color: STATUS_COLORS[file.status] }}>{statusLetter(file, group.scope)}</span>
-                            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{getRelativeFilePath(file.filePath, repoRoot)}</span>
-                          </button>
-                          <span style={{ display: "flex", gap: 2, flexShrink: 0, paddingRight: 4 }}>
-                            {staged ? (
-                              <button type="button" onClick={() => unstage([file.filePath])} disabled={busy} title="Remove this file from the next commit" style={writeButtonStyle}>−</button>
-                            ) : (
-                              <>
-                                <button type="button" onClick={() => stage([file.filePath])} disabled={busy} title="Add this file to the next commit" style={writeButtonStyle}>+</button>
-                                <button type="button" onClick={() => discard([file])} disabled={busy} title="Discard this file's changes (saved as a Git stash)" style={writeButtonStyle}>⨯</button>
-                              </>
-                            )}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </section>
-                );
-              })}
-              {status.files.length === 0 && <div style={{ padding: 14, color: "var(--text-dim)", fontSize: 12 }}>Working tree clean</div>}
-            </aside>
-            <div className="resize-handle" onMouseDown={changesSplit.onDragStart} role="separator" aria-orientation="vertical" title="Drag to resize" />
-            <main style={{ minWidth: 0, flex: 1, overflow: "auto" }}>
-              {!selected ? (
-                <EmptyState title={status.files.length ? "Select a changed file" : "No uncommitted changes"} detail={status.files.length ? "Choose a file from the change list to inspect its diff." : "Changes made by you or the agent will appear here."} />
-              ) : loadingDiff ? (
-                <EmptyState title="Loading diff…" />
-              ) : diff?.supported && diff.patch ? (
-                <div>
-                  <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-muted)" }}>
-                    {getFileName(selected.file.filePath)}
+                    {diff.fingerprint ? (
+                      <GitLineDiffView key={diff.fingerprint} patch={diff.patch} scope={selected.scope} fileLabel={getFileName(selected.file.filePath)} busy={busy} onApply={applyLines} />
+                    ) : (
+                      <DiffView patch={diff.patch} />
+                    )}
                   </div>
-                  {diff.fingerprint ? (
-                    <GitLineDiffView key={diff.fingerprint} patch={diff.patch} scope={selected.scope} fileLabel={getFileName(selected.file.filePath)} busy={busy} onApply={applyLines} />
-                  ) : (
-                    <DiffView patch={diff.patch} />
-                  )}
-                </div>
-              ) : diffError ? (
-                <EmptyState title="Could not load diff" detail={diffError} action={() => {
-                  // Force the effect to treat this as a fresh load (shows
-                  // "Loading diff…" and clears the stale error) instead of
-                  // silently retrying in the background.
-                  loadedDiffKey.current = null;
-                  setDiffNonce((n) => n + 1);
-                }} />
-              ) : (
-                <EmptyState title="Diff unavailable" detail="This file may be binary, too large, or unchanged in this review group." />
-              )}
-            </main>
+                ) : diffError ? (
+                  <EmptyState title="Could not load diff" detail={diffError} action={() => {
+                    // Force the effect to treat this as a fresh load (shows
+                    // "Loading diff…" and clears the stale error) instead of
+                    // silently retrying in the background.
+                    loadedDiffKey.current = null;
+                    setDiffNonce((n) => n + 1);
+                  }} />
+                ) : (
+                  <EmptyState title="Diff unavailable" detail="This file may be binary, too large, or unchanged in this review group." />
+                )}
+              </main>
+            )}
           </div>
           <div style={{ flexShrink: 0, borderTop: "1px solid var(--border)", padding: "8px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
             <PrecommitChecks
@@ -573,6 +635,15 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
               style={{ width: "100%", resize: "vertical", boxSizing: "border-box", padding: "6px 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 4, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 12 }}
             />
             {generationNotice && <div style={{ color: "var(--text-dim)", fontSize: 11 }}>{generationNotice}</div>}
+            <label style={{ display: "flex", alignItems: "center", gap: 5, color: "var(--text-dim)", fontSize: 11 }}>
+              <input type="checkbox" checked={amend} onChange={(event) => setAmend(event.target.checked)} aria-label="Amend previous commit" />
+              Amend previous commit
+              {amend && amendTarget && (
+                <span data-testid="amend-target" title={`${amendTarget.shortHash} ${amendTarget.subject}`} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  : <code style={{ fontFamily: "var(--font-mono)" }}>{amendTarget.shortHash}</code> {amendTarget.subject}
+                </span>
+              )}
+            </label>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
               <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{grouped.get("staged")?.length ?? 0} staged</span>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -589,11 +660,11 @@ export function GitReviewPanel({ cwd, refreshKey = 0, onRepoChanged }: { cwd: st
                 <button
                   type="button"
                   onClick={() => void commit()}
-                  title="Create a commit from all staged changes"
-                  disabled={busy || generatingCommitMessage || !commitMessage.trim() || (grouped.get("staged")?.length ?? 0) === 0}
-                  style={{ border: "1px solid var(--border)", borderRadius: 4, padding: "5px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", background: "var(--bg-panel)", color: "var(--accent)", opacity: busy || generatingCommitMessage || !commitMessage.trim() || (grouped.get("staged")?.length ?? 0) === 0 ? 0.5 : 1 }}
+                  title={amend ? "Amend the previous commit with this message" : "Create a commit from all staged changes"}
+                  disabled={busy || generatingCommitMessage || !commitMessage.trim() || (!amend && (grouped.get("staged")?.length ?? 0) === 0)}
+                  style={{ border: "1px solid var(--border)", borderRadius: 4, padding: "5px 14px", fontSize: 12, fontWeight: 600, cursor: "pointer", background: "var(--bg-panel)", color: "var(--accent)", opacity: busy || generatingCommitMessage || !commitMessage.trim() || (!amend && (grouped.get("staged")?.length ?? 0) === 0) ? 0.5 : 1 }}
                 >
-                  Commit
+                  {amend ? "Amend" : "Commit"}
                 </button>
               </div>
             </div>
@@ -921,8 +992,9 @@ function segPath(s: GraphSeg): string {
   return `M${x1} ${y1}C${x1} ${my},${x2} ${my},${x2} ${y2}`;
 }
 
-function HistoryView({ cwd, refreshToken }: { cwd: string; refreshToken: number }) {
+function HistoryView({ cwd, refreshToken, onChanged }: { cwd: string; refreshToken: number; onChanged: () => void }) {
   const split = useSplit("pi-git-history-split", 300, 180, 620);
+  const isMobile = useIsMobile();
   const [log, setLog] = useState<GitLogResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -966,9 +1038,10 @@ function HistoryView({ cwd, refreshToken }: { cwd: string; refreshToken: number 
       } else {
         logRef.current = next;
         setLog(next);
-        setSelectedHash((prev) => prev && next.commits.some((commit) => commit.hash === prev)
-          ? prev
-          : next.commits[0]?.hash ?? null);
+        setSelectedHash((prev) => {
+          if (prev && next.commits.some((commit) => commit.hash === prev)) return prev;
+          return isMobile ? null : next.commits[0]?.hash ?? null;
+        });
       }
     } catch (cause) {
       if (generation !== generationRef.current) return;
@@ -981,7 +1054,7 @@ function HistoryView({ cwd, refreshToken }: { cwd: string; refreshToken: number 
         else setLoading(false);
       }
     }
-  }, [cwd]);
+  }, [cwd, isMobile]);
 
   const initialLoadRef = useRef(load);
   initialLoadRef.current = load;
@@ -994,78 +1067,94 @@ function HistoryView({ cwd, refreshToken }: { cwd: string; refreshToken: number 
   if (log.commits.length === 0) return <EmptyState title="No commits yet" detail="This repository has no history." />;
 
   return (
-    <div style={{ minHeight: 0, flex: 1, display: "flex" }}>
-      <aside style={{ width: split.size, flexShrink: 0, overflow: "auto", borderRight: "1px solid var(--border)", padding: "6px 4px" }}>
-        {log.commits.map((commit, index) => {
-          const isSelected = commit.hash === selectedHash;
-          const row = graph.rows[index];
-          if (!row) return null;
-          const nodeX = row.nodeCol * GRAPH_COL_W + GRAPH_COL_W / 2;
-          const refs = commit.refs.filter((r) => r && r !== "HEAD");
-          return (
-            <button
-              key={commit.hash}
-              type="button"
-              onClick={() => setSelectedHash(commit.hash)}
-              title={`View commit: ${commit.subject}`}
-              style={{
-                width: "100%",
-                height: GRAPH_ROW_H,
-                display: "flex",
-                gap: 6,
-                alignItems: "stretch",
-                border: "none",
-                borderRadius: 4,
-                padding: "0 8px 0 2px",
-                cursor: "pointer",
-                textAlign: "left",
-                color: "var(--text)",
-                background: isSelected ? "var(--bg-selected)" : "transparent",
-                minWidth: 0,
-              }}
-            >
-              <svg width={graph.width * GRAPH_COL_W} height={GRAPH_ROW_H} style={{ flexShrink: 0, display: "block" }} aria-hidden="true">
-                {row.segs.map((s, i) => (
-                  <path key={i} d={segPath(s)} stroke={s.color} strokeWidth={1.6} fill="none" opacity={0.9} />
-                ))}
-                {isSelected && <circle cx={nodeX} cy={GRAPH_ROW_H / 2} r={6} fill="none" stroke="var(--accent)" strokeWidth={1.5} />}
-                <circle cx={nodeX} cy={GRAPH_ROW_H / 2} r={row.isMerge ? 4 : 3.4} fill={row.nodeColor} stroke="var(--bg-panel)" strokeWidth={1.6} />
-              </svg>
-              <span style={{ minWidth: 0, flex: 1, alignSelf: "center" }}>
-                <span style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
-                  {refs.slice(0, 2).map((r) => (
-                    <span key={r} style={{ flexShrink: 0, fontSize: 9.5, lineHeight: "14px", padding: "0 5px", borderRadius: 8, background: "var(--bg-hover)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 96 }}>{r.replace(/^tag: /, "⌘ ")}</span>
+    <div style={{ minHeight: 0, flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row" }}>
+      {(!isMobile || !selectedHash) && (
+        <aside style={{ width: isMobile ? "100%" : split.size, flexShrink: isMobile ? undefined : 0, flex: isMobile ? 1 : undefined, minHeight: isMobile ? 0 : undefined, overflow: "auto", borderRight: isMobile ? "none" : "1px solid var(--border)", borderBottom: isMobile ? "1px solid var(--border)" : "none", padding: "6px 4px" }}>
+          {log.commits.map((commit, index) => {
+            const isSelected = commit.hash === selectedHash;
+            const row = graph.rows[index];
+            if (!row) return null;
+            const nodeX = row.nodeCol * GRAPH_COL_W + GRAPH_COL_W / 2;
+            const refs = commit.refs.filter((r) => r && r !== "HEAD");
+            return (
+              <button
+                key={commit.hash}
+                type="button"
+                onClick={() => setSelectedHash(commit.hash)}
+                title={`View commit: ${commit.subject}`}
+                style={{
+                  width: "100%",
+                  height: GRAPH_ROW_H,
+                  display: "flex",
+                  gap: 6,
+                  alignItems: "stretch",
+                  border: "none",
+                  borderRadius: 4,
+                  padding: "0 8px 0 2px",
+                  cursor: "pointer",
+                  textAlign: "left",
+                  color: "var(--text)",
+                  background: isSelected ? "var(--bg-selected)" : "transparent",
+                  minWidth: 0,
+                }}
+              >
+                <svg width={graph.width * GRAPH_COL_W} height={GRAPH_ROW_H} style={{ flexShrink: 0, display: "block" }} aria-hidden="true">
+                  {row.segs.map((s, i) => (
+                    <path key={i} d={segPath(s)} stroke={s.color} strokeWidth={1.6} fill="none" opacity={0.9} />
                   ))}
-                  <span style={{ minWidth: 0, flex: 1, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{commit.subject}</span>
+                  {isSelected && <circle cx={nodeX} cy={GRAPH_ROW_H / 2} r={6} fill="none" stroke="var(--accent)" strokeWidth={1.5} />}
+                  <circle cx={nodeX} cy={GRAPH_ROW_H / 2} r={row.isMerge ? 4 : 3.4} fill={row.nodeColor} stroke="var(--bg-panel)" strokeWidth={1.6} />
+                </svg>
+                <span style={{ minWidth: 0, flex: 1, alignSelf: "center" }}>
+                  <span style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
+                    {refs.slice(0, 2).map((r) => (
+                      <span key={r} style={{ flexShrink: 0, fontSize: 9.5, lineHeight: "14px", padding: "0 5px", borderRadius: 8, background: "var(--bg-hover)", color: "var(--text-muted)", fontFamily: "var(--font-mono)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 96 }}>{r.replace(/^tag: /, "⌘ ")}</span>
+                    ))}
+                    <span style={{ minWidth: 0, flex: 1, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{commit.subject}</span>
+                  </span>
+                  <span style={{ display: "block", marginTop: 2, color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {commit.shortHash} · {commit.author} · {formatRelative(commit.date)}
+                  </span>
                 </span>
-                <span style={{ display: "block", marginTop: 2, color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {commit.shortHash} · {commit.author} · {formatRelative(commit.date)}
-                </span>
-              </span>
+              </button>
+            );
+          })}
+          {log.hasMore && <button type="button" onClick={() => void load(true)} disabled={loadingMore || loading} style={{ width: "calc(100% - 12px)", height: 30, margin: "6px 6px 2px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)", color: loadMoreError ? "#f87171" : "var(--text-muted)", cursor: loadingMore ? "default" : "pointer", fontSize: 11 }}>{loadingMore ? "Loading more…" : loadMoreError ? "Retry loading more" : `Load more · ${log.commits.length} shown`}</button>}
+          {loadMoreError && <div role="alert" style={{ padding: "2px 8px 7px", color: "#f87171", fontSize: 10, lineHeight: 1.35 }}>{loadMoreError}</div>}
+        </aside>
+      )}
+      {!isMobile && <div className="resize-handle" onMouseDown={split.onDragStart} role="separator" aria-orientation="vertical" title="Drag to resize" />}
+      {(!isMobile || selectedHash) && (
+        <main style={{ minWidth: 0, flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
+          {isMobile && selectedHash && (
+            <button
+              type="button"
+              onClick={() => setSelectedHash(null)}
+              style={{ display: "flex", alignItems: "center", gap: 6, margin: 8, padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text)", cursor: "pointer", fontSize: 12, flexShrink: 0 }}
+            >
+              <ArrowLeft size={14} />Back to history
             </button>
-          );
-        })}
-        {log.hasMore && <button type="button" onClick={() => void load(true)} disabled={loadingMore || loading} style={{ width: "calc(100% - 12px)", height: 30, margin: "6px 6px 2px", border: "1px solid var(--border)", borderRadius: 5, background: "var(--bg-panel)", color: loadMoreError ? "#f87171" : "var(--text-muted)", cursor: loadingMore ? "default" : "pointer", fontSize: 11 }}>{loadingMore ? "Loading more…" : loadMoreError ? "Retry loading more" : `Load more · ${log.commits.length} shown`}</button>}
-        {loadMoreError && <div role="alert" style={{ padding: "2px 8px 7px", color: "#f87171", fontSize: 10, lineHeight: 1.35 }}>{loadMoreError}</div>}
-      </aside>
-      <div className="resize-handle" onMouseDown={split.onDragStart} role="separator" aria-orientation="vertical" title="Drag to resize" />
-      <main style={{ minWidth: 0, flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-        {selectedHash
-          ? <CommitDetailView cwd={cwd} hash={selectedHash} />
-          : <EmptyState title="Select a commit" detail="Choose a commit to inspect its changes." />}
-      </main>
+          )}
+          {selectedHash
+            ? <CommitDetailView cwd={cwd} hash={selectedHash} onChanged={onChanged} />
+            : <EmptyState title="Select a commit" detail="Choose a commit to inspect its changes." />}
+        </main>
+      )}
     </div>
   );
 }
 
-function CommitDetailView({ cwd, hash }: { cwd: string; hash: string }) {
+function CommitDetailView({ cwd, hash, onChanged }: { cwd: string; hash: string; onChanged: () => void }) {
   const split = useSplit("pi-git-commit-files-h", 160, 60, 460, "y");
   const [detail, setDetail] = useState<GitCommitDetail | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [reverting, setReverting] = useState(false);
+  const [revertError, setRevertError] = useState<string | null>(null);
 
   useEffect(() => {
+    setRevertError(null);
     const controller = new AbortController();
     setLoading(true);
     setError(null);
@@ -1086,13 +1175,45 @@ function CommitDetailView({ cwd, hash }: { cwd: string; hash: string }) {
     return () => controller.abort();
   }, [cwd, hash]);
 
+  const revert = useCallback(async () => {
+    if (!window.confirm(`Revert "${detail?.subject ?? hash}"? This creates a new commit that undoes it.`)) return;
+    setReverting(true);
+    setRevertError(null);
+    try {
+      const response = await fetch("/api/git/revert", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, hash }),
+      });
+      const next = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(next.error ?? `Could not revert this commit (${response.status})`);
+      onChanged();
+    } catch (cause) {
+      setRevertError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setReverting(false);
+    }
+  }, [cwd, detail?.subject, hash, onChanged]);
+
   if (error) return <EmptyState title="Unable to load commit" detail={error} />;
   if (!detail || loading) return <EmptyState title="Loading commit…" />;
 
   return (
     <div style={{ minHeight: 0, flex: 1, display: "flex", flexDirection: "column" }}>
       <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
-        <div style={{ fontWeight: 650, fontSize: 13 }}>{detail.subject}</div>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8 }}>
+          <div style={{ fontWeight: 650, fontSize: 13 }}>{detail.subject}</div>
+          <button
+            type="button"
+            onClick={() => void revert()}
+            disabled={reverting}
+            title="Create a new commit that undoes this one"
+            style={{ flexShrink: 0, border: "1px solid var(--border)", borderRadius: 4, padding: "4px 10px", fontSize: 11.5, fontWeight: 600, cursor: "pointer", background: "var(--bg-panel)", color: "var(--text-muted)", opacity: reverting ? 0.5 : 1 }}
+          >
+            {reverting ? "Reverting…" : "Revert commit"}
+          </button>
+        </div>
+        {revertError && <div role="alert" style={{ marginTop: 6, color: "#f87171", fontSize: 11, overflowWrap: "anywhere" }}>{revertError}</div>}
         <div style={{ marginTop: 4, color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
           {detail.shortHash} · {detail.author} · {formatDate(detail.date)}
         </div>

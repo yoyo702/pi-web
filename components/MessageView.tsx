@@ -1,6 +1,7 @@
 "use client";
 
 import { memo, useState, useRef, useEffect, useMemo } from "react";
+import { useCoarsePointer } from "@/hooks/useIsMobile";
 import { MarkdownBody } from "./MarkdownBody";
 import { copyText } from "@/lib/clipboard";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
@@ -171,7 +172,10 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   onEditContent?: (content: string) => void;
 }) {
   const [hovered, setHovered] = useState(false);
+  const [focusWithin, setFocusWithin] = useState(false);
   const [copied, setCopied] = useState(false);
+  const isCoarsePointer = useCoarsePointer();
+  const visible = hovered || focusWithin || isCoarsePointer;
 
   const content =
     typeof message.content === "string"
@@ -202,6 +206,8 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
       style={{ marginBottom: 16, display: "flex", flexDirection: "column", alignItems: "flex-end" }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocusWithin(true)}
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setFocusWithin(false); }}
     >
       <div style={{ display: "flex", alignItems: "flex-end", gap: 6, maxWidth: "85%" }}>
         <div
@@ -256,11 +262,12 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
         }}>
           <div style={{
             display: "flex", gap: 3,
-            opacity: hovered ? 1 : 0,
-            pointerEvents: hovered ? "auto" : "none",
+            opacity: visible ? 1 : 0,
+            pointerEvents: visible ? "auto" : "none",
             transition: "opacity 0.12s",
           }}>
             <button
+              type="button"
               onClick={copyContent}
               title="Copy message"
               style={{
@@ -293,12 +300,13 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
           {(canFork || canNavigate) && (
             <div style={{
               display: "flex", gap: 3,
-              opacity: (hovered || forking) ? 1 : 0,
-              pointerEvents: (hovered || forking) ? "auto" : "none",
+              opacity: (visible || forking) ? 1 : 0,
+              pointerEvents: (visible || forking) ? "auto" : "none",
               transition: "opacity 0.12s",
             }}>
               {canNavigate && (
                 <button
+                  type="button"
                   onClick={() => { onNavigate!(prevAssistantEntryId!); onEditContent?.(content); }}
                   title="Edit from here — branches within this session"
                   style={{
@@ -324,6 +332,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
               )}
               {canFork && (
                 <button
+                  type="button"
                   onClick={() => { onFork!(entryId!); }}
                   disabled={forking}
                   title={forking ? "Creating new session…" : "New session — creates an independent copy from here"}
@@ -388,7 +397,10 @@ function AssistantMessageView({
     .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
   const blocks = blockItems.map(({ block }) => block);
   const [hovered, setHovered] = useState(false);
+  const [focusWithin, setFocusWithin] = useState(false);
   const [copied, setCopied] = useState(false);
+  const isCoarsePointer = useCoarsePointer();
+  const visible = hovered || focusWithin || isCoarsePointer;
   const streamStartRef = useRef<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
   const blockItemsRef = useRef(blockItems);
@@ -497,6 +509,8 @@ function AssistantMessageView({
       style={{ marginBottom: 16 }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocusWithin(true)}
+      onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node)) setFocusWithin(false); }}
     >
       {/* Model label */}
       <div
@@ -584,6 +598,7 @@ function AssistantMessageView({
         )}
         {textContent && !isStreaming && (
           <button
+            type="button"
             onClick={copyContent}
             title="Copy message"
             style={{
@@ -595,8 +610,8 @@ function AssistantMessageView({
               cursor: "pointer",
               fontSize: 11, fontWeight: 400,
               whiteSpace: "nowrap",
-              opacity: hovered ? 1 : 0,
-              pointerEvents: hovered ? "auto" : "none",
+              opacity: visible ? 1 : 0,
+              pointerEvents: visible ? "auto" : "none",
               transition: "opacity 0.12s, color 0.12s",
             }}
             onMouseEnter={(e) => { if (!copied) e.currentTarget.style.color = "var(--accent)"; }}

@@ -80,6 +80,41 @@ function hasBranch(nodes: SessionTreeNode[]): boolean {
   return false;
 }
 
+// The ids of the rows TreeNodeView actually renders for this subtree (the
+// compress()-representative id at each level, recursing into that
+// representative's children — mirrors TreeNodeView's own compress() calls),
+// plus a map from every id "covered" by a rendered row — its own id, and
+// every chain member's compressedEntryIds/hiddenEntryIds walked over while
+// compressing — back to that row's rep id. This lets an activeLeafId or a
+// stale focusedId that references an id swallowed into a longer compressed
+// chain (not just the chain's terminal/rep node) resolve to the row that
+// actually renders it.
+export function collectVisibleRows(
+  nodes: SessionTreeNode[],
+  acc: string[] = [],
+  repOf: Map<string, string> = new Map()
+): { ids: string[]; repOf: Map<string, string> } {
+  for (const node of nodes) {
+    let current = node;
+    const covered: string[] = [];
+    const addCovered = (n: SessionTreeNode) => {
+      covered.push(n.entry.id);
+      if (n.compressedEntryIds) covered.push(...n.compressedEntryIds);
+      if (n.hiddenEntryIds) covered.push(...n.hiddenEntryIds);
+    };
+    addCovered(current);
+    while (current.children.length === 1) {
+      current = current.children[0];
+      addCovered(current);
+    }
+    const repId = current.entry.id;
+    acc.push(repId);
+    for (const id of covered) repOf.set(id, repId);
+    collectVisibleRows(current.children, acc, repOf);
+  }
+  return { ids: acc, repOf };
+}
+
 interface TreeNodeProps {
   node: SessionTreeNode;
   activePathIds: Set<string>;
@@ -87,9 +122,11 @@ interface TreeNodeProps {
   isLast: boolean;
   parentLines: boolean[]; // whether ancestor at each depth has more siblings after
   onSelect: (id: string) => void;
+  focusedId: string;
+  onFocusRow: (id: string) => void;
 }
 
-function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelect }: TreeNodeProps) {
+function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelect, focusedId, onFocusRow }: TreeNodeProps) {
   const { node: rep, skipped } = compress(node);
   const isActive = activePathIds.has(rep.entry.id);
   const isOnPath = activePathIds.has(node.entry.id) || activePathIds.has(rep.entry.id);
@@ -102,6 +139,11 @@ function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelec
     <div>
       {/* This node row */}
       <div
+        data-branch-row
+        data-entry-id={rep.entry.id}
+        role="treeitem"
+        aria-selected={isActive}
+        tabIndex={focusedId === rep.entry.id ? 0 : -1}
         style={{
           display: "flex",
           alignItems: "center",
@@ -109,6 +151,13 @@ function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelec
           cursor: "pointer",
         }}
         onClick={() => onSelect(rep.entry.id)}
+        onFocus={() => onFocusRow(rep.entry.id)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onSelect(rep.entry.id);
+          }
+        }}
       >
         {/* Indent guide lines */}
         {parentLines.map((hasLine, i) => (
@@ -210,6 +259,8 @@ function TreeNodeView({ node, activePathIds, depth, isLast, parentLines, onSelec
           isLast={idx === rep.children.length - 1}
           parentLines={[...parentLines, !isLast]}
           onSelect={onSelect}
+          focusedId={focusedId}
+          onFocusRow={onFocusRow}
         />
       ))}
     </div>
@@ -236,6 +287,18 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
     return () => ro.disconnect();
   }, [open, inline, containerRef]);
 
+  useEffect(() => {
+    if (!open || !inline) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (onToggle) onToggle(); else setOpenInternal(false);
+      btnRef.current?.focus();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [open, inline, onToggle]);
+
   const activePathIds = useMemo(
     () => buildActivePath(tree, activeLeafId),
     [tree, activeLeafId]
@@ -255,6 +318,68 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
   const compressed = tree.length > 0 ? compress(tree[0]) : null;
   const firstNode = compressed?.node ?? null;
   const hasContent = !noBranchReason && firstNode && firstNode.children.length > 1;
+
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const handleFocusRow = useCallback((id: string) => setFocusedId(id), []);
+
+  // The rows TreeNodeView actually renders right now. As the tree grows,
+  // focusedId may reference a compress()-representative id that no longer
+  // renders (it got swallowed into a longer compressed chain) — validate
+  // against this set each render rather than resetting focusedId whenever
+  // the tree changes.
+  const { ids: visibleRowIds, repOf } = useMemo(
+    () => (firstNode ? collectVisibleRows(firstNode.children) : { ids: [], repOf: new Map<string, string>() }),
+    [firstNode]
+  );
+  const effectiveFocusedId = useMemo(() => {
+    if (focusedId) {
+      const rep = repOf.get(focusedId);
+      if (rep) return rep;
+    }
+    if (activeLeafId) {
+      // activeLeafId may itself be an id swallowed into a longer compressed
+      // chain (compress()'d away, or folded into a node's
+      // compressedEntryIds/hiddenEntryIds) rather than a rendered rep id —
+      // resolve it to the row that actually renders it.
+      const rep = repOf.get(activeLeafId);
+      if (rep) return rep;
+    }
+    // Extra-safety fallback if activeLeafId doesn't resolve at all (e.g. a
+    // stale/detached id): use the deepest visible row still on the active
+    // path, rather than jumping to the unrelated first row. visibleRowIds is
+    // produced in pre-order, so the active path's ids appear in increasing
+    // depth order — the last match is the deepest.
+    for (let i = visibleRowIds.length - 1; i >= 0; i--) {
+      if (activePathIds.has(visibleRowIds[i])) return visibleRowIds[i];
+    }
+    return visibleRowIds[0] ?? "";
+  }, [focusedId, activeLeafId, visibleRowIds, repOf, activePathIds]);
+
+  const handleTreeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp" && event.key !== "Home" && event.key !== "End") return;
+    if (!(event.target instanceof Element)) return;
+    const rows = Array.from(event.currentTarget.querySelectorAll<HTMLElement>("[data-branch-row]"));
+    if (rows.length === 0) return;
+    event.preventDefault();
+
+    if (event.key === "Home") {
+      rows[0]?.focus();
+      return;
+    }
+    if (event.key === "End") {
+      rows[rows.length - 1]?.focus();
+      return;
+    }
+
+    const row = event.target.closest<HTMLElement>("[data-branch-row]");
+    const index = row ? rows.indexOf(row) : -1;
+    // When focus isn't currently in a row, ArrowDown starts at the first row
+    // and ArrowUp wraps to the last row, rather than both landing on the first.
+    const nextIndex = index === -1
+      ? (event.key === "ArrowDown" ? 0 : rows.length - 1)
+      : Math.max(0, Math.min(rows.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+    rows[nextIndex]?.focus();
+  }, []);
 
   const branchIcon = (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: hasContent ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
@@ -276,6 +401,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
     return (
       <div style={{ height: "100%", display: "flex", alignItems: "stretch" }}>
         <button
+          type="button"
           ref={btnRef}
           onClick={() => onToggle ? onToggle() : setOpenInternal((v) => !v)}
           style={{
@@ -298,7 +424,7 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
           onMouseLeave={(e) => { e.currentTarget.style.color = open ? "var(--text)" : "var(--text-muted)"; }}
           title="Branches"
           aria-label="Branches"
-          aria-pressed={open}
+          aria-expanded={open}
         >
           {branchIcon}
           {!compact && <span>Branches</span>}
@@ -314,7 +440,12 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
             zIndex: 500,
           }}>
             {hasContent && firstNode ? (
-              <div style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}>
+              <div
+                role="tree"
+                aria-label="Branches"
+                onKeyDown={handleTreeKeyDown}
+                style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}
+              >
                 {firstNode.children.map((child, idx) => (
                   <TreeNodeView
                     key={child.entry.id}
@@ -324,6 +455,8 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
                     isLast={idx === firstNode.children.length - 1}
                     parentLines={[]}
                     onSelect={handleSelect}
+                    focusedId={effectiveFocusedId}
+                    onFocusRow={handleFocusRow}
                   />
                 ))}
               </div>
@@ -342,6 +475,8 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
     <div style={{ borderBottom: "1px solid var(--border)", background: "var(--bg)", flexShrink: 0, position: "relative" }}>
       {/* Header toggle */}
       <button
+        type="button"
+        aria-expanded={open}
         onClick={() => setOpenInternal((v) => !v)}
         style={{
           display: "flex",
@@ -375,7 +510,12 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
           zIndex: 100,
         }}>
           {hasContent && firstNode ? (
-            <div style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}>
+            <div
+              role="tree"
+              aria-label="Branches"
+              onKeyDown={handleTreeKeyDown}
+              style={{ padding: "4px 12px 8px 12px", maxHeight: 260, overflowY: "auto" }}
+            >
               {firstNode.children.map((child, idx) => (
                 <TreeNodeView
                   key={child.entry.id}
@@ -385,6 +525,8 @@ export function BranchNavigator({ tree, activeLeafId, onLeafChange, inline, cont
                   isLast={idx === firstNode.children.length - 1}
                   parentLines={[]}
                   onSelect={handleSelect}
+                  focusedId={effectiveFocusedId}
+                  onFocusRow={handleFocusRow}
                 />
               ))}
             </div>
