@@ -85,6 +85,25 @@ function parseFileRequestType(value: string): FileRequestType | null {
   return FILE_REQUEST_TYPE_SET.has(value) ? (value as FileRequestType) : null;
 }
 
+/**
+ * Resolves `target` (already checked against `allowedRoots`) through any
+ * symlinks and re-checks the real path against the real allowed roots.
+ * Returns null when the resolved path escapes every root. Throws if
+ * `target` itself cannot be resolved, like fs.realpathSync.
+ */
+function resolveAllowedRealPath(target: string, allowedRoots: Set<string>): string | null {
+  const realTarget = fs.realpathSync(target);
+  const realRoots = new Set<string>();
+  for (const root of allowedRoots) {
+    try {
+      realRoots.add(fs.realpathSync(root));
+    } catch {
+      // Ignore stale session roots that no longer exist.
+    }
+  }
+  return isFilePathAllowed(realTarget, realRoots) ? realTarget : null;
+}
+
 async function getUploadDirectory(segments: string[]): Promise<
   { directory: string } | { response: NextResponse }
 > {
@@ -106,16 +125,8 @@ async function getUploadDirectory(segments: string[]): Promise<
 
   // A browsable directory can be a symlink. Resolve both sides before writes
   // so a symlink inside an allowed root cannot redirect uploads outside it.
-  const realDirectory = fs.realpathSync(directory);
-  const realRoots = new Set<string>();
-  for (const root of allowedRoots) {
-    try {
-      realRoots.add(fs.realpathSync(root));
-    } catch {
-      // Ignore stale session roots that no longer exist.
-    }
-  }
-  if (!isFilePathAllowed(realDirectory, realRoots)) {
+  const realDirectory = resolveAllowedRealPath(directory, allowedRoots);
+  if (realDirectory === null) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
 
@@ -146,16 +157,8 @@ async function getWritableFilePath(segments: string[]): Promise<
 
   // A file can be a symlink. Resolve both sides before writing so a
   // symlink inside an allowed root cannot redirect the write outside it.
-  const realFilePath = fs.realpathSync(filePath);
-  const realRoots = new Set<string>();
-  for (const root of allowedRoots) {
-    try {
-      realRoots.add(fs.realpathSync(root));
-    } catch {
-      // Ignore stale session roots that no longer exist.
-    }
-  }
-  if (!isFilePathAllowed(realFilePath, realRoots)) {
+  const realFilePath = resolveAllowedRealPath(filePath, allowedRoots);
+  if (realFilePath === null) {
     return { response: NextResponse.json({ error: "Access denied" }, { status: 403 }) };
   }
 
@@ -200,7 +203,7 @@ export async function POST(
       }
       // A stale client could still hold a lossy U+FFFD decoding of a
       // non-UTF-8 file; saving it would destroy every non-ASCII character.
-      if (!isUtf8File(filePath)) {
+      if (!(await isUtf8File(filePath))) {
         return NextResponse.json({ error: "Only UTF-8 text files can be edited here" }, { status: 400 });
       }
 
@@ -621,17 +624,16 @@ export async function GET(
       if (isBinaryFile(filePath)) {
         return NextResponse.json({ binary: true, size: stat.size, mtimeMs: stat.mtimeMs, language: getLanguage(filePath) });
       }
-      const truncateRequested = request.nextUrl.searchParams.get("truncate") === "1";
-      if (stat.size > TEXT_PREVIEW_MAX_BYTES && !truncateRequested) {
-        return NextResponse.json({
-          error: "File too large for preview (>256KB)",
-          size: stat.size,
-          canTruncate: true,
-        }, { status: 413 });
-      }
       let bytes: Buffer;
       let truncated = false;
       if (stat.size > TEXT_PREVIEW_MAX_BYTES) {
+        if (request.nextUrl.searchParams.get("truncate") !== "1") {
+          return NextResponse.json({
+            error: "File too large for preview (>256KB)",
+            size: stat.size,
+            canTruncate: true,
+          }, { status: 413 });
+        }
         const fd = fs.openSync(filePath, "r");
         try {
           const buffer = Buffer.alloc(TEXT_PREVIEW_MAX_BYTES);

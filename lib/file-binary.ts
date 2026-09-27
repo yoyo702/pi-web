@@ -59,7 +59,23 @@ export function decodeUtf8Text(buffer: Uint8Array): { text: string; validUtf8: b
   }
 }
 
-/** True when the whole file on disk is valid UTF-8. */
-export function isUtf8File(filePath: string): boolean {
-  return decodeUtf8Text(fs.readFileSync(filePath)).validUtf8;
+/** True when the whole file on disk is valid UTF-8. Streams the file through
+ * a fatal decoder so the whole file is never held in memory. Read errors
+ * reject, like fs.readFile. */
+export async function isUtf8File(filePath: string): Promise<boolean> {
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const stream = fs.createReadStream(filePath);
+  try {
+    for await (const chunk of stream) {
+      decoder.decode(chunk as Buffer, { stream: true });
+    }
+    // Flush: a multi-byte sequence left incomplete at EOF is invalid too.
+    decoder.decode();
+    return true;
+  } catch (error) {
+    if (error instanceof TypeError) return false;
+    throw error;
+  } finally {
+    stream.destroy();
+  }
 }
