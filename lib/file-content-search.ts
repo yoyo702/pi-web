@@ -3,6 +3,7 @@ import path from "path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { isBinaryFile } from "./file-binary";
+import { DEFAULT_IGNORED_NAMES } from "./file-ignore";
 
 const execFileAsync = promisify(execFile);
 
@@ -90,12 +91,6 @@ export async function searchContentWithGit(cwd: string, query: string, signal?: 
   }
 }
 
-const IGNORED_DIR_NAMES = new Set([
-  "node_modules", ".git", ".next", "dist", "build", "__pycache__",
-  ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor",
-]);
-
 /** Fallback for directories that are not inside a Git repository (or when
  * git is missing): `git grep` can't run there, so this walks the tree
  * breadth-first instead. It does not honour `.gitignore` (there is none to
@@ -121,7 +116,7 @@ export function searchContentWithWalk(cwd: string, query: string, limit = CONTEN
       if (dirent.name.startsWith("._")) continue;
       const childRel = rel ? `${rel}/${dirent.name}` : dirent.name;
       if (dirent.isDirectory()) {
-        if (!IGNORED_DIR_NAMES.has(dirent.name)) queue.push(childRel);
+        if (!DEFAULT_IGNORED_NAMES.has(dirent.name)) queue.push(childRel);
         continue;
       }
       if (!dirent.isFile() || matches.length >= limit || filesScanned >= WALK_HARD_CAP_FILES) continue;

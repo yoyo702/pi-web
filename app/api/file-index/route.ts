@@ -12,21 +12,14 @@ import {
 import { buildEntriesFromFiles, filterFileEntries, type FileIndexEntry } from "@/lib/file-fuzzy";
 import { searchFileContent } from "@/lib/file-content-search";
 import { errorResponse } from "@/lib/http-error";
+import { isDefaultIgnoredName } from "@/lib/file-ignore";
 
 const execFileAsync = promisify(execFile);
 
-// Same default filter as /api/files — only used for the non-git readdir
-// fallback. The Explorer can explicitly include these names when its
-// visibility toggle is enabled. `.git` and `node_modules` remain excluded from
-// recursive indexing to keep that opt-in search bounded.
-const IGNORED_NAMES = new Set([
-  "node_modules", ".git", ".next", "dist", "build", "__pycache__",
-  ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor", ".DS_Store",
-]);
-
-const IGNORED_SUFFIXES = [".pyc"];
-
+// The shared default ignore filter (lib/file-ignore) is only used for the
+// non-git readdir fallback. The Explorer can explicitly include these names
+// when its visibility toggle is enabled. `.git` and `node_modules` remain
+// excluded from recursive indexing to keep that opt-in search bounded.
 /** Cap on the plain (no-query) response used as the client-side index */
 const MAX_FILES = 5000;
 /** Hard caps on the full in-memory listing that ?q= searches against */
@@ -100,7 +93,7 @@ function listWithWalk(cwd: string, includeIgnored = false): FileListing {
     for (const d of dirents) {
       if (d.name.startsWith("._")) continue;
       const alwaysIgnored = d.name === ".git" || d.name === "node_modules";
-      const defaultIgnored = IGNORED_NAMES.has(d.name) || IGNORED_SUFFIXES.some((s) => d.name.endsWith(s));
+      const defaultIgnored = isDefaultIgnoredName(d.name);
       if (alwaysIgnored || (!includeIgnored && defaultIgnored)) continue;
       const childRel = rel ? `${rel}/${d.name}` : d.name;
       if (d.isDirectory()) {

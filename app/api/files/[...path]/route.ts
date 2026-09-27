@@ -27,18 +27,8 @@ import {
 } from "@/lib/file-upload";
 import { parseFormDataWithinLimit, parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { errorResponse } from "@/lib/http-error";
+import { isDefaultIgnoredName } from "@/lib/file-ignore";
 import { decodeUtf8Text, isBinaryFile, isUtf8File, truncateToUtf8Boundary } from "@/lib/file-binary";
-
-// These are hidden from directory listings by default because they are usually
-// generated or dependency-heavy. `hideHidden=1` controls this whole default
-// filter so the Explorer's visibility toggle can reveal them when requested.
-const DEFAULT_HIDDEN_NAMES = new Set([
-  "node_modules", ".git", ".next", "dist", "build", "__pycache__",
-  ".turbo", ".cache", "coverage", ".pytest_cache", ".mypy_cache",
-  "target", "vendor", ".DS_Store",
-]);
-
-const DEFAULT_HIDDEN_SUFFIXES = [".pyc"];
 
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
@@ -809,8 +799,8 @@ export async function GET(
       .filter((d) => !d.name.startsWith("._") && (
         !hideHidden || (
           !d.name.startsWith(".")
-          && !DEFAULT_HIDDEN_NAMES.has(d.name)
-          && !DEFAULT_HIDDEN_SUFFIXES.some((suffix) => d.name.endsWith(suffix))
+          // Generated/dependency names (lib/file-ignore) share this toggle.
+          && !isDefaultIgnoredName(d.name)
         )
       ))
       .flatMap((d) => {
